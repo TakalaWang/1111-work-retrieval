@@ -125,6 +125,7 @@ export class PlatformStack extends Stack {
       serverlessV2MinCapacity: 0,
       storageEncrypted: true,
       removalPolicy: RemovalPolicy.RETAIN,
+      s3ImportBuckets: [runtimeBucket],
       securityGroups: [databaseSecurityGroup],
       vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED }
@@ -378,6 +379,9 @@ export class PlatformStack extends Stack {
       value: repository.repositoryUri
     });
     new CfnOutput(this, 'DatabaseClusterArn', { value: cluster.clusterArn });
+    new CfnOutput(this, 'DatabaseSecretArn', {
+      value: cluster.secret!.secretArn
+    });
     new CfnOutput(this, 'DistributionDomainName', {
       value: distribution.domainName
     });

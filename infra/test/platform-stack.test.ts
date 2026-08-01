@@ -70,10 +70,19 @@ describe('platform stack', () => {
       },
       StorageEncrypted: true
     });
+    template.hasResourceProperties('AWS::RDS::DBCluster', {
+      AssociatedRoles: Match.arrayWith([
+        Match.objectLike({ FeatureName: 's3Import' })
+      ])
+    });
     template.hasResourceProperties('AWS::RDS::DBInstance', {
       DBInstanceClass: 'db.serverless',
       PubliclyAccessible: false
     });
+    template.hasOutput('DatabaseSecretArn', { Value: Match.anyValue() });
+    const policies = JSON.stringify(template.findResources('AWS::IAM::Policy'));
+    expect(policies).toContain('s3:GetObject*');
+    expect(policies).toContain('s3:List*');
   });
 
   test('routes API traffic through CloudFront and restricts the ALB source', () => {
