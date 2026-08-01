@@ -8,6 +8,7 @@ import {
   Fn,
   RemovalPolicy,
   Stack,
+  Token,
   type StackProps
 } from 'aws-cdk-lib';
 import * as autoscaling from 'aws-cdk-lib/aws-autoscaling';
@@ -71,26 +72,36 @@ export class PlatformStack extends Stack {
           'SHA-256 identifying runtime artifacts under runtime/<sha256>/.'
       }
     );
-    const cpuServiceDesiredCount = new CfnParameter(
-      this,
-      'CpuServiceDesiredCount',
-      {
-        type: 'Number',
-        default: 0,
-        minValue: 0
-      }
+    const computeProfile = new CfnParameter(this, 'ComputeProfile', {
+      type: 'String',
+      default: 'cpu-incumbent',
+      allowedValues: ['cpu-incumbent', 'gpu-shadow'],
+      description:
+        'Explicit serving compute profile; cpu-incumbent is the promoted BM25 hot path.'
+    });
+    const cpuIncumbentProfile = new CfnCondition(this, 'CpuIncumbentProfile', {
+      expression: Fn.conditionEquals(
+        computeProfile.valueAsString,
+        'cpu-incumbent'
+      )
+    });
+    const cpuServiceDesiredCount = Token.asNumber(
+      Fn.conditionIf(cpuIncumbentProfile.logicalId, 1, 0)
+    );
+    const gpuMinCapacity = Token.asNumber(
+      Fn.conditionIf(cpuIncumbentProfile.logicalId, '0', '1')
+    );
+    const gpuMaxCapacity = Token.asNumber(
+      Fn.conditionIf(cpuIncumbentProfile.logicalId, '0', '2')
+    );
+    const gpuServiceDesiredCount = Token.asNumber(
+      Fn.conditionIf(cpuIncumbentProfile.logicalId, 0, 1)
     );
     const gpuInstanceType = new CfnParameter(this, 'GpuInstanceType', {
       type: 'String',
       allowedPattern: '^[a-z0-9.]+$',
       description: 'EC2 GPU instance type, for example g5.xlarge.'
     });
-    const gpuMinCapacity = capacityParameter(this, 'GpuMinCapacity');
-    const gpuMaxCapacity = capacityParameter(this, 'GpuMaxCapacity', 2);
-    const gpuServiceDesiredCount = capacityParameter(
-      this,
-      'GpuServiceDesiredCount'
-    );
     const alarmEmail = new CfnParameter(this, 'AlarmEmail', {
       type: 'String',
       default: '',
@@ -173,8 +184,8 @@ export class PlatformStack extends Stack {
         machineImage: ecs.EcsOptimizedImage.amazonLinux2023(
           ecs.AmiHardwareType.GPU
         ),
-        minCapacity: gpuMinCapacity.valueAsNumber,
-        maxCapacity: gpuMaxCapacity.valueAsNumber
+        minCapacity: gpuMinCapacity,
+        maxCapacity: gpuMaxCapacity
       }
     );
     const capacityProvider = new ecs.AsgCapacityProvider(
@@ -218,8 +229,8 @@ export class PlatformStack extends Stack {
       this,
       'CpuApiTaskDefinition',
       {
-        cpu: 512,
-        memoryLimitMiB: 1024,
+        cpu: 2048,
+        memoryLimitMiB: 16384,
         runtimePlatform: {
           cpuArchitecture: ecs.CpuArchitecture.X86_64,
           operatingSystemFamily: ecs.OperatingSystemFamily.LINUX
@@ -244,7 +255,8 @@ export class PlatformStack extends Stack {
       assignPublicIp: false,
       circuitBreaker: { rollback: true },
       cluster: ecsCluster,
-      desiredCount: cpuServiceDesiredCount.valueAsNumber,
+      desiredCount: cpuServiceDesiredCount,
+      healthCheckGracePeriod: Duration.minutes(10),
       minHealthyPercent: 100,
       securityGroups: [ecsSecurityGroup],
       taskDefinition: cpuTaskDefinition,
@@ -280,7 +292,7 @@ export class PlatformStack extends Stack {
     const gpuService = new ecs.Ec2Service(this, 'GpuApiService', {
       circuitBreaker: { rollback: true },
       cluster: ecsCluster,
-      desiredCount: gpuServiceDesiredCount.valueAsNumber,
+      desiredCount: gpuServiceDesiredCount,
       healthCheckGracePeriod: Duration.minutes(10),
       minHealthyPercent: 100,
       securityGroups: [ecsSecurityGroup],
@@ -344,7 +356,7 @@ export class PlatformStack extends Stack {
       priority: 1,
       port: 8000,
       protocol: elbv2.ApplicationProtocol.HTTP,
-      targets: [gpuService],
+      targets: [cpuService, gpuService],
       healthCheck: { path: '/readyz' }
     });
 
@@ -608,18 +620,6 @@ export class PlatformStack extends Stack {
     new CfnOutput(this, 'GitHubDeployRoleArn', { value: githubRole.roleArn });
     new CfnOutput(this, 'WebBucketName', { value: webBucket.bucketName });
   }
-}
-
-function capacityParameter(
-  stack: Stack,
-  id: string,
-  defaultValue = 1
-): CfnParameter {
-  return new CfnParameter(stack, id, {
-    type: 'Number',
-    default: defaultValue,
-    minValue: 1
-  });
 }
 
 function grantApiRuntimeAccess(

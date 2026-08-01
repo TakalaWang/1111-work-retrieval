@@ -88,6 +88,8 @@ fails closed; runtime never silently falls back to unapproved correction rules.
 ```bash
 uv run python scripts/tantivy_index_pipeline.py build \
   --jobs-csv /data/jobs.csv \
+  --location-taxonomy-csv /data/城市對照表.csv \
+  --duty-taxonomy-csv /data/職務對照表.csv \
   --output artifacts/incumbents/tantivy/<dataset-sha256>
 
 uv run python scripts/tantivy_index_pipeline.py validate \

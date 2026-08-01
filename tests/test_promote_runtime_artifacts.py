@@ -1462,6 +1462,22 @@ def test_aws_cli_retries_only_transient_network_errors(monkeypatch: pytest.Monke
 def test_deploy_downloads_and_validates_v2_manifest_body() -> None:
     workflow = (ROOT / ".github/workflows/deploy.yml").read_text(encoding="utf-8")
 
+    assert "compute_profile:" in workflow
+    assert "default: cpu-incumbent" in workflow
+    assert "options:" in workflow
+    assert "- cpu-incumbent" in workflow
+    assert "- gpu-shadow" in workflow
+    assert (
+        '[[ "$COMPUTE_PROFILE" == "cpu-incumbent" || '
+        '"$COMPUTE_PROFILE" == "gpu-shadow" ]]' in workflow
+    )
+    for legacy_input in (
+        "cpu_desired_count",
+        "gpu_min_capacity",
+        "gpu_max_capacity",
+        "gpu_desired_count",
+    ):
+        assert legacy_input not in workflow
     assert "s3api get-object" in workflow
     assert "validate_runtime_manifest_file.py" in workflow
     smoke_step = workflow.split("- name: Smoke test the public application", 1)[1]
@@ -1490,6 +1506,14 @@ def test_bootstrap_stages_source_and_deploys_promoted_runtime_sha() -> None:
         in workflow
     )
     assert "deployment_id=$(uv run python -c 'import uuid; print(uuid.uuid4())')" in bootstrap
+    assert "-f compute_profile=cpu-incumbent" in bootstrap
+    for legacy_input in (
+        "cpu_desired_count",
+        "gpu_min_capacity",
+        "gpu_max_capacity",
+        "gpu_desired_count",
+    ):
+        assert legacy_input not in bootstrap
 
 
 def test_downloaded_manifest_validator_checks_exact_body_and_v2_schema(

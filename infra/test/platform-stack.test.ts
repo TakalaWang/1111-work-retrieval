@@ -27,7 +27,7 @@ const template = Template.fromStack(
 const synthesized = template.toJSON();
 
 describe('platform stack', () => {
-  test('requires immutable deployment inputs and defaults to one GPU host', () => {
+  test('requires immutable inputs and derives mutually exclusive compute capacity', () => {
     template.hasParameter('ApiImageUri', {
       Type: 'String',
       AllowedPattern:
@@ -37,23 +37,23 @@ describe('platform stack', () => {
       Type: 'String',
       AllowedPattern: '^[a-f0-9]{64}$'
     });
-    template.hasParameter('CpuServiceDesiredCount', {
-      Type: 'Number',
-      Default: 0,
-      MinValue: 0
+    template.hasParameter('ComputeProfile', {
+      Type: 'String',
+      Default: 'cpu-incumbent',
+      AllowedValues: ['cpu-incumbent', 'gpu-shadow']
     });
     template.hasParameter('GpuInstanceType', { Type: 'String' });
-    for (const id of ['GpuMinCapacity', 'GpuServiceDesiredCount']) {
-      template.hasParameter(id, { Type: 'Number', Default: 1, MinValue: 1 });
+    for (const id of [
+      'CpuServiceDesiredCount',
+      'GpuMinCapacity',
+      'GpuMaxCapacity',
+      'GpuServiceDesiredCount'
+    ]) {
+      expect(synthesized.Parameters).not.toHaveProperty(id);
     }
-    template.hasParameter('GpuMaxCapacity', {
-      Type: 'Number',
-      Default: 2,
-      MinValue: 1
-    });
     template.hasResourceProperties('AWS::AutoScaling::AutoScalingGroup', {
-      MinSize: { Ref: 'GpuMinCapacity' },
-      MaxSize: { Ref: 'GpuMaxCapacity' },
+      MinSize: { 'Fn::If': ['CpuIncumbentProfile', '0', '1'] },
+      MaxSize: { 'Fn::If': ['CpuIncumbentProfile', '0', '2'] },
       DesiredCapacity: Match.absent()
     });
     template.hasResourceProperties('AWS::EC2::LaunchTemplate', {
@@ -76,7 +76,7 @@ describe('platform stack', () => {
     );
   });
 
-  test('routes the production ALB only to the GPU service', () => {
+  test('routes the production ALB to only the explicitly active compute profile', () => {
     template.resourceCountIs('AWS::ECS::Service', 2);
     template.resourceCountIs('AWS::ECS::TaskDefinition', 2);
     const taskDefinitionsById = template.findResources(
@@ -93,13 +93,15 @@ describe('platform stack', () => {
       ])
     );
     template.hasResourceProperties('AWS::ECS::Service', {
-      DesiredCount: { Ref: 'CpuServiceDesiredCount' },
-      HealthCheckGracePeriodSeconds: Match.absent(),
+      DesiredCount: { 'Fn::If': ['CpuIncumbentProfile', 1, 0] },
+      HealthCheckGracePeriodSeconds: 600,
       LaunchType: 'FARGATE',
-      LoadBalancers: Match.absent()
+      LoadBalancers: [
+        Match.objectLike({ ContainerName: 'Api', ContainerPort: 8000 })
+      ]
     });
     template.hasResourceProperties('AWS::ECS::Service', {
-      DesiredCount: { Ref: 'GpuServiceDesiredCount' },
+      DesiredCount: { 'Fn::If': ['CpuIncumbentProfile', 0, 1] },
       HealthCheckGracePeriodSeconds: 600,
       LaunchType: 'EC2',
       LoadBalancers: [
@@ -116,6 +118,15 @@ describe('platform stack', () => {
     const taskDefinitions = Object.values(
       template.findResources('AWS::ECS::TaskDefinition')
     );
+    template.hasResourceProperties('AWS::ECS::TaskDefinition', {
+      Cpu: '2048',
+      Memory: '16384',
+      RequiresCompatibilities: ['FARGATE'],
+      RuntimePlatform: {
+        CpuArchitecture: 'X86_64',
+        OperatingSystemFamily: 'LINUX'
+      }
+    });
     const containers = taskDefinitions.map(
       (resource) => resource.Properties.ContainerDefinitions[0]
     );
@@ -220,6 +231,9 @@ describe('platform stack', () => {
     expect(synthesized.Conditions).toEqual({
       AlarmEmailConfigured: {
         'Fn::Not': [{ 'Fn::Equals': [{ Ref: 'AlarmEmail' }, ''] }]
+      },
+      CpuIncumbentProfile: {
+        'Fn::Equals': [{ Ref: 'ComputeProfile' }, 'cpu-incumbent']
       }
     });
     expect(

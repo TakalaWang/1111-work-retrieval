@@ -103,11 +103,8 @@ gh workflow run deploy.yml \
   -f artifact_manifest_sha="$runtime_sha" \
   -f alarm_email="$alarm_email" \
   -f deployment_id="$deployment_id" \
-  -f cpu_desired_count=0 \
-  -f gpu_instance_type=g5.xlarge \
-  -f gpu_min_capacity=1 \
-  -f gpu_max_capacity=2 \
-  -f gpu_desired_count=1
+  -f compute_profile=cpu-incumbent \
+  -f gpu_instance_type=g5.xlarge
 
 run_id=''
 for _ in {1..30}; do

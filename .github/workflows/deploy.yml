@@ -21,31 +21,19 @@ on:
         description: Unique UUID used to correlate this exact deployment request
         required: true
         type: string
+      compute_profile:
+        description: Explicit production compute profile
+        required: true
+        default: cpu-incumbent
+        type: choice
+        options:
+          - cpu-incumbent
+          - gpu-shadow
       gpu_instance_type:
-        description: EC2 GPU instance type for the production API service
+        description: EC2 instance type used only by the gpu-shadow profile
         required: true
         default: g5.xlarge
         type: string
-      cpu_desired_count:
-        description: CPU Fargate desired count; production must remain GPU-only
-        required: true
-        default: 0
-        type: number
-      gpu_min_capacity:
-        description: GPU Auto Scaling group minimum capacity
-        required: true
-        default: 1
-        type: number
-      gpu_max_capacity:
-        description: GPU Auto Scaling group maximum capacity
-        required: true
-        default: 2
-        type: number
-      gpu_desired_count:
-        description: GPU ECS service desired count
-        required: true
-        default: 1
-        type: number
 
 permissions:
   contents: read
@@ -71,13 +59,10 @@ jobs:
           ARTIFACT_MANIFEST_SHA: ${{ inputs.artifact_manifest_sha }}
           ALARM_EMAIL: ${{ inputs.alarm_email }}
           AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-          CPU_DESIRED_COUNT: ${{ inputs.cpu_desired_count }}
+          COMPUTE_PROFILE: ${{ inputs.compute_profile }}
           DEPLOY_ENABLED: ${{ vars.DEPLOY_ENABLED }}
           DEPLOYMENT_ID: ${{ inputs.deployment_id }}
-          GPU_DESIRED_COUNT: ${{ inputs.gpu_desired_count }}
           GPU_INSTANCE_TYPE: ${{ inputs.gpu_instance_type }}
-          GPU_MAX_CAPACITY: ${{ inputs.gpu_max_capacity }}
-          GPU_MIN_CAPACITY: ${{ inputs.gpu_min_capacity }}
         run: |
           set -euo pipefail
           [[ "$AWS_DEPLOY_ROLE_ARN" =~ ^arn:aws:iam::378849533305:role/[A-Za-z0-9+=,.@_/-]+$ ]]
@@ -85,18 +70,8 @@ jobs:
           [[ "$ARTIFACT_MANIFEST_SHA" =~ ^[0-9a-f]{64}$ ]]
           [[ "$DEPLOYMENT_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]
           [[ -z "$ALARM_EMAIL" || "$ALARM_EMAIL" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]
+          [[ "$COMPUTE_PROFILE" == "cpu-incumbent" || "$COMPUTE_PROFILE" == "gpu-shadow" ]]
           [[ "$GPU_INSTANCE_TYPE" =~ ^[a-z0-9][a-z0-9.-]*$ ]]
-          [[ "$CPU_DESIRED_COUNT" =~ ^[0-9]+$ ]]
-          [[ "$GPU_MIN_CAPACITY" =~ ^[0-9]+$ ]]
-          [[ "$GPU_MAX_CAPACITY" =~ ^[0-9]+$ ]]
-          [[ "$GPU_DESIRED_COUNT" =~ ^[0-9]+$ ]]
-          (( CPU_DESIRED_COUNT == 0 ))
-          (( GPU_MIN_CAPACITY >= 1 ))
-          (( GPU_MAX_CAPACITY >= 1 ))
-          (( GPU_DESIRED_COUNT >= 1 ))
-          (( GPU_MIN_CAPACITY <= GPU_DESIRED_COUNT ))
-          (( GPU_DESIRED_COUNT <= GPU_MAX_CAPACITY ))
-          (( GPU_MAX_CAPACITY >= GPU_DESIRED_COUNT + 1 ))
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
@@ -221,11 +196,8 @@ jobs:
         env:
           ALARM_EMAIL: ${{ inputs.alarm_email }}
           ARTIFACT_MANIFEST_SHA: ${{ inputs.artifact_manifest_sha }}
-          CPU_DESIRED_COUNT: ${{ inputs.cpu_desired_count }}
-          GPU_DESIRED_COUNT: ${{ inputs.gpu_desired_count }}
+          COMPUTE_PROFILE: ${{ inputs.compute_profile }}
           GPU_INSTANCE_TYPE: ${{ inputs.gpu_instance_type }}
-          GPU_MAX_CAPACITY: ${{ inputs.gpu_max_capacity }}
-          GPU_MIN_CAPACITY: ${{ inputs.gpu_min_capacity }}
         run: |
           set -euo pipefail
           [[ "$API_IMAGE_URI" =~ ^378849533305\.dkr\.ecr\.us-west-2\.amazonaws\.com/.+@sha256:[0-9a-f]{64}$ ]]
@@ -235,11 +207,8 @@ jobs:
             --parameters "WorkRetrievalPlatform:ApiImageUri=$API_IMAGE_URI" \
             --parameters "WorkRetrievalPlatform:AlarmEmail=$ALARM_EMAIL" \
             --parameters "WorkRetrievalPlatform:ArtifactManifestSha256=$ARTIFACT_MANIFEST_SHA" \
-            --parameters "WorkRetrievalPlatform:CpuServiceDesiredCount=$CPU_DESIRED_COUNT" \
-            --parameters "WorkRetrievalPlatform:GpuInstanceType=$GPU_INSTANCE_TYPE" \
-            --parameters "WorkRetrievalPlatform:GpuMinCapacity=$GPU_MIN_CAPACITY" \
-            --parameters "WorkRetrievalPlatform:GpuMaxCapacity=$GPU_MAX_CAPACITY" \
-            --parameters "WorkRetrievalPlatform:GpuServiceDesiredCount=$GPU_DESIRED_COUNT"
+            --parameters "WorkRetrievalPlatform:ComputeProfile=$COMPUTE_PROFILE" \
+            --parameters "WorkRetrievalPlatform:GpuInstanceType=$GPU_INSTANCE_TYPE"
 
       - name: Publish the static web application
         run: |

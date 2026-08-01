@@ -141,11 +141,13 @@ Repository、container image 與 Git 都不包含 1.2M 職缺、9.3 GiB embeddin
 
 ## Deployment topology
 
-Source-defined production topology is CloudFront → ALB → GPU EC2 ECS service. CPU Fargate remains defined with
-desired count `0` and is not an ALB target. GPU defaults are ASG min/service `1`、max `2`，讓 `minHealthyPercent=100`
-的 rolling update 有一台 surge host；root volume 為 encrypted 100 GiB gp3，container memory reservation 為
-12 GiB。SageMaker remains the optional shadow query encoder; local GPU use or ANN is not inferred merely from GPU
-placement.
+Source-defined production topology is CloudFront → ALB → one explicitly selected compute profile. The default
+`cpu-incumbent` profile runs one 2 vCPU／16 GiB Fargate task for the promoted temporal BM25 hot path and fixes the GPU
+ASG/service at `0/0/0`. The opt-in `gpu-shadow` profile fixes CPU desired count at `0`、GPU ASG min/max at `1/2` and
+GPU service desired count at `1`; callers cannot compose mixed capacities. Both services are registered with the same
+target group, but only the selected profile has non-zero desired capacity. GPU root volume is encrypted 100 GiB gp3
+and its container memory reservation is 12 GiB. SageMaker remains an optional shadow query encoder; Dense、Graph、
+LTR and reranker stay disabled in the incumbent profile, and no compute failure silently changes profiles.
 
 Deployment workflow verifies the downloaded manifest body SHA and essential v2 policy before building the image.
 Runtime performs the stronger per-object verification again. This duplicates a security boundary intentionally: CI
@@ -183,4 +185,5 @@ otherwise graph stays off while its experiment remains reproducible.
   取不到 lock 即失敗，不共享或互相刪除 `jobs_import` staging table。
 - ALB 只接受 CloudFront origin-facing prefix list，並驗證 generated origin header。
 - Deployment 使用 GitHub OIDC 與 protected environment，不保存 long-lived AWS credentials。
-- GPU desired capacity 預設 `0`；只有 image digest 與 runtime manifest 都批准後才能啟用。
+- Compute profile 必須顯式選擇且互斥；預設 `cpu-incumbent`。只有 image digest、runtime manifest 與
+  `gpu-shadow` profile 都明確批准後，GPU capacity 才能啟用。

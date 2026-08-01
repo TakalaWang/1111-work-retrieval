@@ -299,12 +299,15 @@ environment 執行。它同時要求：
 - confirmation input 必須精確等於 `DEPLOY`
 - 64-character lowercase artifact manifest SHA-256
 - alarm email 可省略；若有填寫，收件者必須完成 AWS SNS subscription confirmation
-- CPU desired count 必須為 `0`
-- GPU min／max／desired 必須至少為 `1`，且 `min <= desired <= max`
+- `compute_profile` 必須精確為 `cpu-incumbent` 或 `gpu-shadow`；預設 `cpu-incumbent`
+- `cpu-incumbent` 固定啟動一個 2 vCPU／16 GiB Fargate task，GPU ASG/service 固定為 `0/0/0`
+- `gpu-shadow` 固定 CPU desired `0`、GPU ASG min/max `1/2`、GPU service desired `1`；不允許 caller
+  自行拼出混合 profile
 
 流程依序執行 frozen installs、static web build、OIDC authentication、DataStack deploy、runtime manifest
 驗證、`linux/amd64` API image build／push、ECR scan、digest-pinned PlatformStack deploy、web sync、等待
-CloudFront invalidation，最後才執行 public health、web 與 search smoke；public readiness 回傳的
+CloudFront invalidation，最後才執行 public health、web 與 search smoke；`cpu-incumbent` 是已 promotion 的
+temporal BM25 hot path，Dense、Graph、LTR 與 reranker 均維持關閉；public readiness 回傳的
 `artifact_manifest_sha256` 必須精確等於本次 workflow input，舊 runtime 健康不能通過 deployment gate。
 
 Workflow 自行 build image，不接受 caller-supplied image URI；CDK 只接收 ECR digest URI。任何 push 或
