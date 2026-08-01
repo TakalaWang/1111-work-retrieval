@@ -335,16 +335,12 @@ def materialize(
     whole_source_inventory: Path,
     tantivy_build_root: Path,
     output_root: Path,
-    source_manifest_key: str,
     approved_tantivy_component_sha256: str,
     approved_tantivy_build_sha256: str,
     approved_tantivy_index_sha256: str,
 ) -> None:
     if output_root.exists():
         raise RuntimeError("materialization output already exists")
-    if not source_manifest_key.endswith("/manifest.json"):
-        raise RuntimeError("source manifest key must end with /manifest.json")
-    contract._validate_source_path(source_manifest_key)
     _source_inventory(whole_source_inventory, whole_build_root)
     output_root.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{output_root.name}.", dir=output_root.parent))
@@ -692,6 +688,8 @@ def materialize(
             "files": _artifact_inventory(temporary, {source_manifest_path, release_spec_path}),
         }
         source_payload = _write_json(temporary / source_manifest_path, source_manifest)
+        source_manifest_sha256 = hashlib.sha256(source_payload).hexdigest()
+        source_manifest_key = f"one111-search/materialized/{source_manifest_sha256}/manifest.json"
         selections = [
             {
                 "source_prefix": f"{WHOLE_DESTINATION.as_posix()}/",
@@ -724,7 +722,7 @@ def materialize(
             "schema_version": 1,
             "source_manifest": {
                 "key": source_manifest_key,
-                "sha256": hashlib.sha256(source_payload).hexdigest(),
+                "sha256": source_manifest_sha256,
             },
             "selected_inventory_sha256": contract._canonical_sha256(selected),
             "selections": selections,
@@ -789,7 +787,6 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--whole-source-inventory", type=Path, required=True)
     parser.add_argument("--tantivy-build-root", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
-    parser.add_argument("--source-manifest-key", required=True)
     parser.add_argument("--approved-tantivy-component-sha256", required=True)
     parser.add_argument("--approved-tantivy-build-sha256", required=True)
     parser.add_argument("--approved-tantivy-index-sha256", required=True)
@@ -803,7 +800,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         whole_source_inventory=args.whole_source_inventory,
         tantivy_build_root=args.tantivy_build_root,
         output_root=args.output_root,
-        source_manifest_key=args.source_manifest_key,
         approved_tantivy_component_sha256=args.approved_tantivy_component_sha256,
         approved_tantivy_build_sha256=args.approved_tantivy_build_sha256,
         approved_tantivy_index_sha256=args.approved_tantivy_index_sha256,

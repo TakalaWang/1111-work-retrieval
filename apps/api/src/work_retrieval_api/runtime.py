@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
 import os
 from collections.abc import Callable, Mapping
@@ -36,13 +37,26 @@ class JobDetailLookup(Protocol):
 
 @runtime_checkable
 class RetrievalRuntime(SearchEngine, Protocol):
+    @property
+    def artifact_manifest_sha256(self) -> str: ...
+
     def job_details(self, job_id: str) -> dict[str, str | None] | None: ...
 
 
 class ProductionRuntime:
-    def __init__(self, engine: ProductionSearchEngine, details: JobDetailLookup) -> None:
+    def __init__(
+        self,
+        engine: ProductionSearchEngine,
+        details: JobDetailLookup,
+        artifact_manifest_sha256: str,
+    ) -> None:
         self._engine = engine
         self._details = details
+        self._artifact_manifest_sha256 = artifact_manifest_sha256
+
+    @property
+    def artifact_manifest_sha256(self) -> str:
+        return self._artifact_manifest_sha256
 
     def search(self, query: SearchQuery, *, limit: int) -> SearchResult:
         return self._engine.search(query, limit=limit)
@@ -79,6 +93,7 @@ def runtime_from_environment(
         )
         artifacts.materialize_manifest(Path(manifest_path))
     manifest = RuntimeManifest.from_path(manifest_path)
+    artifact_manifest_sha256 = hashlib.sha256(Path(manifest_path).read_bytes()).hexdigest()
     enable_dense_shadow = _boolean(
         values.get(DENSE_SHADOW_ENABLED_ENV, "false"),
         name=DENSE_SHADOW_ENABLED_ENV,
@@ -122,7 +137,7 @@ def runtime_from_environment(
         multiview_artifact_key=multiview_artifact,
         clock=clock,
     )
-    return ProductionRuntime(engine, ports.metadata)
+    return ProductionRuntime(engine, ports.metadata, artifact_manifest_sha256)
 
 
 def _load_port_factory(spec: str) -> PortFactory:

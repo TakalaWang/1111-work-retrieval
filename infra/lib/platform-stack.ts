@@ -1,9 +1,11 @@
 import {
   Aws,
+  CfnCondition,
   CfnOutput,
   CfnParameter,
   DefaultStackSynthesizer,
   Duration,
+  Fn,
   RemovalPolicy,
   Stack,
   type StackProps
@@ -12,6 +14,7 @@ import * as autoscaling from 'aws-cdk-lib/aws-autoscaling';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as cloudwatchActions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
@@ -21,6 +24,7 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as rds from 'aws-cdk-lib/aws-rds';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import * as sns from 'aws-cdk-lib/aws-sns';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import type { Construct } from 'constructs';
@@ -87,6 +91,13 @@ export class PlatformStack extends Stack {
       this,
       'GpuServiceDesiredCount'
     );
+    const alarmEmail = new CfnParameter(this, 'AlarmEmail', {
+      type: 'String',
+      default: '',
+      allowedPattern: '^$|^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$',
+      description:
+        'Optional email for operational alarms; AWS requires subscription confirmation.'
+    });
     for (const [name, service] of [
       ['EcrApiEndpoint', ec2.InterfaceVpcEndpointAwsService.ECR],
       ['EcrDockerEndpoint', ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER],
@@ -414,6 +425,29 @@ export class PlatformStack extends Stack {
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING
       }
     );
+    const alarmTopic = new sns.Topic(this, 'OperationalAlarmTopic');
+    const alarmEmailConfigured = new CfnCondition(
+      this,
+      'AlarmEmailConfigured',
+      {
+        expression: Fn.conditionNot(
+          Fn.conditionEquals(alarmEmail.valueAsString, '')
+        )
+      }
+    );
+    const emailSubscription = new sns.CfnSubscription(
+      this,
+      'OperationalAlarmEmailSubscription',
+      {
+        endpoint: alarmEmail.valueAsString,
+        protocol: 'email',
+        topicArn: alarmTopic.topicArn
+      }
+    );
+    emailSubscription.cfnOptions.condition = alarmEmailConfigured;
+    const alarmAction = new cloudwatchActions.SnsAction(alarmTopic);
+    target5xxAlarm.addAlarmAction(alarmAction);
+    unhealthyHostAlarm.addAlarmAction(alarmAction);
 
     const apiOrigin = new origins.LoadBalancerV2Origin(loadBalancer, {
       customHeaders: {
@@ -570,6 +604,9 @@ export class PlatformStack extends Stack {
     });
     new CfnOutput(this, 'UnhealthyHostAlarmName', {
       value: unhealthyHostAlarm.alarmName
+    });
+    new CfnOutput(this, 'OperationalAlarmTopicArn', {
+      value: alarmTopic.topicArn
     });
     new CfnOutput(this, 'GitHubDeployRoleArn', { value: githubRole.roleArn });
     new CfnOutput(this, 'WebBucketName', { value: webBucket.bucketName });

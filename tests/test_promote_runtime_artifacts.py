@@ -1235,6 +1235,88 @@ def test_publish_orders_manifest_after_verified_objects(monkeypatch: pytest.Monk
     assert order == ["objects", "data-audit", "manifest", "audit"]
 
 
+def test_stage_source_uploads_content_addressed_manifest_last(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "source"
+    root.mkdir()
+    payload = b"artifact\n"
+    (root / "artifact.bin").write_bytes(payload)
+    source = {
+        "schema_version": 3,
+        "files": [
+            {
+                "path": "artifact.bin",
+                "sha256": digest(payload),
+                "size": len(payload),
+            }
+        ],
+    }
+    manifest = encoded(source)
+    manifest_path = root / "manifest.json"
+    manifest_path.write_bytes(manifest)
+    manifest_sha = digest(manifest)
+    spec = {
+        "source_manifest": {
+            "key": f"one111-search/materialized/{manifest_sha}/manifest.json",
+            "sha256": manifest_sha,
+        }
+    }
+    order: list[str] = []
+    monkeypatch.setattr(
+        promotion,
+        "_put_source_file",
+        lambda path, key, sha256, size: order.append(key),
+    )
+    inventories = iter(
+        [
+            {f"one111-search/materialized/{manifest_sha}/artifact.bin": len(payload)},
+            {
+                f"one111-search/materialized/{manifest_sha}/artifact.bin": len(payload),
+                f"one111-search/materialized/{manifest_sha}/manifest.json": len(manifest),
+            },
+        ]
+    )
+    monkeypatch.setattr(promotion, "_list_source", lambda _prefix: next(inventories))
+
+    promotion.stage_source(source, spec, root, manifest_path)
+
+    prefix = f"one111-search/materialized/{manifest_sha}/"
+    assert order == [f"{prefix}artifact.bin", f"{prefix}manifest.json"]
+
+
+def test_source_put_uses_full_sha256_and_atomic_create(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "artifact.bin"
+    path.write_bytes(b"artifact\n")
+    sha256 = digest(path.read_bytes())
+    checksum = promotion.base64.b64encode(bytes.fromhex(sha256)).decode()
+    heads = iter(
+        [
+            promotion.AwsError("missing", "Not Found"),
+            {"ContentLength": path.stat().st_size, "ChecksumSHA256": checksum},
+        ]
+    )
+    calls: list[list[str]] = []
+
+    def head(*_: object) -> dict[str, object]:
+        value = next(heads)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(promotion, "_head", head)
+    monkeypatch.setattr(promotion, "aws", lambda arguments: calls.append(arguments) or {})
+
+    promotion._put_source_file(path, "one111-search/materialized/x/artifact.bin", sha256, 9)
+
+    put = calls[0]
+    assert put[:2] == ["s3api", "put-object"]
+    assert put[put.index("--checksum-sha256") + 1] == checksum
+    assert put[put.index("--if-none-match") + 1] == "*"
+
+
 def test_data_only_audit_rejects_extra_destination_object(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1382,6 +1464,32 @@ def test_deploy_downloads_and_validates_v2_manifest_body() -> None:
 
     assert "s3api get-object" in workflow
     assert "validate_runtime_manifest_file.py" in workflow
+    smoke_step = workflow.split("- name: Smoke test the public application", 1)[1]
+    assert 'READY_JSON="$("${CURL[@]}" "$WEB_URL/readyz")"' in smoke_step
+    assert '"artifact_manifest_sha256": os.environ["ARTIFACT_MANIFEST_SHA"]' in smoke_step
+    assert "payload != expected" in smoke_step
+    platform_step = workflow.split("- name: Deploy the application stack", 1)[1].split(
+        "- name: Publish the static web application", 1
+    )[0]
+    assert "ALARM_EMAIL: ${{ inputs.alarm_email }}" in platform_step
+
+
+def test_bootstrap_stages_source_and_deploys_promoted_runtime_sha() -> None:
+    bootstrap = (ROOT / "scripts" / "bootstrap_competition_release.sh").read_text(encoding="utf-8")
+
+    assert "--stage-source" in bootstrap
+    assert 'json.loads(sys.argv[1])["manifest_sha256"]' in bootstrap
+    assert "runtime_sha=$(uv run python -c 'import hashlib" not in bootstrap
+    assert "expected_commit=$(git rev-parse HEAD)" in bootstrap
+    assert "headSha,displayTitle" in bootstrap
+    assert "before_run_ids" in bootstrap
+
+    workflow = (ROOT / ".github/workflows/deploy.yml").read_text(encoding="utf-8")
+    assert (
+        "run-name: Deploy ${{ inputs.artifact_manifest_sha }} ${{ inputs.deployment_id }}"
+        in workflow
+    )
+    assert "deployment_id=$(uv run python -c 'import uuid; print(uuid.uuid4())')" in bootstrap
 
 
 def test_downloaded_manifest_validator_checks_exact_body_and_v2_schema(

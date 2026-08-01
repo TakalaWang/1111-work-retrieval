@@ -17,6 +17,7 @@ from collections.abc import Iterator, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol, cast
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import boto3  # type: ignore[import-untyped]
 from botocore.config import Config  # type: ignore[import-untyped]
@@ -38,26 +39,80 @@ from work_retrieval_core.serialization import (
     serialize_full_job,
 )
 
-PROMPT_VERSION = "2026-08-01-open-surface-evidence-v1"
+PROMPT_VERSION = "2026-08-02-open-surface-evidence-tool-64k-v1"
 CANONICALIZATION_POLICY = "open_surface_per_jd_llm_canonicalization_v1"
 OOV_POLICY = "accept_open_surface_with_exact_train_jd_evidence"
 SYSTEM_PROMPT = """You extract a train-only job skill graph from exactly one supplied JD.
-Return one JSON object with exactly two arrays: skills and relations.
+Call extract_job_skill_graph exactly once with exactly two arrays: skills and relations.
 Each skill has canonical_name, surface, category, evidence_span.
 Each relation has source, type, target, evidence_span; type is one of USED_WITH,
 SPECIALIZATION_OF, RELATED_TO. surface must be an exact substring of evidence_span and both must
 be exact substrings of the supplied JD. Use an open vocabulary: preserve a new/OOV surface.
 canonical_name normalizes only a genuine spelling variant or synonym evidenced within this JD.
 Never infer unsupported skills, and never use query logs, qrels, behavior, test data, or outside
-facts. Return JSON only."""
+facts. Do not return text."""
 PROMPT_SHA256 = hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()
 JOB_ID_FIELD = "職缺編號"
 DEFAULT_DUTY_FIELD = "職務小類"
-DEFAULT_MODIFIED_AT_FIELD = "更新日期"
+DEFAULT_MODIFIED_AT_FIELD = "職缺最後修改時間"
+DEFAULT_SOURCE_TIMEZONE = "Asia/Taipei"
+SOURCE_TIMESTAMP_POLICY = "localize_naive_source_with_explicit_iana_timezone_v1"
 DEFAULT_SAMPLE_LIMIT = 5_000
 MAX_SAMPLE_LIMIT = 10_000
 BEDROCK_TOTAL_MAX_ATTEMPTS = 4
+BEDROCK_MAX_OUTPUT_TOKENS = 64_000
 SAMPLING_POLICY = "duty_stratified_sqrt_support_stable_hash_v1"
+RELATION_TYPES = {"USED_WITH", "SPECIALIZATION_OF", "RELATED_TO"}
+TOOL_NAME = "extract_job_skill_graph"
+# Verified Converse runtime shape; botocore's optional type enum currently drifts from this value.
+TOOL_USE_TYPE = "tool_use"
+TOOL_INPUT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["skills", "relations"],
+    "properties": {
+        "skills": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["canonical_name", "surface", "category", "evidence_span"],
+                "properties": {
+                    "canonical_name": {"type": "string", "minLength": 1},
+                    "surface": {"type": "string", "minLength": 1},
+                    "category": {"type": "string", "minLength": 1},
+                    "evidence_span": {"type": "string", "minLength": 1},
+                },
+            },
+        },
+        "relations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["source", "type", "target", "evidence_span"],
+                "properties": {
+                    "source": {"type": "string", "minLength": 1},
+                    "type": {"type": "string", "enum": sorted(RELATION_TYPES)},
+                    "target": {"type": "string", "minLength": 1},
+                    "evidence_span": {"type": "string", "minLength": 1},
+                },
+            },
+        },
+    },
+}
+TOOL_CONFIG = {
+    "tools": [
+        {
+            "toolSpec": {
+                "name": TOOL_NAME,
+                "description": "Return the evidence-locked skill graph for the supplied JD.",
+                "inputSchema": {"json": TOOL_INPUT_SCHEMA},
+            }
+        }
+    ],
+    "toolChoice": {"tool": {"name": TOOL_NAME}},
+}
 PREPARE_KEYS = {
     "schema_version",
     "complete",
@@ -72,6 +127,8 @@ PREPARE_KEYS = {
     "job_id_field",
     "duty_field",
     "modified_at_field",
+    "source_timezone",
+    "source_timestamp_policy",
     "sampling_policy",
     "sample_limit",
     "eligible_train_records",
@@ -80,6 +137,7 @@ PREPARE_KEYS = {
     "sampling_sha256",
     "records",
     "post_cutoff_skipped",
+    "empty_duty_skipped",
     "max_source_timestamp",
     "requests_sha256",
 }
@@ -106,7 +164,6 @@ RESPONSE_KEYS = {
     "input_tokens",
     "output_tokens",
 }
-RELATION_TYPES = {"USED_WITH", "SPECIALIZATION_OF", "RELATED_TO"}
 
 
 class BedrockRuntime(Protocol):
@@ -133,6 +190,32 @@ def _timestamp(value: object, name: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise RuntimeError(f"{name} must include a timezone")
     return parsed
+
+
+def _iana_timezone(value: object) -> ZoneInfo:
+    if not isinstance(value, str) or not value.strip():
+        raise RuntimeError("source timezone must be an explicit IANA timezone")
+    try:
+        return ZoneInfo(value)
+    except ZoneInfoNotFoundError as error:
+        raise RuntimeError("source timezone must be an explicit IANA timezone") from error
+
+
+def _source_timestamp(value: object, name: str, source_timezone: ZoneInfo) -> datetime:
+    if not isinstance(value, str):
+        raise RuntimeError(f"{name} must be an ISO-8601 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise RuntimeError(f"{name} must be an ISO-8601 timestamp") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return parsed.replace(tzinfo=source_timezone)
+    return parsed
+
+
+def _duty_stratum(value: str | None) -> str:
+    duty = canonical_code(value)
+    return "" if duty == "null" else duty
 
 
 def _sample_quotas(counts: Mapping[str, int], limit: int) -> dict[str, int]:
@@ -176,6 +259,7 @@ def prepare_requests(
     output: Path,
     duty_field: str,
     modified_at_field: str,
+    source_timezone: str,
     sample_limit: int,
 ) -> dict[str, object]:
     if output.exists():
@@ -188,6 +272,7 @@ def prepare_requests(
     partial.mkdir()
     requests_path = partial / "requests.jsonl"
     try:
+        source_zone = _iana_timezone(source_timezone)
         csv.field_size_limit(64 * 1024 * 1024)
         dataset_sha256 = sha256_file(jobs_csv)
         required = {
@@ -199,7 +284,8 @@ def prepare_requests(
         split_sha256 = sha256_file(split_manifest_path)
         seen: set[str] = set()
         eligible_counts: Counter[str] = Counter()
-        skipped = 0
+        post_cutoff_skipped = 0
+        empty_duty_skipped = 0
         eligible_maximum = None
         with jobs_csv.open(encoding="utf-8-sig", newline="") as source:
             reader = csv.DictReader(source)
@@ -213,13 +299,16 @@ def prepare_requests(
                         f"source CSV line {line_number} has invalid/duplicate job_id"
                     )
                 seen.add(job_id)
-                modified = _timestamp(row[modified_at_field], "source modified timestamp")
+                modified = _source_timestamp(
+                    row[modified_at_field], "source modified timestamp", source_zone
+                )
                 if modified >= cutoff:
-                    skipped += 1
+                    post_cutoff_skipped += 1
                     continue
-                duty = canonical_code(row[duty_field])
+                duty = _duty_stratum(row[duty_field])
                 if not duty:
-                    raise RuntimeError(f"train JD {job_id} has an empty duty stratum")
+                    empty_duty_skipped += 1
+                    continue
                 eligible_counts[duty] += 1
                 eligible_maximum = max(eligible_maximum, modified) if eligible_maximum else modified
         if not eligible_counts or eligible_maximum is None:
@@ -229,18 +318,22 @@ def prepare_requests(
         with jobs_csv.open(encoding="utf-8-sig", newline="") as source:
             reader = csv.DictReader(source)
             for row in reader:
-                modified = _timestamp(row[modified_at_field], "source modified timestamp")
+                modified = _source_timestamp(
+                    row[modified_at_field], "source modified timestamp", source_zone
+                )
                 if modified >= cutoff:
                     continue
                 job_id = canonical_text(row[JOB_ID_FIELD])
+                duty = _duty_stratum(row[duty_field])
+                if not duty:
+                    continue
                 values = {field: row[label] for label, field in FULL_JOB_FIELDS}
                 source_text = serialize_full_job(values)
-                duty = canonical_text(row[duty_field])
-                if not source_text or not duty:
-                    raise RuntimeError(f"train JD {job_id} has empty source text or duty")
+                if not source_text:
+                    raise RuntimeError(f"train JD {job_id} has empty source text")
                 source_sha = hashlib.sha256(source_text.encode()).hexdigest()
                 record_id = hashlib.sha256(f"{job_id}\0{source_sha}".encode()).hexdigest()
-                request = {
+                request: dict[str, object] = {
                     "record_id": record_id,
                     "job_id": job_id,
                     "duty": duty,
@@ -248,14 +341,13 @@ def prepare_requests(
                     "source_text": source_text,
                     "source_text_sha256": source_sha,
                 }
-                stratum = canonical_code(duty)
                 priority = int.from_bytes(
                     hashlib.sha256(f"{split_sha256}\0{job_id}\0{source_sha}".encode()).digest(),
                     "big",
                 )
-                entry = (-priority, job_id, request)
-                heap = heaps[stratum]
-                if len(heap) < quotas[stratum]:
+                entry: tuple[int, str, dict[str, object]] = (-priority, job_id, request)
+                heap = heaps[duty]
+                if len(heap) < quotas[duty]:
                     heapq.heappush(heap, entry)
                 elif entry[:2] > heap[0][:2]:
                     heapq.heapreplace(heap, entry)
@@ -265,7 +357,7 @@ def prepare_requests(
                 for heap in heaps.values()
                 for negative_priority, job_id, request in heap
             ),
-            key=lambda item: (canonical_code(item[2]["duty"]), item[0], item[1]),
+            key=lambda item: (canonical_code(cast(str, item[2]["duty"])), item[0], item[1]),
         )
         maximum = max(
             _timestamp(request["source_modified_at"], "selected source timestamp")
@@ -297,6 +389,8 @@ def prepare_requests(
             "job_id_field": JOB_ID_FIELD,
             "duty_field": duty_field,
             "modified_at_field": modified_at_field,
+            "source_timezone": source_timezone,
+            "source_timestamp_policy": SOURCE_TIMESTAMP_POLICY,
             "sampling_policy": SAMPLING_POLICY,
             "sample_limit": sample_limit,
             "eligible_train_records": sum(eligible_counts.values()),
@@ -304,7 +398,8 @@ def prepare_requests(
             "strata": strata,
             "sampling_sha256": hashlib.sha256(canonical_json(selected_ids)).hexdigest(),
             "records": len(selected),
-            "post_cutoff_skipped": skipped,
+            "post_cutoff_skipped": post_cutoff_skipped,
+            "empty_duty_skipped": empty_duty_skipped,
             "max_source_timestamp": maximum.isoformat(),
             "requests_sha256": sha256_file(requests_path),
         }
@@ -377,6 +472,7 @@ def _prepared(output: Path, split_manifest_path: Path) -> dict[str, object]:
         "document_template_sha256": document_template_sha256(),
         "document_fields": [label for label, _field in FULL_JOB_FIELDS],
         "job_id_field": JOB_ID_FIELD,
+        "source_timestamp_policy": SOURCE_TIMESTAMP_POLICY,
     }
     if any(manifest[name] != value for name, value in expected.items()):
         raise RuntimeError("prepared extraction policy or split differs")
@@ -387,11 +483,16 @@ def _prepared(output: Path, split_manifest_path: Path) -> dict[str, object]:
         or not manifest["duty_field"]
         or not isinstance(manifest["modified_at_field"], str)
         or not manifest["modified_at_field"]
+        or not isinstance(manifest["source_timezone"], str)
         or isinstance(manifest["post_cutoff_skipped"], bool)
         or not isinstance(manifest["post_cutoff_skipped"], int)
         or manifest["post_cutoff_skipped"] < 0
+        or isinstance(manifest["empty_duty_skipped"], bool)
+        or not isinstance(manifest["empty_duty_skipped"], int)
+        or manifest["empty_duty_skipped"] < 0
     ):
         raise RuntimeError("prepared extraction source field contract differs")
+    _iana_timezone(manifest["source_timezone"])
     if sha256_file(requests_path) != manifest["requests_sha256"]:
         raise RuntimeError("prepared extraction request bytes differ")
     sample_limit = manifest["sample_limit"]
@@ -472,36 +573,48 @@ def _prepared(output: Path, split_manifest_path: Path) -> dict[str, object]:
     return manifest
 
 
-def _raw_json(response: Mapping[str, object]) -> tuple[dict[str, object], int, int]:
+def _tool_input(response: Mapping[str, object]) -> tuple[dict[str, object], int, int]:
     output = response.get("output")
     usage = response.get("usage")
-    if not isinstance(output, dict) or not isinstance(usage, dict):
-        raise RuntimeError("Bedrock response is missing output or usage")
+    if (
+        response.get("stopReason") != "tool_use"
+        or not isinstance(output, dict)
+        or not isinstance(usage, dict)
+    ):
+        raise RuntimeError("Bedrock response did not stop for the required toolUse")
     message = output.get("message")
     if not isinstance(message, dict) or message.get("role") != "assistant":
-        raise RuntimeError("Bedrock response message differs")
+        raise RuntimeError("Bedrock toolUse response message differs")
     content = message.get("content")
-    if not isinstance(content, list) or len(content) != 1 or not isinstance(content[0], dict):
-        raise RuntimeError("Bedrock response must contain exactly one text block")
-    text = content[0].get("text")
+    if (
+        not isinstance(content, list)
+        or len(content) != 1
+        or not isinstance(content[0], dict)
+        or set(content[0]) != {"toolUse"}
+    ):
+        raise RuntimeError("Bedrock response must contain exactly one toolUse block")
+    tool_use = content[0]["toolUse"]
+    if (
+        not isinstance(tool_use, dict)
+        or set(tool_use) != {"toolUseId", "name", "type", "input"}
+        or not isinstance(tool_use["toolUseId"], str)
+        or not tool_use["toolUseId"]
+        or tool_use["name"] != TOOL_NAME
+        or tool_use["type"] != TOOL_USE_TYPE
+        or not isinstance(tool_use["input"], dict)
+    ):
+        raise RuntimeError("Bedrock response toolUse contract differs")
     input_tokens, output_tokens = usage.get("inputTokens"), usage.get("outputTokens")
     if (
-        not isinstance(text, str)
-        or isinstance(input_tokens, bool)
+        isinstance(input_tokens, bool)
         or not isinstance(input_tokens, int)
         or input_tokens < 0
         or isinstance(output_tokens, bool)
         or not isinstance(output_tokens, int)
         or output_tokens < 0
     ):
-        raise RuntimeError("Bedrock response text or usage differs")
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as error:
-        raise RuntimeError("Bedrock response is not strict JSON") from error
-    if not isinstance(payload, dict):
-        raise RuntimeError("Bedrock response JSON must be an object")
-    return payload, input_tokens, output_tokens
+        raise RuntimeError("Bedrock response toolUse usage differs")
+    return tool_use["input"], input_tokens, output_tokens
 
 
 def _validated_payload(
@@ -599,9 +712,10 @@ def _response(
                 ],
             }
         ],
-        inferenceConfig={"temperature": 0, "maxTokens": 2048},
+        inferenceConfig={"temperature": 0, "maxTokens": BEDROCK_MAX_OUTPUT_TOKENS},
+        toolConfig=TOOL_CONFIG,
     )
-    payload, input_tokens, output_tokens = _raw_json(response)
+    payload, input_tokens, output_tokens = _tool_input(response)
     skills, relations, skill_rejections, relation_rejections = _validated_payload(
         payload, cast(str, request["source_text"])
     )
@@ -807,6 +921,7 @@ def main() -> None:
     prepare.add_argument("--output", type=Path, required=True)
     prepare.add_argument("--duty-field", default=DEFAULT_DUTY_FIELD)
     prepare.add_argument("--modified-at-field", default=DEFAULT_MODIFIED_AT_FIELD)
+    prepare.add_argument("--source-timezone", required=True)
     prepare.add_argument("--max-records", type=int, default=DEFAULT_SAMPLE_LIMIT)
     run = commands.add_parser("extract")
     run.add_argument("--prepared", type=Path, required=True)
@@ -824,6 +939,7 @@ def main() -> None:
             output=args.output,
             duty_field=args.duty_field,
             modified_at_field=args.modified_at_field,
+            source_timezone=args.source_timezone,
             sample_limit=args.max_records,
         )
     else:

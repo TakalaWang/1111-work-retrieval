@@ -55,6 +55,17 @@ def _request_id(request: Request) -> str:
     return cast(str, request.state.request_id)
 
 
+def _artifact_manifest_sha256(engine: RetrievalRuntime) -> str:
+    value = engine.artifact_manifest_sha256
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise TypeError("runtime must expose a lowercase artifact manifest SHA-256")
+    return value
+
+
 def _error(
     request: Request,
     status: int,
@@ -213,8 +224,9 @@ def create_app(runtime_factory: RuntimeFactory) -> FastAPI:
         engine = runtime_factory()
         if not isinstance(engine, RetrievalRuntime):
             raise TypeError("runtime_factory must return a RetrievalRuntime")
-        app.state.engine = engine
         try:
+            app.state.artifact_manifest_sha256 = _artifact_manifest_sha256(engine)
+            app.state.engine = engine
             yield
         finally:
             engine.close()
@@ -264,7 +276,10 @@ def create_app(runtime_factory: RuntimeFactory) -> FastAPI:
     async def readyz(request: Request) -> dict[str, str]:
         if not hasattr(request.app.state, "engine"):
             raise SearchUnavailableError("engine was not initialized")
-        return {"status": "ready"}
+        return {
+            "status": "ready",
+            "artifact_manifest_sha256": cast(str, request.app.state.artifact_manifest_sha256),
+        }
 
     @app.post(
         SEARCH_PATH,

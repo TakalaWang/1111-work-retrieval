@@ -19,12 +19,15 @@ AWS_PROFILE = "competition"
 STACK_NAME = "WorkRetrievalData"
 DATABASE_NAME = "work_retrieval"
 SOURCE_SHA256 = "53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089"
+SOURCE_IDENTITY = f"sha256:{SOURCE_SHA256}"
 SOURCE_CHECKSUM_SHA256 = base64.b64encode(bytes.fromhex(SOURCE_SHA256)).decode("ascii")
 SOURCE_BYTES = 1_285_945_103
 SOURCE_ROWS = 1_218_635
 POLL_ATTEMPTS = 240
 POLL_SECONDS = 15
 ALEMBIC_REVISION = "0002_create_jobs"
+IMPORT_ADVISORY_LOCK_ID = 6_022_297_297_016_486_044
+INTEGRITY_GUARD_BODY = "BEGIN\n    COMMENT ON TABLE public.jobs IS NULL;\n    RETURN NULL;\nEND"
 
 SOURCE_HEADER = (
     "職缺編號",
@@ -356,47 +359,12 @@ def wait_for(
     raise RuntimeError(f"{operation} timed out after {POLL_ATTEMPTS} checks")
 
 
-def create_stage_sql() -> str:
+def import_and_replace_sql(bucket: str) -> str:
     columns = ",\n    ".join(f"{name} TEXT" for name in SOURCE_COLUMNS)
-    return f"""CREATE TABLE jobs_import (
-    {columns},
-    source_row INTEGER GENERATED ALWAYS AS IDENTITY (START WITH 0 MINVALUE 0)
-)"""
-
-
-def import_sql(bucket: str) -> str:
-    columns = ",".join(SOURCE_COLUMNS)
-    return f"""SELECT aws_s3.table_import_from_s3(
-    'jobs_import',
-    '{columns}',
-    '(FORMAT csv, HEADER true, ENCODING ''UTF8'', NULL ''__WORK_RETRIEVAL_NEVER_NULL__'')',
-    aws_commons.create_s3_uri('{_sql_literal(bucket)}', '{object_key()}', '{AWS_REGION}')
-)"""
-
-
-def stage_stats_sql() -> str:
-    invalid = " OR ".join(
+    source_columns = ",".join(SOURCE_COLUMNS)
+    invalid_required = " OR ".join(
         f"NULLIF(NULLIF({name}, ''), 'NULL') IS NULL" for name in REQUIRED_FIELDS.values()
     )
-    return f"""SELECT
-    count(*) AS row_count,
-    count(DISTINCT job_id) AS distinct_job_ids,
-    min(source_row) AS min_source_row,
-    max(source_row) AS max_source_row,
-    count(*) FILTER (WHERE {invalid}) AS invalid_required
-FROM jobs_import"""
-
-
-def final_stats_sql() -> str:
-    return """SELECT
-    count(*) AS row_count,
-    count(DISTINCT job_id) AS distinct_job_ids,
-    min(source_row) AS min_source_row,
-    max(source_row) AS max_source_row
-FROM jobs"""
-
-
-def replace_sql() -> str:
     target_columns = ", ".join((*SOURCE_COLUMNS, "source_row"))
     expressions = []
     for name in SOURCE_COLUMNS:
@@ -407,9 +375,6 @@ def replace_sql() -> str:
             normalized += "::timestamp without time zone"
         expressions.append(normalized)
     select_columns = ",\n        ".join((*expressions, "source_row"))
-    invalid_required = " OR ".join(
-        f"NULLIF(NULLIF({name}, ''), 'NULL') IS NULL" for name in REQUIRED_FIELDS.values()
-    )
     return f"""DO $$
 DECLARE
     stage_count bigint;
@@ -419,6 +384,28 @@ DECLARE
     stage_invalid bigint;
     inserted_count bigint;
 BEGIN
+    IF NOT pg_try_advisory_xact_lock({IMPORT_ADVISORY_LOCK_ID}) THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '55P03',
+            MESSAGE = 'another verified jobs import already holds the advisory lock';
+    END IF;
+
+    DROP TABLE IF EXISTS jobs_import;
+    CREATE TABLE jobs_import (
+        {columns},
+        source_row INTEGER GENERATED ALWAYS AS IDENTITY (START WITH 0 MINVALUE 0)
+    );
+    PERFORM aws_s3.table_import_from_s3(
+        'jobs_import',
+        '{source_columns}',
+        '(FORMAT csv, HEADER true, ENCODING ''UTF8'', NULL ''__WORK_RETRIEVAL_NEVER_NULL__'')',
+        aws_commons.create_s3_uri(
+            '{_sql_literal(bucket)}',
+            '{object_key()}',
+            '{AWS_REGION}'
+        )
+    );
+
     SELECT count(*), count(DISTINCT job_id), min(source_row), max(source_row),
            count(*) FILTER (WHERE {invalid_required})
       INTO stage_count, stage_distinct, stage_min, stage_max, stage_invalid
@@ -427,6 +414,18 @@ BEGIN
        OR stage_min <> 0 OR stage_max <> {SOURCE_ROWS - 1} OR stage_invalid <> 0 THEN
         RAISE EXCEPTION 'staging validation failed';
     END IF;
+
+    EXECUTE $ddl$
+        CREATE OR REPLACE FUNCTION public.invalidate_jobs_source_identity()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $function${INTEGRITY_GUARD_BODY}$function$
+    $ddl$;
+    EXECUTE 'DROP TRIGGER IF EXISTS jobs_invalidate_source_identity ON public.jobs';
+    EXECUTE 'CREATE TRIGGER jobs_invalidate_source_identity '
+            'AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE ON public.jobs '
+            'FOR EACH STATEMENT EXECUTE FUNCTION public.invalidate_jobs_source_identity()';
+    COMMENT ON TABLE public.jobs IS NULL;
 
     TRUNCATE jobs;
     INSERT INTO jobs ({target_columns})
@@ -437,24 +436,50 @@ BEGIN
     IF inserted_count <> {SOURCE_ROWS} THEN
         RAISE EXCEPTION 'final insert count mismatch';
     END IF;
+    COMMENT ON TABLE jobs IS '{_sql_literal(SOURCE_IDENTITY)}';
     DROP TABLE jobs_import;
 END
 $$"""
+
+
+def final_stats_sql() -> str:
+    guard_body = _sql_literal(INTEGRITY_GUARD_BODY)
+    return f"""SELECT
+    count(*) AS row_count,
+    count(DISTINCT job_id) AS distinct_job_ids,
+    min(source_row) AS min_source_row,
+    max(source_row) AS max_source_row,
+    obj_description('jobs'::regclass, 'pg_class') AS source_identity,
+    EXISTS (
+        SELECT 1
+        FROM pg_trigger AS trigger
+        JOIN pg_proc AS procedure ON procedure.oid = trigger.tgfoid
+        JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace
+        WHERE trigger.tgrelid = 'public.jobs'::regclass
+          AND trigger.tgname = 'jobs_invalidate_source_identity'
+          AND trigger.tgtype = 60
+          AND trigger.tgenabled = 'O'
+          AND NOT trigger.tgisinternal
+          AND namespace.nspname = 'public'
+          AND procedure.proname = 'invalidate_jobs_source_identity'
+          AND procedure.prosrc = '{guard_body}'
+    ) AS integrity_guard
+FROM jobs"""
 
 
 def _sql_literal(value: str) -> str:
     return value.replace("'", "''")
 
 
-def _stats_match(row: dict[str, object], *, include_invalid: bool) -> bool:
-    expected = {
+def _final_stats_match(row: dict[str, object]) -> bool:
+    expected: dict[str, object] = {
         "row_count": SOURCE_ROWS,
         "distinct_job_ids": SOURCE_ROWS,
         "min_source_row": 0,
         "max_source_row": SOURCE_ROWS - 1,
+        "source_identity": SOURCE_IDENTITY,
+        "integrity_guard": True,
     }
-    if include_invalid:
-        expected["invalid_required"] = 0
     return all(row.get(name) == value for name, value in expected.items())
 
 
@@ -467,6 +492,16 @@ def run(source: Path) -> None:
         raise RuntimeError(f"database must be at Alembic revision {ALEMBIC_REVISION}")
 
     ensure_source_object(source, bucket)
+    current = query_one(cluster, secret, final_stats_sql())
+    if _final_stats_match(current):
+        print(
+            json.dumps(
+                {"status": "unchanged", "bucket": bucket, "key": object_key(), **current},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return
     execute_sql(cluster, secret, "CREATE EXTENSION IF NOT EXISTS aws_s3 CASCADE", long_running=True)
     wait_for(
         cluster,
@@ -475,44 +510,19 @@ def run(source: Path) -> None:
         lambda row: row.get("ready") is True,
         "aws_s3 extension creation",
     )
-    execute_sql(cluster, secret, "DROP TABLE IF EXISTS jobs_import", long_running=True)
-    wait_for(
+    execute_sql(cluster, secret, import_and_replace_sql(bucket), long_running=True)
+    final = wait_for(
         cluster,
         secret,
-        "SELECT to_regclass('public.jobs_import') IS NULL AS ready",
-        lambda row: row.get("ready") is True,
-        "staging table removal",
+        final_stats_sql(),
+        _final_stats_match,
+        "transactional jobs import",
     )
-    execute_sql(cluster, secret, create_stage_sql(), long_running=True)
-    wait_for(
-        cluster,
-        secret,
-        "SELECT to_regclass('public.jobs_import') IS NOT NULL AS ready",
-        lambda row: row.get("ready") is True,
-        "staging table creation",
-    )
-    execute_sql(cluster, secret, import_sql(bucket), long_running=True)
-    wait_for(
-        cluster,
-        secret,
-        stage_stats_sql(),
-        lambda row: _stats_match(row, include_invalid=True),
-        "S3 import",
-    )
-    execute_sql(cluster, secret, replace_sql(), long_running=True)
-    wait_for(
-        cluster,
-        secret,
-        "SELECT to_regclass('public.jobs_import') IS NULL AS completed",
-        lambda row: row.get("completed") is True,
-        "atomic replacement",
-    )
-    final = query_one(cluster, secret, final_stats_sql())
-    if not _stats_match(final, include_invalid=False):
+    if not _final_stats_match(final):
         raise RuntimeError(f"final jobs validation failed: {final}")
     print(
         json.dumps(
-            {"bucket": bucket, "key": object_key(), **final},
+            {"status": "imported", "bucket": bucket, "key": object_key(), **final},
             ensure_ascii=False,
             sort_keys=True,
         )

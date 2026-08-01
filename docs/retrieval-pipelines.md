@@ -107,8 +107,8 @@ promotion attestation, and supply both immutable files to a new Tantivy build:
 
 ```bash
 uv run python scripts/query_correction_pipeline.py build \
-  --evidence artifacts/input/skill-extraction/evidence.jsonl \
-  --extraction-manifest artifacts/input/skill-extraction/manifest.json \
+  --evidence artifacts/input/skill-extraction/<model-and-source-sha256>/evidence.jsonl \
+  --extraction-manifest artifacts/input/skill-extraction/<model-and-source-sha256>/manifest.json \
   --split-manifest artifacts/evaluations/split.json \
   --minimum-support 3 \
   --output artifacts/challengers/query-correction/candidate.json
@@ -160,9 +160,9 @@ claim a cross-JD clustering stage. The Graph represents the sampled train eviden
 not pretend that all 1.2 million jobs received LLM extraction.
 
 Capacity planning is explicit: the default run has at most 5,000 logical model requests and the
-hard-cap run at most 10,000, each with no more than four SDK attempts. `maxTokens=2048`, so their
-successful-output ceilings are 10.24M and 20.48M tokens; actual input/output token totals are
-written into the extraction manifest. Estimate wall time as
+hard-cap run at most 10,000, each with no more than four SDK attempts. The constrained call uses a
+64,000-token output safety budget so a large valid tool payload is not truncated; actual
+input/output token totals are written into the extraction manifest. Estimate wall time as
 remaining records multiplied by observed per-call p95 latency, and cost from those pinned usage
 totals and the selected model's price. No fixed dollar or ETA claim is valid before `model_id` and
 observed latency are known.
@@ -172,6 +172,7 @@ uv run python scripts/llm_skill_extraction_pipeline.py prepare \
   --jobs-csv /data/jobs.csv \
   --split-manifest artifacts/evaluations/split.json \
   --output artifacts/input/skill-extraction-prepared/<dataset-sha256> \
+  --source-timezone Asia/Taipei \
   --max-records 5000
 
 AWS_PROFILE=competition uv run python scripts/llm_skill_extraction_pipeline.py extract \
@@ -195,24 +196,31 @@ The graph has these immutable JSONL tables:
 
 Both skill nodes and skill relations must meet `--minimum-support`. Relation weight is normalized
 support `support / sqrt(source_support * target_support)`; duty-skill weight is the fraction of
-train jobs in that duty that contain the skill. Online traversal is bounded to one hop. A graph
-candidate is explainable because the trace returns the anchor, edge type, weight, source job and
-the source evidence span.
+train jobs in that duty that contain the skill. Traversal is bounded to one typed hop. A trace
+returns the anchor skill, relation edge, related skill, related jobs, candidate-side Tantivy
+retrieval evidence and train-JD relation evidence; the candidate path can therefore be replayed
+without calling the LLM again. Validation, tracing, publication and ablation all require the pinned extraction evidence
+and extraction manifest: they reload that evidence, deterministically rebuild all six tables and
+require byte-identical canonical JSONL, so a self-consistent but fabricated Graph fails closed.
 
 ```bash
 uv run python scripts/skill_graph_pipeline.py build \
-  --evidence artifacts/input/skill-extraction.jsonl \
-  --extraction-manifest artifacts/input/skill-extraction.manifest.json \
+  --evidence artifacts/input/skill-extraction/<model-and-source-sha256>/evidence.jsonl \
+  --extraction-manifest artifacts/input/skill-extraction/<model-and-source-sha256>/manifest.json \
   --split-manifest artifacts/evaluations/split.json \
   --output artifacts/challengers/skill-graph/<source-sha256> \
   --minimum-support 20
 
 uv run python scripts/skill_graph_pipeline.py validate \
   --split-manifest artifacts/evaluations/split.json \
+  --evidence artifacts/input/skill-extraction/<model-and-source-sha256>/evidence.jsonl \
+  --extraction-manifest artifacts/input/skill-extraction/<model-and-source-sha256>/manifest.json \
   --output artifacts/challengers/skill-graph/<source-sha256>
 
 uv run python scripts/skill_graph_pipeline.py trace \
   --split-manifest artifacts/evaluations/split.json \
+  --evidence artifacts/input/skill-extraction/<model-and-source-sha256>/evidence.jsonl \
+  --extraction-manifest artifacts/input/skill-extraction/<model-and-source-sha256>/manifest.json \
   --output artifacts/challengers/skill-graph/<source-sha256> \
   --skill python \
   --limit 20
@@ -224,6 +232,8 @@ The Graph uses the same content-addressed experiment publication contract as emb
 AWS_PROFILE=competition uv run python scripts/skill_graph_pipeline.py publish-s3 \
   --output artifacts/challengers/skill-graph/<source-sha256> \
   --split-manifest artifacts/evaluations/split.json \
+  --evidence artifacts/input/skill-extraction/<model-and-source-sha256>/evidence.jsonl \
+  --extraction-manifest artifacts/input/skill-extraction/<model-and-source-sha256>/manifest.json \
   --bucket <artifact-bucket> \
   --prefix experiments/skill-graph/<manifest-sha256> \
   --profile competition
@@ -232,32 +242,89 @@ AWS_PROFILE=competition uv run python scripts/skill_graph_pipeline.py publish-s3
 The graph must remain disabled when graph-on does not materially improve the committed time-split
 NDCG@10 ablation. A recall-only gain or a qualitative trace does not pass this gate.
 
-The one-command ablation runner does not manufacture qrels or scores. It requires a SHA-pinned
-organizer evaluator or a declared train-only semantic-proxy evaluator. Both run manifests must pin
-byte-identical non-Graph inputs; only `graph_manifest_sha256` may differ. Organizer promotion also
-requires the evaluator's paired significance result. Optional shuffled-Graph, placebo-edge and
-path-mask controls are emitted as explicitly disabled until their runs are supplied.
+`scripts/graph_candidate_runner.py` manufactures `graph_on` from the frozen `graph_off` TREC run,
+the frozen train-only Graph and the exact SHA-pinned temporal-v2 Tantivy component. Anchors enter by
+three audited routes, in priority order: exact query-to-skill alias match; explicit duty filter to
+the frozen Duty→Skill aggregate; or consensus from at least two of at most ten Graph-covered
+baseline seed jobs. At most one typed incident edge turns those anchors into bounded bridge terms.
+The Graph's historical Job→Skill edges only identify seed anchors and never supply candidate job
+IDs. Every bridge term instead re-queries the current Tantivy eligible universe with the canonical
+query's identical `as_of`, location and duty filters, plus visibility and the 180-day freshness
+boundary. A resulting job may therefore be novel to both `graph_off` and the train-only Graph while
+remaining inside the same production eligibility contract.
+
+Expansion is bounded to eight anchors, ten typed edges per anchor, sixteen bridge terms and fifty
+Tantivy hits per term. Equal-weight RRF aggregates baseline and graph evidence; the baseline Top-3
+is protected and Graph may replace at most two jobs when the baseline has ten results. A short
+baseline is first filled, and every remaining candidate stays in the tail. Every graph candidate
+trace records its anchor evidence, typed relation and evidence spans, traversal direction, bridge
+term, Tantivy rank/score, retained/omitted path counts and score contributions, and the complete
+filter boundary. Only five best paths are expanded; their contribution plus the exact omitted
+contribution reproduces the total Graph score. No qrels, history or train Job edge may create
+a candidate. Every output score is a strictly decreasing rank score for deterministic TREC
+evaluation; the original fusion score stays in the trace. The manifest pins the baseline run and
+manifest, Graph, current Tantivy artifacts, trace, algorithm, coverage statistics, limits, relation
+types and fusion values. Job IDs must be canonical positive ASCII decimals; query IDs, ranks,
+duplicates and non-contiguous query blocks fail closed.
+
+The one-command ablation wrapper does not accept a precomputed `graph_off`, manufacture qrels or
+manufacture scores. It first retrieves `graph_off` from the declared temporal-v2 Tantivy component,
+then generates `graph_on`, then invokes an organizer-provided evaluator or a declared train-only
+semantic-proxy evaluator. The ablation runner independently regenerates the challenger run,
+manifest and trace and requires all three to be byte-identical before evaluation; an arbitrary
+precomputed challenger cannot pass. Both manifests pin the identical canonical qid universe and
+their own ordered zero-result qids; standard TREC files may omit only the set declared by that
+variant. Graph-on may rescue a Graph-off zero-result query but may not drop a non-empty baseline
+query. The evaluator's reported query count must still match the full canonical universe.
+Both run manifests pin byte-identical non-Graph inputs. A positive metric gate is reported, but
+automatic promotion/publication remains disabled until a separate organizer attestation exists.
+Optional shuffled-Graph, placebo-edge and path-mask controls are emitted as explicitly disabled
+until their runs are supplied.
 `non_graph_inputs` should pin query set, eligible universe, filters, candidate budget, lexical/dense
 artifacts, fusion, reranker and every other ranking configuration used by both runs.
-The report is the separate publication attestation: it pins the candidate Graph manifest and sets
-`publication_allowed` only for a significant organizer-evaluator result meeting the declared
-NDCG@10 threshold. The pending Graph build manifest itself is never rewritten.
+The report pins the candidate Graph manifest and records whether a significant organizer-evaluator
+result meets the declared NDCG@10 threshold as `metric_gate_passed`. It deliberately leaves
+`promotion_allowed` and `publication_allowed` false until a separate organizer attestation is
+available. The pending Graph build manifest itself is never rewritten.
+
+The query boundary is canonical UTF-8 JSONL with exactly these keys on every line:
+
+```json
+{
+  "qid": "q1",
+  "query": "Python 資料工程師",
+  "as_of": "2026-06-08T23:59:59.999+08:00",
+  "location_codes": ["100100"],
+  "duty_codes": ["140200"]
+}
+```
+
+`qid` is a unique safe TREC identifier, `as_of` must include a timezone and fall inside the declared
+evaluation window, and both code arrays must be unique canonical ASCII decimals in numeric order.
+Empty code arrays mean that filter was not requested. The repository deliberately does not guess
+the organizer CSV columns: an organizer-specific adapter must convert the official CSV into this
+canonical JSONL; the resulting JSONL bytes are part of the pinned evaluation input.
 
 ```bash
-uv run python scripts/graph_ablation_runner.py \
-  --split-manifest artifacts/evaluations/split.json \
-  --graph-output artifacts/challengers/skill-graph/<source-sha256> \
-  --qrels artifacts/evaluations/qrels.txt \
-  --graph-off-run artifacts/evaluations/graph-off.run \
-  --graph-off-manifest artifacts/evaluations/graph-off.manifest.json \
-  --graph-on-run artifacts/evaluations/graph-on.run \
-  --graph-on-manifest artifacts/evaluations/graph-on.manifest.json \
-  --evaluator-command 'uv run python <organizer-evaluator.py>' \
-  --evaluator-id organizer-v1 \
-  --evaluator-kind organizer \
-  --minimum-ndcg-delta 0.001 \
-  --output artifacts/evaluations/graph-ablation.json
+scripts/run_graph_ablation.sh \
+  artifacts/evaluations/split.json \
+  artifacts/challengers/skill-graph/<source-sha256> \
+  artifacts/input/skill-extraction/<model-and-source-sha256>/evidence.jsonl \
+  artifacts/input/skill-extraction/<model-and-source-sha256>/manifest.json \
+  artifacts/evaluations/qrels.txt \
+  artifacts/evaluations/queries.canonical.jsonl \
+  dataset/職缺.csv \
+  artifacts/experiments/tantivy-bm25-temporal-v2 \
+  'uv run python <organizer-evaluator.py>' \
+  organizer-v1 organizer 0.001 \
+  artifacts/evaluations/graph-ablation/<experiment-id>
 ```
+
+The output directory must not already exist. It contains `baseline/graph-off.run`, its immutable
+manifest, `generated/graph-on.run`, the Graph-on manifest, `generated/graph-traces.jsonl`, and
+`graph-ablation.json`. Baseline lineage pins the canonical queries, jobs CSV, validated Tantivy
+component/index/job order/taxonomy and retrieval policy. The expensive GenAI extraction remains a
+frozen SHA-pinned input; this offline run performs no LLM or embedding recomputation.
 
 ## Qwen multi-view embeddings
 

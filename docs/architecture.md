@@ -118,7 +118,7 @@ Production container 啟動順序：
    以及 query correction 的 exact disabled branch 或 candidate + positive
    promotion attestation；不允許缺件後降級。
 8. 建立必要 adapters；若 dense shadow 開啟，還要先完成 SageMaker model identity readback；全部成功後
-   `/readyz` 才 ready。
+   `/readyz` 才 ready，且回傳實際載入 root manifest 的 SHA-256 供 deployment 精確比對。
 
 必要環境設定：
 
@@ -171,13 +171,16 @@ otherwise graph stays off while its experiment remains reproducible.
 - Candidate lanes must return unique ASCII-decimal job IDs, explicit contiguous ranks and monotonic finite scores.
 - API output must be at most ten unique jobs, with trace order exactly matching the response.
 - Query text is not written to access logs; only lengths/counts, request ID, status and latency are logged.
-- `/healthz` is process health; `/readyz` requires a successfully initialized immutable runtime.
+- `/healthz` is process health；`/readyz` requires a successfully initialized immutable runtime and returns its
+  exact root-manifest SHA-256；deployment smoke rejects an otherwise healthy stale runtime.
 - API 與 browser 都 fail closed；malformed engine output 或 response 不會降級成部分結果。
 - Runtime assets 必須由 v2 manifest SHA-256 與每個 artifact SHA-256/size 固定，不使用 mutable
   `latest`；component inventory 必須恰好涵蓋 root inventory，且禁止 query history、GT/qrels、test JD、
   raw logs 與 secrets。`complete` 與 `publication_allowed` 必須同時通過；所有 data objects 通過分頁
   inventory audit 後才寫入 manifest，並對 manifest body 與完整 prefix 回讀。
 - PostgreSQL 是唯一 relational database；不提供 SQLite compatibility path。
+- 完整 jobs snapshot 匯入在單一 transaction 內先取得 source-pinned PostgreSQL advisory lock；並行匯入
+  取不到 lock 即失敗，不共享或互相刪除 `jobs_import` staging table。
 - ALB 只接受 CloudFront origin-facing prefix list，並驗證 generated origin header。
 - Deployment 使用 GitHub OIDC 與 protected environment，不保存 long-lived AWS credentials。
 - GPU desired capacity 預設 `0`；只有 image digest 與 runtime manifest 都批准後才能啟用。

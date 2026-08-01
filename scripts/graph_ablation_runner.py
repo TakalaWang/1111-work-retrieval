@@ -12,6 +12,9 @@ import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 
+from graph_candidate_runner import ALGORITHM as GRAPH_GENERATION_ALGORITHM
+from graph_candidate_runner import PARAMETERS as GRAPH_GENERATION_PARAMETERS
+from graph_candidate_runner import _manifest_qids, generate_graph_on, read_trec_run
 from pipeline_contract import (
     atomic_json,
     exact_keys,
@@ -20,6 +23,8 @@ from pipeline_contract import (
     sha256_file,
 )
 from skill_graph_pipeline import load_split_manifest, validate_graph
+from tantivy_graph_off_runner import read_canonical_queries
+from tantivy_index_pipeline import DEFAULT_ARTIFACT_PREFIX
 
 RUN_MANIFEST_KEYS = {
     "schema_version",
@@ -27,11 +32,38 @@ RUN_MANIFEST_KEYS = {
     "variant",
     "split_manifest_sha256",
     "graph_manifest_sha256",
+    "canonical_qids",
+    "zero_result_qids",
     "non_graph_inputs",
     "run_sha256",
 }
 METRICS = ("ndcg_at_10", "precision_at_10", "top_1", "mrr")
 CONTROL_NAMES = ("shuffled_graph", "placebo_edges", "path_mask")
+GENERATION_KEYS = {
+    "algorithm",
+    "graph_off_run_sha256",
+    "graph_off_manifest_sha256",
+    "trace_path",
+    "trace_sha256",
+    "parameters",
+    "statistics",
+}
+GENERATION_STATISTICS_KEYS = {
+    "query_count",
+    "baseline_rows",
+    "graph_covered_seed_rows",
+    "queries_with_any_anchors",
+    "queries_with_query_exact_anchors",
+    "queries_with_duty_filter_anchors",
+    "queries_with_consensus_anchors",
+    "queries_with_graph_candidates",
+    "queries_with_novel_graph_candidates",
+    "graph_candidate_rows",
+    "novel_graph_candidate_rows",
+    "bridge_terms",
+    "bridge_retrieval_rows",
+    "graph_paths",
+}
 
 
 def _non_graph_inputs(value: object) -> dict[str, str]:
@@ -52,9 +84,12 @@ def _run_manifest(
     run_path: Path,
     split_sha256: str,
     graph_sha256: str,
-) -> dict[str, str]:
+    graph_off_run: Path | None = None,
+    graph_off_manifest: Path | None = None,
+) -> tuple[dict[str, str], tuple[str, ...], tuple[str, ...]]:
     manifest = read_json_object(path, f"{variant} run manifest")
-    exact_keys(manifest, RUN_MANIFEST_KEYS, f"{variant} run manifest")
+    expected_keys = RUN_MANIFEST_KEYS | ({"generation"} if variant == "graph_on" else set())
+    exact_keys(manifest, expected_keys, f"{variant} run manifest")
     expected_graph: str | None = graph_sha256 if variant == "graph_on" else None
     if (
         manifest["schema_version"] != 1
@@ -66,7 +101,36 @@ def _run_manifest(
     ):
         raise RuntimeError(f"{variant} run lineage differs")
     require_sha256(manifest["run_sha256"], f"{variant} run SHA-256")
-    return _non_graph_inputs(manifest["non_graph_inputs"])
+    canonical_qids, zero_result_qids = _manifest_qids(manifest)
+    if variant == "graph_on":
+        generation = manifest["generation"]
+        if not isinstance(generation, dict):
+            raise RuntimeError("graph_on generation manifest must be an object")
+        exact_keys(generation, GENERATION_KEYS, "graph_on generation manifest")
+        statistics = generation["statistics"]
+        if not isinstance(statistics, dict):
+            raise RuntimeError("graph_on generation statistics must be an object")
+        exact_keys(statistics, GENERATION_STATISTICS_KEYS, "graph_on generation statistics")
+        trace_path = generation["trace_path"]
+        if (
+            graph_off_run is None
+            or graph_off_manifest is None
+            or generation["algorithm"] != GRAPH_GENERATION_ALGORITHM
+            or generation["parameters"] != GRAPH_GENERATION_PARAMETERS
+            or generation["graph_off_run_sha256"] != sha256_file(graph_off_run)
+            or generation["graph_off_manifest_sha256"] != sha256_file(graph_off_manifest)
+            or trace_path != "graph-traces.jsonl"
+            or generation["trace_sha256"] != sha256_file(path.parent / str(trace_path))
+            or any(
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+                for value in statistics.values()
+            )
+            or statistics["query_count"] < 1
+        ):
+            raise RuntimeError("graph_on was not generated from the declared frozen inputs")
+        for name in ("graph_off_run_sha256", "graph_off_manifest_sha256", "trace_sha256"):
+            require_sha256(generation[name], f"graph_on generation {name}")
+    return _non_graph_inputs(manifest["non_graph_inputs"]), canonical_qids, zero_result_qids
 
 
 def _score_map(value: object, name: str) -> dict[str, float]:
@@ -165,7 +229,13 @@ def run_ablation(
     *,
     split_manifest_path: Path,
     graph_output: Path,
+    evidence_path: Path,
+    extraction_manifest_path: Path,
     qrels_path: Path,
+    queries_path: Path,
+    jobs_csv: Path,
+    tantivy_output: Path,
+    artifact_prefix: str,
     graph_off_run: Path,
     graph_off_manifest: Path,
     graph_on_run: Path,
@@ -193,26 +263,77 @@ def run_ablation(
     split_sha256 = sha256_file(split_manifest_path)
     if sha256_file(qrels_path) != split["qrels_sha256"]:
         raise RuntimeError("qrels bytes differ from the split manifest")
-    validate_graph(graph_output, split_manifest_path)
+    validate_graph(
+        graph_output,
+        split_manifest_path,
+        evidence_path=evidence_path,
+        extraction_manifest_path=extraction_manifest_path,
+    )
     graph_sha256 = sha256_file(graph_output / "manifest.json")
-    off_inputs = _run_manifest(
+    off_inputs, off_canonical_qids, off_zero_result_qids = _run_manifest(
         graph_off_manifest,
         variant="graph_off",
         run_path=graph_off_run,
         split_sha256=split_sha256,
         graph_sha256=graph_sha256,
     )
-    on_inputs = _run_manifest(
-        graph_on_manifest,
-        variant="graph_on",
-        run_path=graph_on_run,
-        split_sha256=split_sha256,
-        graph_sha256=graph_sha256,
+    canonical_qids = tuple(
+        record.qid for record in read_canonical_queries(queries_path, split_manifest_path)
     )
-    if off_inputs != on_inputs:
-        raise RuntimeError("graph-on/off non-graph inputs are not byte-identical")
+    graph_off_qids = tuple(read_trec_run(graph_off_run))
+    expected_result_qids = tuple(qid for qid in canonical_qids if qid not in off_zero_result_qids)
+    if (
+        not canonical_qids
+        or off_canonical_qids != canonical_qids
+        or graph_off_qids != expected_result_qids
+        or set(off_zero_result_qids) != set(canonical_qids).difference(graph_off_qids)
+        or off_inputs.get("canonical_queries") != sha256_file(queries_path)
+    ):
+        raise RuntimeError("canonical and graph_off query coverage differ")
     with tempfile.TemporaryDirectory() as raw:
         temporary = Path(raw)
+        regenerated = temporary / "regenerated"
+        generate_graph_on(
+            split_manifest_path=split_manifest_path,
+            graph_output=graph_output,
+            evidence_path=evidence_path,
+            extraction_manifest_path=extraction_manifest_path,
+            graph_off_run=graph_off_run,
+            graph_off_manifest=graph_off_manifest,
+            queries_path=queries_path,
+            jobs_csv=jobs_csv,
+            tantivy_output=tantivy_output,
+            artifact_prefix=artifact_prefix,
+            output=regenerated,
+        )
+        provided_trace = graph_on_manifest.parent / "graph-traces.jsonl"
+        if any(
+            sha256_file(provided) != sha256_file(expected)
+            for provided, expected in (
+                (graph_on_run, regenerated / "graph-on.run"),
+                (graph_on_manifest, regenerated / "graph-on.manifest.json"),
+                (provided_trace, regenerated / "graph-traces.jsonl"),
+            )
+        ):
+            raise RuntimeError("graph_on artifacts are not byte-identical to fresh generation")
+        on_inputs, on_canonical_qids, on_zero_result_qids = _run_manifest(
+            graph_on_manifest,
+            variant="graph_on",
+            run_path=graph_on_run,
+            split_sha256=split_sha256,
+            graph_sha256=graph_sha256,
+            graph_off_run=graph_off_run,
+            graph_off_manifest=graph_off_manifest,
+        )
+        if (
+            off_inputs != on_inputs
+            or on_canonical_qids != canonical_qids
+            or not set(on_zero_result_qids).issubset(off_zero_result_qids)
+        ):
+            raise RuntimeError("graph-on/off non-graph inputs are not byte-identical")
+        expected_on_qids = tuple(qid for qid in canonical_qids if qid not in on_zero_result_qids)
+        if tuple(read_trec_run(graph_on_run)) != expected_on_qids:
+            raise RuntimeError("canonical graph_off and graph_on query coverage differ")
         evaluation = _evaluate(
             evaluator_command,
             qrels=qrels_path,
@@ -220,6 +341,8 @@ def run_ablation(
             graph_on_run=graph_on_run,
             output=temporary / "evaluation.json",
         )
+    if evaluation["query_count"] != len(canonical_qids):
+        raise RuntimeError("evaluator query coverage differs from canonical graph_on/off runs")
     off_metrics = evaluation["graph_off"]
     on_metrics = evaluation["graph_on"]
     deltas = evaluation["delta"]
@@ -229,7 +352,7 @@ def run_ablation(
         or not isinstance(deltas, Mapping)
     ):
         raise RuntimeError("evaluator metrics are malformed")
-    promotion_allowed = (
+    metric_gate_passed = (
         evaluator_kind == "organizer"
         and evaluation["significant"] is True
         and deltas["ndcg_at_10"] > 0
@@ -241,7 +364,7 @@ def run_ablation(
         "experiment": "fixed-input-graph-on-off-ablation",
         "attestation_kind": "fixed-input-graph-promotion",
         "candidate_manifest_sha256": graph_sha256,
-        "publication_allowed": promotion_allowed,
+        "publication_allowed": False,
         "official_score_claimed": False,
         "evaluator": {"id": evaluator_id, "kind": evaluator_kind},
         "split_manifest_sha256": split_sha256,
@@ -256,7 +379,9 @@ def run_ablation(
         "delta": deltas,
         "minimum_ndcg_delta": minimum_ndcg_delta,
         "organizer_significant": evaluation["significant"],
-        "promotion_allowed": promotion_allowed,
+        "metric_gate_passed": metric_gate_passed,
+        "promotion_allowed": False,
+        "promotion_gate": "requires_external_organizer_attestation",
         "controls": {
             name: {"enabled": False, "reason": "control run not provided"} for name in CONTROL_NAMES
         },
@@ -269,7 +394,13 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--split-manifest", type=Path, required=True)
     parser.add_argument("--graph-output", type=Path, required=True)
+    parser.add_argument("--evidence", type=Path, required=True)
+    parser.add_argument("--extraction-manifest", type=Path, required=True)
     parser.add_argument("--qrels", type=Path, required=True)
+    parser.add_argument("--queries", type=Path, required=True)
+    parser.add_argument("--jobs-csv", type=Path, required=True)
+    parser.add_argument("--tantivy-output", type=Path, required=True)
+    parser.add_argument("--artifact-prefix", default=DEFAULT_ARTIFACT_PREFIX)
     parser.add_argument("--graph-off-run", type=Path, required=True)
     parser.add_argument("--graph-off-manifest", type=Path, required=True)
     parser.add_argument("--graph-on-run", type=Path, required=True)
@@ -285,7 +416,13 @@ def main() -> None:
     report = run_ablation(
         split_manifest_path=args.split_manifest,
         graph_output=args.graph_output,
+        evidence_path=args.evidence,
+        extraction_manifest_path=args.extraction_manifest,
         qrels_path=args.qrels,
+        queries_path=args.queries,
+        jobs_csv=args.jobs_csv,
+        tantivy_output=args.tantivy_output,
+        artifact_prefix=args.artifact_prefix,
         graph_off_run=args.graph_off_run,
         graph_off_manifest=args.graph_off_manifest,
         graph_on_run=args.graph_on_run,

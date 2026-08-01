@@ -325,6 +325,14 @@ def _canonical_sha256(value: object) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def destination_key(manifest_sha: str, path: str) -> str:
     _require_sha256("manifest SHA-256", manifest_sha)
     validate_relative_path(path)
@@ -1792,6 +1800,83 @@ def _verify_destination(head: Mapping[str, object], item: Mapping[str, object]) 
         raise RuntimeError(f"destination object differs: {item['path']}")
 
 
+def _put_source_file(path: Path, key: str, sha256: str, size: int) -> None:
+    checksum = base64.b64encode(bytes.fromhex(sha256)).decode()
+    if path.stat().st_size != size or _file_sha256(path) != sha256:
+        raise RuntimeError(f"local source object differs: {path}")
+    try:
+        head = _head(SOURCE_BUCKET, key)
+    except AwsError as error:
+        if not any(marker in error.stderr for marker in ("(404)", "Not Found", "NoSuchKey")):
+            raise
+    else:
+        if head.get("ContentLength") != size or head.get("ChecksumSHA256") != checksum:
+            raise RuntimeError(f"existing source object differs: {key}")
+        return
+    try:
+        aws(
+            [
+                "s3api",
+                "put-object",
+                "--bucket",
+                SOURCE_BUCKET,
+                "--key",
+                key,
+                "--body",
+                str(path),
+                "--checksum-algorithm",
+                "SHA256",
+                "--checksum-sha256",
+                checksum,
+                "--if-none-match",
+                "*",
+                "--expected-bucket-owner",
+                AWS_ACCOUNT,
+            ]
+        )
+    except AwsError as error:
+        if "PreconditionFailed" not in error.stderr:
+            raise
+    head = _head(SOURCE_BUCKET, key)
+    if head.get("ContentLength") != size or head.get("ChecksumSHA256") != checksum:
+        raise RuntimeError(f"uploaded source object differs: {key}")
+
+
+def stage_source(
+    source: Mapping[str, object],
+    spec: Mapping[str, object],
+    local_root: Path,
+    local_manifest: Path,
+) -> None:
+    root = local_root.resolve()
+    manifest = local_manifest.resolve()
+    if manifest != root / "manifest.json":
+        raise RuntimeError("source manifest must be source-root/manifest.json")
+    key, manifest_sha = _source_manifest_contract(spec)
+    expected_key = f"one111-search/materialized/{manifest_sha}/manifest.json"
+    if key != expected_key:
+        raise RuntimeError("source manifest key is not content-addressed")
+    inventory = _parse_source_manifest(source)
+    prefix = key.removesuffix("manifest.json")
+    expected: dict[str, int] = {}
+    for path, item in sorted(inventory.items()):
+        candidate = (root / path).resolve()
+        if not candidate.is_relative_to(root):
+            raise RuntimeError(f"source object escaped local root: {path}")
+        object_key = f"{prefix}{path}"
+        _put_source_file(candidate, object_key, cast(str, item["sha256"]), cast(int, item["size"]))
+        expected[object_key] = cast(int, item["size"])
+    manifest_size = manifest.stat().st_size
+    before_commit = _list_source(prefix)
+    committed = {**expected, key: manifest_size}
+    if before_commit not in (expected, committed):
+        raise RuntimeError("source prefix contains unexpected objects before manifest commit")
+    _put_source_file(manifest, key, manifest_sha, manifest_size)
+    expected[key] = manifest_size
+    if _list_source(prefix) != expected:
+        raise RuntimeError("source prefix key or size inventory differs")
+
+
 def copy_artifacts(
     items: Sequence[Mapping[str, object]], manifest_sha: str, source_root: str
 ) -> None:
@@ -1844,7 +1929,7 @@ def copy_artifacts(
         _verify_destination(_head(DESTINATION_BUCKET, key), item)
 
 
-def _list_destination(prefix: str) -> dict[str, int]:
+def _list_bucket(bucket: str, prefix: str) -> dict[str, int]:
     continuation: str | None = None
     result: dict[str, int] = {}
     while True:
@@ -1852,7 +1937,7 @@ def _list_destination(prefix: str) -> dict[str, int]:
             "s3api",
             "list-objects-v2",
             "--bucket",
-            DESTINATION_BUCKET,
+            bucket,
             "--prefix",
             prefix,
             "--expected-bucket-owner",
@@ -1884,6 +1969,14 @@ def _list_destination(prefix: str) -> dict[str, int]:
         if not isinstance(token, str) or not token:
             raise RuntimeError("destination prefix listing was truncated without continuation")
         continuation = token
+
+
+def _list_destination(prefix: str) -> dict[str, int]:
+    return _list_bucket(DESTINATION_BUCKET, prefix)
+
+
+def _list_source(prefix: str) -> dict[str, int]:
+    return _list_bucket(SOURCE_BUCKET, prefix)
 
 
 def _read_destination_manifest(manifest_sha: str) -> bytes:
@@ -2012,12 +2105,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--source-manifest-file",
         type=Path,
-        help="offline dry-run source inventory; forbidden with --execute",
+        help="local source manifest for dry-run or explicit --stage-source",
     )
     parser.add_argument(
         "--source-root",
         type=Path,
-        help="offline dry-run artifact root; forbidden with --execute",
+        help="local artifact root for dry-run or explicit --stage-source",
     )
     parser.add_argument(
         "--approved-tantivy-build-sha256",
@@ -2028,6 +2121,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help="compiled temporal-v2 Tantivy canonical index-tree SHA-256",
     )
     parser.add_argument("--execute", action="store_true", help="perform server-side S3 copies")
+    parser.add_argument(
+        "--stage-source",
+        action="store_true",
+        help="upload the verified local source bundle before --execute",
+    )
     return parser.parse_args(argv)
 
 
@@ -2046,10 +2144,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
     if (args.source_manifest_file is None) != (args.source_root is None):
         raise RuntimeError("offline dry-run requires both --source-manifest-file and --source-root")
-    if args.execute and args.source_manifest_file is not None:
-        raise RuntimeError("--execute requires the pinned S3 source manifest")
+    if args.stage_source and (not args.execute or args.source_manifest_file is None):
+        raise RuntimeError("--stage-source requires --execute and the local source bundle")
+    if args.execute and args.source_manifest_file is not None and not args.stage_source:
+        raise RuntimeError("local source execution requires explicit --stage-source")
     spec, release_spec_sha = load_release_spec(args.release_spec)
-    if args.source_manifest_file is None:
+    if args.source_manifest_file is None or args.execute:
         verify_account()
     source = load_source_manifest(spec, args.source_manifest_file)
     items = select_artifacts(source, spec)
@@ -2059,11 +2159,16 @@ def main(argv: Sequence[str] | None = None) -> None:
     manifest_sha = hashlib.sha256(payload).hexdigest()
     source_key, _ = _source_manifest_contract(spec)
     if args.execute:
+        if args.stage_source:
+            stage_source(source, spec, args.source_root, args.source_manifest_file)
+            if load_source_manifest(spec) != source:
+                raise RuntimeError("staged source manifest differs")
         publish_release(items, payload, manifest_sha, source_key.removesuffix("manifest.json"))
     print(
         json.dumps(
             {
                 "executed": args.execute,
+                "source_staged": args.stage_source,
                 "schema_version": 2,
                 "manifest_sha256": manifest_sha,
                 "object_count": len(items),

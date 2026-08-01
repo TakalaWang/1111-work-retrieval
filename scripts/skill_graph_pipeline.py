@@ -91,6 +91,48 @@ GRAPH_FILES = {
     "skill_relations": "skill-relations.jsonl",
     "relation_evidence": "relation-evidence.jsonl",
 }
+CATEGORY_RESOLUTION_POLICY = "support_majority_then_lexical_v1"
+EXTRACTION_LINEAGE_FIELDS = (
+    "model_id",
+    "prompt_version",
+    "prompt_sha256",
+    "canonicalization_policy",
+    "oov_policy",
+    "max_source_timestamp",
+    "source_jd_sha256",
+    "requests_sha256",
+    "responses_inventory_sha256",
+    "evidence_sha256",
+    "sampling_policy",
+    "sample_limit",
+    "eligible_train_records",
+    "sampling_sha256",
+    "source_records",
+    "processed_records",
+    "input_tokens",
+    "output_tokens",
+    "skill_rejections",
+    "relation_rejections",
+)
+
+
+def _canonical_jsonl_line(value: dict[str, object]) -> bytes:
+    return (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        + b"\n"
+    )
+
+
+def _canonical_jsonl_sha256(values: list[dict[str, object]]) -> str:
+    digest = hashlib.sha256()
+    for value in values:
+        digest.update(_canonical_jsonl_line(value))
+    return digest.hexdigest()
 
 
 def _atomic_jsonl(path: Path, values: list[dict[str, object]]) -> None:
@@ -100,15 +142,7 @@ def _atomic_jsonl(path: Path, values: list[dict[str, object]]) -> None:
     try:
         with partial.open("wb") as output:
             for value in values:
-                output.write(
-                    json.dumps(
-                        value,
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                        sort_keys=True,
-                    ).encode()
-                    + b"\n"
-                )
+                output.write(_canonical_jsonl_line(value))
             output.flush()
             os.fsync(output.fileno())
         partial.replace(path)
@@ -122,13 +156,44 @@ def _read_jsonl(path: Path, name: str) -> list[dict[str, object]]:
     try:
         with path.open(encoding="utf-8") as source:
             for line_number, line in enumerate(source, start=1):
-                value = json.loads(line)
+                value = json.loads(
+                    line,
+                    parse_constant=lambda constant: (_ for _ in ()).throw(
+                        ValueError(f"non-finite JSON number: {constant}")
+                    ),
+                )
                 if not isinstance(value, dict):
                     raise RuntimeError(f"{name} line {line_number} must be an object")
                 values.append(value)
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+    except (OSError, UnicodeError, ValueError) as error:
         raise RuntimeError(f"{name} cannot be read as UTF-8 JSONL") from error
     return values
+
+
+def _sorted_unique_identities(
+    rows: list[dict[str, object]], fields: tuple[str, ...], name: str
+) -> list[tuple[str, ...]]:
+    identities = [tuple(str(row[field]) for field in fields) for row in rows]
+    if identities != sorted(set(identities)):
+        raise RuntimeError(f"{name} rows must be canonically sorted and unique")
+    return identities
+
+
+def _positive_integer(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise RuntimeError(f"{name} must be a positive integer")
+    return value
+
+
+def _unit_weight(value: object, name: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or not 0 < value <= 1
+    ):
+        raise RuntimeError(f"{name} must be finite and inside (0, 1]")
+    return float(value)
 
 
 def _normalize(value: object, name: str) -> str:
@@ -382,33 +447,25 @@ def _relations(
     return parsed
 
 
-def build_graph(
-    *,
-    evidence_path: Path,
-    extraction_manifest_path: Path,
-    split_manifest_path: Path,
-    output: Path,
-    minimum_support: int,
-) -> dict[str, object]:
-    if minimum_support < 1:
-        raise ValueError("minimum_support must be positive")
-    split, train_cutoff = load_split_manifest(split_manifest_path)
-    extraction, records = _load_extraction(evidence_path, extraction_manifest_path, train_cutoff)
-    if output.exists():
-        raise RuntimeError("graph output already exists; builds never overwrite artifacts")
-    output.parent.mkdir(parents=True, exist_ok=True)
+def _derive_graph_tables(
+    records: list[dict[str, Any]], minimum_support: int
+) -> tuple[dict[str, list[dict[str, object]]], dict[str, Counter[str]]]:
     skill_support = Counter(skill for record in records for skill in set(record["skills"]))
     promoted = {skill for skill, count in skill_support.items() if count >= minimum_support}
     if not promoted:
         raise RuntimeError("minimum_support removed every skill")
-    categories: dict[str, str] = {}
+    category_support: dict[str, Counter[str]] = {skill: Counter() for skill in promoted}
     for record in records:
         for skill, evidence in record["skills"].items():
             if skill in promoted:
-                category = evidence["category"]
-                if skill in categories and categories[skill] != category:
-                    raise RuntimeError("one canonical skill has conflicting categories")
-                categories[skill] = category
+                category_support[skill][evidence["category"]] += 1
+    categories = {
+        skill: min(support, key=lambda category: (-support[category], category))
+        for skill, support in category_support.items()
+    }
+    category_conflicts = {
+        skill: support for skill, support in category_support.items() if len(support) > 1
+    }
     duty_jobs = Counter(record["duty"] for record in records)
     duty_support = Counter(
         (record["duty"], skill)
@@ -489,6 +546,25 @@ def build_graph(
             if (relation["source"], relation["type"], relation["target"]) in promoted_relations
         ],
     }
+    return tables, category_conflicts
+
+
+def build_graph(
+    *,
+    evidence_path: Path,
+    extraction_manifest_path: Path,
+    split_manifest_path: Path,
+    output: Path,
+    minimum_support: int,
+) -> dict[str, object]:
+    if minimum_support < 1:
+        raise ValueError("minimum_support must be positive")
+    split, train_cutoff = load_split_manifest(split_manifest_path)
+    extraction, records = _load_extraction(evidence_path, extraction_manifest_path, train_cutoff)
+    if output.exists():
+        raise RuntimeError("graph output already exists; builds never overwrite artifacts")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    tables, category_conflicts = _derive_graph_tables(records, minimum_support)
     counts = {name: len(values) for name, values in tables.items()}
     build_root = output.with_name(f".{output.name}.{os.getpid()}.partial")
     if build_root.exists():
@@ -530,6 +606,11 @@ def build_graph(
         "output_tokens": extraction["output_tokens"],
         "skill_rejections": extraction["skill_rejections"],
         "relation_rejections": extraction["relation_rejections"],
+        "category_resolution_policy": CATEGORY_RESOLUTION_POLICY,
+        "category_conflict_skills": len(category_conflicts),
+        "category_mentions_in_conflict_sets": sum(
+            support.total() for support in category_conflicts.values()
+        ),
         "minimum_support": minimum_support,
         "maximum_traversal_hops": 1,
         "counts": counts,
@@ -543,7 +624,12 @@ def build_graph(
             for name in sorted(graph_paths)
         ]
         atomic_json(manifest_path, report)
-        validate_graph(build_root, split_manifest_path)
+        validate_graph(
+            build_root,
+            split_manifest_path,
+            evidence_path=evidence_path,
+            extraction_manifest_path=extraction_manifest_path,
+        )
         build_root.replace(output)
     except BaseException:
         shutil.rmtree(build_root, ignore_errors=True)
@@ -551,8 +637,15 @@ def build_graph(
     return report
 
 
-def validate_graph(output: Path, split_manifest_path: Path) -> dict[str, object]:
+def validate_graph(
+    output: Path,
+    split_manifest_path: Path,
+    *,
+    evidence_path: Path,
+    extraction_manifest_path: Path,
+) -> dict[str, object]:
     split, train_cutoff = load_split_manifest(split_manifest_path)
+    extraction, records = _load_extraction(evidence_path, extraction_manifest_path, train_cutoff)
     manifest = read_json_object(output / "manifest.json", "skill graph manifest")
     expected_keys = {
         "schema_version",
@@ -588,6 +681,9 @@ def validate_graph(output: Path, split_manifest_path: Path) -> dict[str, object]
         "output_tokens",
         "skill_rejections",
         "relation_rejections",
+        "category_resolution_policy",
+        "category_conflict_skills",
+        "category_mentions_in_conflict_sets",
         "minimum_support",
         "maximum_traversal_hops",
         "counts",
@@ -611,11 +707,17 @@ def validate_graph(output: Path, split_manifest_path: Path) -> dict[str, object]
         or _timestamp(manifest["max_source_timestamp"], "max_source_timestamp") >= train_cutoff
         or manifest["maximum_traversal_hops"] != 1
         or manifest["sampling_policy"] != "duty_stratified_sqrt_support_stable_hash_v1"
+        or manifest["category_resolution_policy"] != CATEGORY_RESOLUTION_POLICY
         or any(
             isinstance(manifest[name], bool)
             or not isinstance(manifest[name], int)
             or manifest[name] < 0
-            for name in ("skill_rejections", "relation_rejections")
+            for name in (
+                "skill_rejections",
+                "relation_rejections",
+                "category_conflict_skills",
+                "category_mentions_in_conflict_sets",
+            )
         )
     ):
         raise RuntimeError("skill graph manifest policy differs")
@@ -653,10 +755,24 @@ def validate_graph(output: Path, split_manifest_path: Path) -> dict[str, object]
     for name in ("model_id", "prompt_version", "canonicalization_policy", "oov_policy"):
         if not isinstance(manifest[name], str) or not manifest[name]:
             raise RuntimeError(f"skill graph {name} must be non-empty")
+    if any(manifest[name] != extraction[name] for name in EXTRACTION_LINEAGE_FIELDS):
+        raise RuntimeError("skill graph extraction lineage differs")
     artifacts = verify_local_inventory(output, manifest["artifacts"])
     if {artifact["path"] for artifact in artifacts} != set(GRAPH_FILES.values()):
         raise RuntimeError("skill graph artifact inventory differs from the closed schema")
     tables = {name: _read_jsonl(output / filename, name) for name, filename in GRAPH_FILES.items()}
+    expected_tables, expected_category_conflicts = _derive_graph_tables(
+        records, cast(int, manifest["minimum_support"])
+    )
+    for name, expected_rows in expected_tables.items():
+        if tables[name] != expected_rows or sha256_file(
+            output / GRAPH_FILES[name]
+        ) != _canonical_jsonl_sha256(expected_rows):
+            raise RuntimeError(f"{name} differs from the pinned LLM extraction evidence")
+    if manifest["category_conflict_skills"] != len(expected_category_conflicts) or manifest[
+        "category_mentions_in_conflict_sets"
+    ] != sum(support.total() for support in expected_category_conflicts.values()):
+        raise RuntimeError("skill graph category conflict audit differs from extraction evidence")
     schema = {
         "jobs": {"job_id", "duty", "source_modified_at", "source_text_sha256"},
         "skills": {"skill", "category", "support"},
@@ -668,20 +784,49 @@ def validate_graph(output: Path, split_manifest_path: Path) -> dict[str, object]
     for name, rows in tables.items():
         for position, row in enumerate(rows):
             exact_keys(row, schema[name], f"{name} row {position}")
+    _sorted_unique_identities(tables["jobs"], ("job_id",), "jobs")
+    _sorted_unique_identities(tables["skills"], ("skill",), "skills")
+    job_skill_ids = _sorted_unique_identities(
+        tables["job_skills"], ("job_id", "skill"), "job_skills"
+    )
+    duty_skill_ids = _sorted_unique_identities(
+        tables["duty_skills"], ("duty", "skill"), "duty_skills"
+    )
+    relation_ids = _sorted_unique_identities(
+        tables["skill_relations"], ("source", "type", "target"), "skill_relations"
+    )
+    relation_evidence_ids = _sorted_unique_identities(
+        tables["relation_evidence"],
+        ("job_id", "source", "type", "target"),
+        "relation_evidence",
+    )
     job_ids = [str(row["job_id"]) for row in tables["jobs"]]
     job_timestamps = [
         _timestamp(row["source_modified_at"], "graph job source timestamp")
         for row in tables["jobs"]
     ]
     skills = [str(row["skill"]) for row in tables["skills"]]
-    relations = {
-        (str(row["source"]), str(row["type"]), str(row["target"]))
-        for row in tables["skill_relations"]
-    }
     if (
-        job_ids != sorted(set(job_ids))
-        or any(not job_id.isascii() or not job_id.isdecimal() for job_id in job_ids)
-        or skills != sorted(set(skills))
+        any(
+            not job_id.isascii()
+            or not job_id.isdecimal()
+            or int(job_id) < 1
+            or job_id != str(int(job_id))
+            for job_id in job_ids
+        )
+        or any(
+            not isinstance(row["duty"], str)
+            or _normalize(row["duty"], "graph job duty") != row["duty"]
+            or _timestamp(row["source_modified_at"], "graph job source timestamp").isoformat()
+            != row["source_modified_at"]
+            for row in tables["jobs"]
+        )
+        or any(_normalize(skill, "graph skill") != skill for skill in skills)
+        or any(
+            not isinstance(row["category"], str)
+            or _normalize(row["category"], "graph skill category") != row["category"]
+            for row in tables["skills"]
+        )
         or not job_timestamps
         or max(job_timestamps)
         != _timestamp(manifest["max_source_timestamp"], "graph maximum source timestamp")
@@ -693,24 +838,91 @@ def validate_graph(output: Path, split_manifest_path: Path) -> dict[str, object]
         )
     ):
         raise RuntimeError("skill graph entities are duplicated or not canonical")
+    job_id_set = set(job_ids)
+    skill_set = set(skills)
+    job_skill_set = set(job_skill_ids)
     if any(
-        str(row["job_id"]) not in job_ids or str(row["skill"]) not in skills
+        str(row["job_id"]) not in job_id_set
+        or str(row["skill"]) not in skill_set
+        or _normalize(row["skill"], "job skill") != row["skill"]
+        or not isinstance(row["surface"], str)
+        or _normalize(row["surface"], "job skill surface") != row["surface"]
+        or not isinstance(row["evidence_span"], str)
+        or not row["evidence_span"]
         for row in tables["job_skills"]
-    ) or any(str(row["skill"]) not in skills for row in tables["duty_skills"]):
+    ):
         raise RuntimeError("skill graph edge references an unknown entity")
+    minimum_support = cast(int, manifest["minimum_support"])
+    observed_skill_support = Counter(skill for _job_id, skill in job_skill_ids)
+    declared_skill_support: dict[str, int] = {}
+    for row in tables["skills"]:
+        skill = str(row["skill"])
+        support = _positive_integer(row["support"], f"skill support {skill}")
+        if support < minimum_support or support != observed_skill_support[skill]:
+            raise RuntimeError("skill support differs from Job-to-Skill evidence")
+        declared_skill_support[skill] = support
+    if set(observed_skill_support) != skill_set:
+        raise RuntimeError("skill nodes differ from Job-to-Skill evidence")
+
+    duty_by_job = {str(row["job_id"]): str(row["duty"]) for row in tables["jobs"]}
+    duty_job_counts = Counter(duty_by_job.values())
+    observed_duty_support = Counter((duty_by_job[job_id], skill) for job_id, skill in job_skill_ids)
+    if set(duty_skill_ids) != set(observed_duty_support):
+        raise RuntimeError("Duty-to-Skill edges differ from Job-to-Skill evidence")
+    for row in tables["duty_skills"]:
+        duty_identity = (str(row["duty"]), str(row["skill"]))
+        if (
+            duty_identity[1] not in skill_set
+            or _normalize(duty_identity[0], "duty skill duty") != duty_identity[0]
+            or _normalize(duty_identity[1], "duty skill") != duty_identity[1]
+        ):
+            raise RuntimeError("skill graph edge references an unknown entity")
+        support = _positive_integer(row["support"], f"duty skill support {duty_identity}")
+        weight = _unit_weight(row["weight"], f"duty skill weight {duty_identity}")
+        if (
+            support != observed_duty_support[duty_identity]
+            or weight != support / duty_job_counts[duty_identity[0]]
+        ):
+            raise RuntimeError("Duty-to-Skill aggregate differs from Job-to-Skill evidence")
+
     if any(
         str(row["source"]) not in skills
         or str(row["target"]) not in skills
+        or str(row["source"]) == str(row["target"])
+        or _normalize(row["source"], "relation source") != row["source"]
+        or _normalize(row["target"], "relation target") != row["target"]
         or str(row["type"]) not in RELATION_TYPES
         for row in tables["skill_relations"]
     ):
         raise RuntimeError("skill relation references an unknown entity or type")
+    relation_set = set(relation_ids)
     if any(
-        str(row["job_id"]) not in job_ids
-        or (str(row["source"]), str(row["type"]), str(row["target"])) not in relations
+        str(row["job_id"]) not in job_id_set
+        or (str(row["source"]), str(row["type"]), str(row["target"])) not in relation_set
+        or (str(row["job_id"]), str(row["source"])) not in job_skill_set
+        or (str(row["job_id"]), str(row["target"])) not in job_skill_set
+        or not isinstance(row["evidence_span"], str)
+        or not row["evidence_span"]
         for row in tables["relation_evidence"]
     ):
         raise RuntimeError("relation evidence references an unknown relation")
+    observed_relation_support = Counter(identity[1:] for identity in relation_evidence_ids)
+    if relation_set != set(observed_relation_support):
+        raise RuntimeError("skill relations differ from relation evidence")
+    for row in tables["skill_relations"]:
+        relation_identity = (str(row["source"]), str(row["type"]), str(row["target"]))
+        support = _positive_integer(row["support"], f"skill relation support {relation_identity}")
+        weight = _unit_weight(row["weight"], f"skill relation weight {relation_identity}")
+        expected_weight = support / math.sqrt(
+            declared_skill_support[relation_identity[0]]
+            * declared_skill_support[relation_identity[2]]
+        )
+        if (
+            support < minimum_support
+            or support != observed_relation_support[relation_identity]
+            or weight != expected_weight
+        ):
+            raise RuntimeError("skill relation aggregate differs from relation evidence")
     counts = {name: len(rows) for name, rows in tables.items()}
     if counts != manifest["counts"] or len(job_ids) != manifest["source_records"]:
         raise RuntimeError("skill graph row counts differ from manifest")
@@ -728,11 +940,21 @@ def validate_graph(output: Path, split_manifest_path: Path) -> dict[str, object]
 
 
 def trace_skill(
-    output: Path, split_manifest_path: Path, skill: str, limit: int
+    output: Path,
+    split_manifest_path: Path,
+    evidence_path: Path,
+    extraction_manifest_path: Path,
+    skill: str,
+    limit: int,
 ) -> dict[str, object]:
     if not 1 <= limit <= 100:
         raise ValueError("trace limit must be between 1 and 100")
-    validate_graph(output, split_manifest_path)
+    validate_graph(
+        output,
+        split_manifest_path,
+        evidence_path=evidence_path,
+        extraction_manifest_path=extraction_manifest_path,
+    )
     canonical = _normalize(skill, "trace skill")
     job_edges = _read_jsonl(output / GRAPH_FILES["job_skills"], "job_skills")
     duty_edges = _read_jsonl(output / GRAPH_FILES["duty_skills"], "duty_skills")
@@ -762,6 +984,29 @@ def trace_skill(
         ][:limit]
         for row in relations
     }
+    paths = []
+    for row in relations:
+        related_skill = str(row["target"] if row["source"] == canonical else row["source"])
+        related_jobs = [
+            {
+                "job_id": edge["job_id"],
+                "surface": edge["surface"],
+                "evidence_span": edge["evidence_span"],
+            }
+            for edge in job_edges
+            if edge["skill"] == related_skill
+        ][:limit]
+        paths.append(
+            {
+                "anchor_skill": canonical,
+                "edge": dict(row),
+                "related_skill": related_skill,
+                "related_jobs": related_jobs,
+                "relation_evidence": relation_evidence[
+                    (str(row["source"]), str(row["type"]), str(row["target"]))
+                ],
+            }
+        )
     return {
         "anchor": canonical,
         "maximum_hops": 1,
@@ -783,12 +1028,15 @@ def trace_skill(
             }
             for row in relations
         ],
+        "paths": paths,
     }
 
 
 def _graph_s3(
     output: Path,
     split_manifest_path: Path,
+    evidence_path: Path,
+    extraction_manifest_path: Path,
     *,
     bucket: str,
     prefix: str,
@@ -797,7 +1045,12 @@ def _graph_s3(
     region: str,
     publish: bool,
 ) -> dict[str, object]:
-    validation = validate_graph(output, split_manifest_path)
+    validation = validate_graph(
+        output,
+        split_manifest_path,
+        evidence_path=evidence_path,
+        extraction_manifest_path=extraction_manifest_path,
+    )
     if region != "us-west-2":
         raise RuntimeError("skill graph S3 publication is pinned to us-west-2")
     session = boto3.Session(profile_name=profile, region_name=region)
@@ -856,15 +1109,21 @@ def main() -> None:
     verify = commands.add_parser("validate")
     verify.add_argument("--output", type=Path, required=True)
     verify.add_argument("--split-manifest", type=Path, required=True)
+    verify.add_argument("--evidence", type=Path, required=True)
+    verify.add_argument("--extraction-manifest", type=Path, required=True)
     trace = commands.add_parser("trace")
     trace.add_argument("--output", type=Path, required=True)
     trace.add_argument("--split-manifest", type=Path, required=True)
+    trace.add_argument("--evidence", type=Path, required=True)
+    trace.add_argument("--extraction-manifest", type=Path, required=True)
     trace.add_argument("--skill", required=True)
     trace.add_argument("--limit", type=int, default=20)
     for name in ("publish-s3", "verify-s3"):
         command = commands.add_parser(name)
         command.add_argument("--output", type=Path, required=True)
         command.add_argument("--split-manifest", type=Path, required=True)
+        command.add_argument("--evidence", type=Path, required=True)
+        command.add_argument("--extraction-manifest", type=Path, required=True)
         command.add_argument("--bucket", required=True)
         command.add_argument("--prefix", required=True)
         command.add_argument("--expected-owner", default="378849533305")
@@ -880,13 +1139,27 @@ def main() -> None:
             minimum_support=args.minimum_support,
         )
     elif args.command == "validate":
-        result = validate_graph(args.output, args.split_manifest)
+        result = validate_graph(
+            args.output,
+            args.split_manifest,
+            evidence_path=args.evidence,
+            extraction_manifest_path=args.extraction_manifest,
+        )
     elif args.command == "trace":
-        result = trace_skill(args.output, args.split_manifest, args.skill, args.limit)
+        result = trace_skill(
+            args.output,
+            args.split_manifest,
+            args.evidence,
+            args.extraction_manifest,
+            args.skill,
+            args.limit,
+        )
     else:
         result = _graph_s3(
             args.output,
             args.split_manifest,
+            args.evidence,
+            args.extraction_manifest,
             bucket=args.bucket,
             prefix=args.prefix,
             expected_owner=args.expected_owner,

@@ -161,6 +161,7 @@ def test_environment_runtime_uses_manifest_ports_and_demo_fixture(tmp_path: Path
     result = engine.search(SearchQuery("工程師"), limit=10)
 
     assert isinstance(engine, SearchEngine)
+    assert engine.artifact_manifest_sha256 == hashlib.sha256(manifest_path.read_bytes()).hexdigest()
     assert len(received) == 1 and not received[0][1]
     assert result.trace.as_of == datetime(2026, 6, 8, 15, 59, 59, 999_000, tzinfo=UTC)
     assert lexical.requests[0].minimum_updated_at == datetime(

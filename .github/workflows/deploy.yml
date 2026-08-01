@@ -1,4 +1,5 @@
 name: Deploy production
+run-name: Deploy ${{ inputs.artifact_manifest_sha }} ${{ inputs.deployment_id }}
 
 on:
   workflow_dispatch:
@@ -9,6 +10,15 @@ on:
         type: string
       artifact_manifest_sha:
         description: Lowercase SHA-256 identifying the immutable runtime bundle
+        required: true
+        type: string
+      alarm_email:
+        description: Optional email for 5xx/unhealthy-host alarms; confirm the SNS email after deployment
+        required: false
+        default: ''
+        type: string
+      deployment_id:
+        description: Unique UUID used to correlate this exact deployment request
         required: true
         type: string
       gpu_instance_type:
@@ -59,9 +69,11 @@ jobs:
       - name: Validate deployment inputs
         env:
           ARTIFACT_MANIFEST_SHA: ${{ inputs.artifact_manifest_sha }}
+          ALARM_EMAIL: ${{ inputs.alarm_email }}
           AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           CPU_DESIRED_COUNT: ${{ inputs.cpu_desired_count }}
           DEPLOY_ENABLED: ${{ vars.DEPLOY_ENABLED }}
+          DEPLOYMENT_ID: ${{ inputs.deployment_id }}
           GPU_DESIRED_COUNT: ${{ inputs.gpu_desired_count }}
           GPU_INSTANCE_TYPE: ${{ inputs.gpu_instance_type }}
           GPU_MAX_CAPACITY: ${{ inputs.gpu_max_capacity }}
@@ -71,6 +83,8 @@ jobs:
           [[ "$AWS_DEPLOY_ROLE_ARN" =~ ^arn:aws:iam::378849533305:role/[A-Za-z0-9+=,.@_/-]+$ ]]
           [[ "$DEPLOY_ENABLED" == "true" ]]
           [[ "$ARTIFACT_MANIFEST_SHA" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$DEPLOYMENT_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]
+          [[ -z "$ALARM_EMAIL" || "$ALARM_EMAIL" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]
           [[ "$GPU_INSTANCE_TYPE" =~ ^[a-z0-9][a-z0-9.-]*$ ]]
           [[ "$CPU_DESIRED_COUNT" =~ ^[0-9]+$ ]]
           [[ "$GPU_MIN_CAPACITY" =~ ^[0-9]+$ ]]
@@ -205,6 +219,7 @@ jobs:
 
       - name: Deploy the application stack
         env:
+          ALARM_EMAIL: ${{ inputs.alarm_email }}
           ARTIFACT_MANIFEST_SHA: ${{ inputs.artifact_manifest_sha }}
           CPU_DESIRED_COUNT: ${{ inputs.cpu_desired_count }}
           GPU_DESIRED_COUNT: ${{ inputs.gpu_desired_count }}
@@ -218,6 +233,7 @@ jobs:
             --require-approval never \
             --outputs-file "$GITHUB_WORKSPACE/platform-outputs.json" \
             --parameters "WorkRetrievalPlatform:ApiImageUri=$API_IMAGE_URI" \
+            --parameters "WorkRetrievalPlatform:AlarmEmail=$ALARM_EMAIL" \
             --parameters "WorkRetrievalPlatform:ArtifactManifestSha256=$ARTIFACT_MANIFEST_SHA" \
             --parameters "WorkRetrievalPlatform:CpuServiceDesiredCount=$CPU_DESIRED_COUNT" \
             --parameters "WorkRetrievalPlatform:GpuInstanceType=$GPU_INSTANCE_TYPE" \
@@ -242,34 +258,60 @@ jobs:
             --id "$INVALIDATION_ID"
 
       - name: Smoke test the public application
+        env:
+          ARTIFACT_MANIFEST_SHA: ${{ inputs.artifact_manifest_sha }}
         run: |
           set -euo pipefail
           WEB_URL="$(jq -er '.WorkRetrievalPlatform.WebUrl' platform-outputs.json)"
           [[ "$WEB_URL" =~ ^https://[a-z0-9.-]+$ ]]
           CURL=(curl --silent --show-error --fail --retry 18 --retry-all-errors --retry-delay 10)
           "${CURL[@]}" "$WEB_URL/healthz" >/dev/null
-          "${CURL[@]}" "$WEB_URL/readyz" >/dev/null
-          WEB_HTML="$("${CURL[@]}" "$WEB_URL/")"
-          grep -F '職缺搜尋' <<<"$WEB_HTML" >/dev/null
-          SEARCH="$("${CURL[@]}" \
-            --header 'content-type: application/json' \
-            --data '{"query":"deployment smoke test","location_code":[],"duty_code":[]}' \
-            "$WEB_URL/api/v1/jobs/search")"
-          JOB_ID="$(SEARCH_JSON="$SEARCH" python - <<'PY'
+          READY_JSON="$("${CURL[@]}" "$WEB_URL/readyz")"
+          READY_JSON="$READY_JSON" python - <<'PY'
           import json
           import os
 
-          payload = json.loads(os.environ["SEARCH_JSON"])
-          request_id = payload.get("request_id")
-          results = payload.get("result")
-          if not isinstance(request_id, str) or not request_id:
-              raise SystemExit("search smoke returned no request_id")
-          if not isinstance(results, list) or not 1 <= len(results) <= 10:
-              raise SystemExit("search smoke returned an invalid result list")
-          job_id = results[0].get("job_id") if isinstance(results[0], dict) else None
-          if not isinstance(job_id, str) or not job_id.isascii() or not job_id.isdecimal():
-              raise SystemExit("search smoke returned an invalid job_id")
-          print(job_id)
+          payload = json.loads(os.environ["READY_JSON"])
+          expected = {
+              "status": "ready",
+              "artifact_manifest_sha256": os.environ["ARTIFACT_MANIFEST_SHA"],
+          }
+          if payload != expected:
+              raise SystemExit("public readiness does not identify the requested runtime manifest")
+          PY
+          WEB_HTML="$("${CURL[@]}" "$WEB_URL/")"
+          grep -F '職缺搜尋' <<<"$WEB_HTML" >/dev/null
+          SEARCH_A="$("${CURL[@]}" \
+            --header 'content-type: application/json' \
+            --data '{"query":"軟體工程師","location_code":[],"duty_code":[]}' \
+            "$WEB_URL/api/v1/jobs/search")"
+          SEARCH_B="$("${CURL[@]}" \
+            --header 'content-type: application/json' \
+            --data '{"query":"護理師","location_code":[],"duty_code":[]}' \
+            "$WEB_URL/api/v1/jobs/search")"
+          JOB_ID="$(SEARCH_A="$SEARCH_A" SEARCH_B="$SEARCH_B" python - <<'PY'
+          import json
+          import os
+
+          job_lists = []
+          for name in ("SEARCH_A", "SEARCH_B"):
+              payload = json.loads(os.environ[name])
+              request_id = payload.get("request_id")
+              results = payload.get("result")
+              if not isinstance(request_id, str) or not request_id:
+                  raise SystemExit(f"{name} returned no request_id")
+              if not isinstance(results, list) or not 1 <= len(results) <= 10:
+                  raise SystemExit(f"{name} returned an invalid result list")
+              job_ids = [result.get("job_id") for result in results if isinstance(result, dict)]
+              if len(job_ids) != len(results) or any(
+                  not isinstance(job_id, str) or not job_id.isascii() or not job_id.isdecimal()
+                  for job_id in job_ids
+              ):
+                  raise SystemExit(f"{name} returned an invalid job_id")
+              job_lists.append(job_ids)
+          if job_lists[0] == job_lists[1]:
+              raise SystemExit("distinct queries returned the same ranking")
+          print(job_lists[0][0])
           PY
           )"
           DETAIL="$("${CURL[@]}" "$WEB_URL/api/v1/job-details/$JOB_ID")"

@@ -19,6 +19,7 @@ from work_retrieval_core import (
 )
 
 AS_OF = datetime(2026, 6, 8, tzinfo=UTC)
+MANIFEST_SHA256 = "a" * 64
 
 
 def _result(job_ids: tuple[str, ...]) -> SearchResult:
@@ -47,6 +48,10 @@ class FakeEngine:
         self.error: Exception | None = None
         self.detail_error: Exception | None = None
         self.details = {"2": {"職務名稱": "後端工程師", "工作城市": "台北市"}}
+
+    @property
+    def artifact_manifest_sha256(self) -> str:
+        return MANIFEST_SHA256
 
     def search(self, query: SearchQuery, *, limit: int) -> SearchResult:
         self.queries.append((query, limit))
@@ -231,6 +236,19 @@ def test_body_rules_apply_to_get_without_breaking_bodyless_get(
     assert wrong_type.json()["error"]["code"] == "unsupported_media_type"
 
 
+def test_readiness_returns_the_loaded_artifact_manifest_identity(
+    client: Callable[[], TestClient],
+) -> None:
+    with client() as http:
+        response = http.get("/readyz")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ready",
+        "artifact_manifest_sha256": MANIFEST_SHA256,
+    }
+
+
 @pytest.mark.parametrize("method,status", [("put", 405), ("delete", 405)])
 def test_method_and_path_errors_use_error_envelope(
     client: Callable[[], TestClient], method: str, status: int
@@ -317,6 +335,19 @@ def test_factory_is_required_and_startup_errors_propagate() -> None:
         TestClient(create_app(invalid_factory)),
     ):
         pass
+
+    class InvalidIdentityEngine(FakeEngine):
+        @property
+        def artifact_manifest_sha256(self) -> str:
+            return "not-a-sha"
+
+    invalid_identity = InvalidIdentityEngine()
+    with (
+        pytest.raises(TypeError, match="artifact manifest SHA-256"),
+        TestClient(create_app(lambda: invalid_identity)),
+    ):
+        pass
+    assert invalid_identity.closed
 
 
 def test_access_log_does_not_include_query(

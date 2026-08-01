@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import importlib
 import io
 import json
+import subprocess
 import sys
+from collections import defaultdict
+from itertools import pairwise
 from pathlib import Path
 
 import numpy as np
 import pytest
+from botocore.session import get_session
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
 
@@ -18,6 +23,7 @@ import multiview_embedding_pipeline as embeddings
 import pipeline_contract as contract
 import query_correction_pipeline as query_corrections
 import skill_graph_pipeline as graph
+import tantivy_graph_off_runner as graph_off
 import tantivy_index_pipeline as tantivy_pipeline
 import whole_embedding_pipeline as whole_embeddings
 from work_retrieval_core.serialization import FULL_JOB_FIELDS
@@ -52,12 +58,43 @@ def _split_manifest(tmp_path: Path, qrels: bytes = b"qrels") -> tuple[Path, Path
 def _skill_evidence(tmp_path: Path) -> tuple[Path, Path, Path]:
     split_path, _ = _split_manifest(tmp_path)
     evidence_path = tmp_path / "evidence.jsonl"
-    timestamps = ("2026-06-06T10:00:00+08:00", "2026-06-07T09:00:00+08:00")
+    timestamps = (
+        "2026-06-06T10:00:00+08:00",
+        "2026-06-07T09:00:00+08:00",
+        "2026-06-07T10:00:00+08:00",
+    )
     records: list[dict[str, object]] = []
     for index, timestamp in enumerate(timestamps, start=1):
-        source = "Pyhton 與 SQL 是此職缺必要技能。"
+        source = "Pyhton 與 SQL 是此職缺必要技能。" if index < 3 else "SQL 是此職缺必要技能。"
         job_id = str(100 + index)
         source_sha256 = hashlib.sha256(source.encode()).hexdigest()
+        skills = [
+            {
+                "canonical_name": "sql",
+                "surface": "SQL",
+                "category": "query language",
+                "evidence_span": "SQL",
+            }
+        ]
+        relations: list[dict[str, object]] = []
+        if index < 3:
+            skills.insert(
+                0,
+                {
+                    "canonical_name": "python",
+                    "surface": "Pyhton",
+                    "category": ("programming language" if index == 1 else "programming languages"),
+                    "evidence_span": "Pyhton",
+                },
+            )
+            relations.append(
+                {
+                    "source": "python",
+                    "type": "USED_WITH",
+                    "target": "sql",
+                    "evidence_span": "Pyhton 與 SQL",
+                }
+            )
         records.append(
             {
                 "record_id": hashlib.sha256(f"{job_id}\0{source_sha256}".encode()).hexdigest(),
@@ -66,28 +103,8 @@ def _skill_evidence(tmp_path: Path) -> tuple[Path, Path, Path]:
                 "source_modified_at": timestamp,
                 "source_text": source,
                 "source_text_sha256": source_sha256,
-                "skills": [
-                    {
-                        "canonical_name": "python",
-                        "surface": "Pyhton",
-                        "category": "programming language",
-                        "evidence_span": "Pyhton",
-                    },
-                    {
-                        "canonical_name": "sql",
-                        "surface": "SQL",
-                        "category": "query language",
-                        "evidence_span": "SQL",
-                    },
-                ],
-                "relations": [
-                    {
-                        "source": "python",
-                        "type": "USED_WITH",
-                        "target": "sql",
-                        "evidence_span": "Pyhton 與 SQL",
-                    }
-                ],
+                "skills": skills,
+                "relations": relations,
                 "skill_rejection_count": 0,
                 "relation_rejection_count": 0,
             }
@@ -115,13 +132,13 @@ def _skill_evidence(tmp_path: Path) -> tuple[Path, Path, Path]:
             "responses_inventory_sha256": "3" * 64,
             "evidence_sha256": contract.sha256_file(evidence_path),
             "sampling_policy": "duty_stratified_sqrt_support_stable_hash_v1",
-            "sample_limit": 2,
-            "eligible_train_records": 2,
+            "sample_limit": len(records),
+            "eligible_train_records": len(records),
             "sampling_sha256": hashlib.sha256(
                 contract.canonical_json([record["record_id"] for record in records])
             ).hexdigest(),
-            "source_records": 2,
-            "processed_records": 2,
+            "source_records": len(records),
+            "processed_records": len(records),
             "input_tokens": 10,
             "output_tokens": 10,
             "skill_rejections": 0,
@@ -129,6 +146,133 @@ def _skill_evidence(tmp_path: Path) -> tuple[Path, Path, Path]:
         },
     )
     return evidence_path, manifest_path, split_path
+
+
+def _graph_search_jobs_csv(tmp_path: Path) -> Path:
+    path = tmp_path / "graph-search-jobs.csv"
+    extra = (
+        whole_embeddings.JOB_ID_FIELD,
+        tantivy_pipeline.DEFAULT_LOCATION_CODE_FIELD,
+        tantivy_pipeline.DEFAULT_DUTY_CODE_FIELD,
+        tantivy_pipeline.DEFAULT_VISIBILITY_FIELD,
+        tantivy_pipeline.DEFAULT_MODIFIED_AT_FIELD,
+    )
+    fields = list(dict.fromkeys([*(label for label, _field in FULL_JOB_FIELDS), *extra]))
+    rows = (
+        ("101", "Pyhton", "台北市", "100100", "1", "2026-06-06T10:00:00+08:00"),
+        ("102", "Pyhton", "台北市", "100100", "1", "2026-06-07T10:00:00+08:00"),
+        ("103", "SQL", "台北市", "100100", "1", "2026-06-07T11:00:00+08:00"),
+        ("104", "SQL", "台北市", "100100", "1", "2026-06-07T12:00:00+08:00"),
+        ("105", "SQL", "高雄市", "200200", "1", "2026-06-07T12:00:00+08:00"),
+        ("106", "SQL", "台北市", "100100", "1", "2025-01-01T12:00:00+08:00"),
+        ("107", "SQL", "台北市", "100100", "0", "2026-06-07T12:00:00+08:00"),
+    )
+    with path.open("w", encoding="utf-8", newline="") as target:
+        writer = csv.DictWriter(target, fieldnames=fields)
+        writer.writeheader()
+        for job_id, skills, city, city_code, visible, timestamp in rows:
+            row = dict.fromkeys(fields, "")
+            row.update(
+                {
+                    whole_embeddings.JOB_ID_FIELD: job_id,
+                    "職務名稱": f"{skills} 資料工程師",
+                    "職務小類": "資料工程師",
+                    "職務中類": "資訊軟體",
+                    "職務大類": "資訊科技",
+                    "電腦技能資料": skills,
+                    "工作城市": city,
+                    "職務內容": f"使用 {skills} 建立資料平台",
+                    tantivy_pipeline.DEFAULT_LOCATION_CODE_FIELD: city_code,
+                    tantivy_pipeline.DEFAULT_DUTY_CODE_FIELD: "140200",
+                    tantivy_pipeline.DEFAULT_VISIBILITY_FIELD: visible,
+                    tantivy_pipeline.DEFAULT_MODIFIED_AT_FIELD: timestamp,
+                }
+            )
+            writer.writerow(row)
+    return path
+
+
+def _graph_candidate_fixture(tmp_path: Path) -> dict[str, Path]:
+    candidates = importlib.import_module("graph_candidate_runner")
+    evidence, extraction_manifest, split_manifest = _skill_evidence(tmp_path)
+    graph_output = tmp_path / "graph"
+    graph.build_graph(
+        evidence_path=evidence,
+        extraction_manifest_path=extraction_manifest,
+        split_manifest_path=split_manifest,
+        output=graph_output,
+        minimum_support=2,
+    )
+    jobs_csv = _graph_search_jobs_csv(tmp_path)
+    tantivy_output = tmp_path / "tantivy"
+    tantivy_pipeline.build_tantivy(
+        jobs_csv=jobs_csv,
+        output=tantivy_output,
+        artifact_prefix=tantivy_pipeline.DEFAULT_ARTIFACT_PREFIX,
+        location_code_field=tantivy_pipeline.DEFAULT_LOCATION_CODE_FIELD,
+        location_term_field=tantivy_pipeline.DEFAULT_LOCATION_TERM_FIELD,
+        duty_code_field=tantivy_pipeline.DEFAULT_DUTY_CODE_FIELD,
+        duty_term_field=tantivy_pipeline.DEFAULT_DUTY_TERM_FIELD,
+        visibility_field=tantivy_pipeline.DEFAULT_VISIBILITY_FIELD,
+        modified_at_field=tantivy_pipeline.DEFAULT_MODIFIED_AT_FIELD,
+        correction_candidate_path=None,
+        correction_attestation_path=None,
+    )
+    queries = tmp_path / "queries.jsonl"
+    _write_jsonl(
+        queries,
+        [
+            {
+                "qid": "q1",
+                "query": "Pyhton",
+                "as_of": "2026-06-08T23:59:59.999+08:00",
+                "location_codes": ["100100"],
+                "duty_codes": ["140200"],
+            },
+            {
+                "qid": "q2",
+                "query": "Python",
+                "as_of": "2026-06-08T23:59:59.999+08:00",
+                "location_codes": ["100100"],
+                "duty_codes": ["140200"],
+            },
+        ],
+    )
+    baseline = tmp_path / "baseline"
+    graph_off.generate_graph_off(
+        split_manifest_path=split_manifest,
+        queries_path=queries,
+        tantivy_output=tantivy_output,
+        jobs_csv=jobs_csv,
+        artifact_prefix=tantivy_pipeline.DEFAULT_ARTIFACT_PREFIX,
+        output=baseline,
+    )
+    generated = tmp_path / "generated"
+    candidates.generate_graph_on(
+        split_manifest_path=split_manifest,
+        graph_output=graph_output,
+        evidence_path=evidence,
+        extraction_manifest_path=extraction_manifest,
+        graph_off_run=baseline / "graph-off.run",
+        graph_off_manifest=baseline / "graph-off.manifest.json",
+        queries_path=queries,
+        jobs_csv=jobs_csv,
+        tantivy_output=tantivy_output,
+        artifact_prefix=tantivy_pipeline.DEFAULT_ARTIFACT_PREFIX,
+        output=generated,
+    )
+    return {
+        "split": split_manifest,
+        "evidence": evidence,
+        "extraction_manifest": extraction_manifest,
+        "qrels": tmp_path / "qrels.txt",
+        "graph": graph_output,
+        "jobs": jobs_csv,
+        "tantivy": tantivy_output,
+        "queries": queries,
+        "baseline": baseline,
+        "generated": generated,
+    }
 
 
 def test_skill_graph_build_validate_and_trace(tmp_path: Path) -> None:
@@ -142,10 +286,23 @@ def test_skill_graph_build_validate_and_trace(tmp_path: Path) -> None:
         output=output,
         minimum_support=2,
     )
-    validation = graph.validate_graph(output, split_manifest)
-    trace = graph.trace_skill(output, split_manifest, "Python", 10)
+    validation = graph.validate_graph(
+        output,
+        split_manifest,
+        evidence_path=evidence,
+        extraction_manifest_path=extraction_manifest,
+    )
+    trace = graph.trace_skill(output, split_manifest, evidence, extraction_manifest, "Python", 10)
 
     assert manifest["graph_kind"] == "llm-evidence-locked-typed-entity-graph"
+    assert manifest["category_resolution_policy"] == "support_majority_then_lexical_v1"
+    assert manifest["category_conflict_skills"] == 1
+    assert manifest["category_mentions_in_conflict_sets"] == 2
+    skills = {
+        row["skill"]: row["category"]
+        for row in graph._read_jsonl(output / graph.GRAPH_FILES["skills"], "skills")
+    }
+    assert skills["python"] == "programming language"
     assert validation["passed"] is True
     assert trace["jobs"] == [
         {"job_id": "101", "evidence_span": "Pyhton"},
@@ -156,6 +313,250 @@ def test_skill_graph_build_validate_and_trace(tmp_path: Path) -> None:
         {"job_id": "101", "evidence_span": "Pyhton 與 SQL"},
         {"job_id": "102", "evidence_span": "Pyhton 與 SQL"},
     ]
+    assert trace["paths"] == [
+        {
+            "anchor_skill": "python",
+            "edge": {
+                "source": "python",
+                "type": "USED_WITH",
+                "target": "sql",
+                "support": 2,
+                "weight": pytest.approx(2 / (2 * 3) ** 0.5),
+            },
+            "related_skill": "sql",
+            "related_jobs": [
+                {"job_id": "101", "surface": "sql", "evidence_span": "SQL"},
+                {"job_id": "102", "surface": "sql", "evidence_span": "SQL"},
+                {"job_id": "103", "surface": "sql", "evidence_span": "SQL"},
+            ],
+            "relation_evidence": [
+                {"job_id": "101", "evidence_span": "Pyhton 與 SQL"},
+                {"job_id": "102", "evidence_span": "Pyhton 與 SQL"},
+            ],
+        }
+    ]
+
+
+def _refresh_graph_artifact(output: Path, filename: str) -> None:
+    manifest_path = output / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    artifact = next(item for item in manifest["artifacts"] if item["path"] == filename)
+    artifact_path = output / filename
+    artifact["sha256"] = contract.sha256_file(artifact_path)
+    artifact["size_bytes"] = artifact_path.stat().st_size
+    manifest_path.unlink()
+    _write_json(manifest_path, manifest)
+
+
+def test_skill_graph_validation_rejects_nonfinite_weight(tmp_path: Path) -> None:
+    evidence, extraction_manifest, split_manifest = _skill_evidence(tmp_path)
+    output = tmp_path / "graph"
+    graph.build_graph(
+        evidence_path=evidence,
+        extraction_manifest_path=extraction_manifest,
+        split_manifest_path=split_manifest,
+        output=output,
+        minimum_support=2,
+    )
+    relations_path = output / graph.GRAPH_FILES["skill_relations"]
+    relation = json.loads(relations_path.read_text(encoding="utf-8"))
+    relation["weight"] = float("nan")
+    relations_path.write_text(json.dumps(relation) + "\n", encoding="utf-8")
+    _refresh_graph_artifact(output, graph.GRAPH_FILES["skill_relations"])
+
+    with pytest.raises(RuntimeError, match="cannot be read"):
+        graph.validate_graph(
+            output,
+            split_manifest,
+            evidence_path=evidence,
+            extraction_manifest_path=extraction_manifest,
+        )
+
+
+def test_skill_graph_validation_recomputes_relation_aggregates(tmp_path: Path) -> None:
+    evidence, extraction_manifest, split_manifest = _skill_evidence(tmp_path)
+    output = tmp_path / "graph"
+    graph.build_graph(
+        evidence_path=evidence,
+        extraction_manifest_path=extraction_manifest,
+        split_manifest_path=split_manifest,
+        output=output,
+        minimum_support=2,
+    )
+    relations_path = output / graph.GRAPH_FILES["skill_relations"]
+    relation = json.loads(relations_path.read_text(encoding="utf-8"))
+    relation["support"] = 3
+    _write_jsonl(relations_path, [relation])
+    _refresh_graph_artifact(output, graph.GRAPH_FILES["skill_relations"])
+
+    with pytest.raises(RuntimeError, match="pinned LLM extraction evidence"):
+        graph.validate_graph(
+            output,
+            split_manifest,
+            evidence_path=evidence,
+            extraction_manifest_path=extraction_manifest,
+        )
+
+
+def test_skill_graph_validation_rejects_forged_relation_evidence(tmp_path: Path) -> None:
+    evidence, extraction_manifest, split_manifest = _skill_evidence(tmp_path)
+    output = tmp_path / "graph"
+    graph.build_graph(
+        evidence_path=evidence,
+        extraction_manifest_path=extraction_manifest,
+        split_manifest_path=split_manifest,
+        output=output,
+        minimum_support=2,
+    )
+    for filename in ("skill-relations.jsonl", "relation-evidence.jsonl"):
+        path = output / filename
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        for row in rows:
+            row["type"] = "RELATED_TO"
+            if filename == "relation-evidence.jsonl":
+                row["evidence_span"] = "fabricated span not in source JD"
+        _write_jsonl(path, rows)
+        _refresh_graph_artifact(output, filename)
+
+    with pytest.raises(RuntimeError, match="pinned LLM extraction evidence"):
+        graph.validate_graph(
+            output,
+            split_manifest,
+            evidence_path=evidence,
+            extraction_manifest_path=extraction_manifest,
+        )
+
+
+def test_graph_on_is_generated_from_graph_off_and_frozen_graph(tmp_path: Path) -> None:
+    candidates = importlib.import_module("graph_candidate_runner")
+    fixture = _graph_candidate_fixture(tmp_path)
+    output = fixture["generated"]
+    manifest = json.loads((output / "graph-on.manifest.json").read_text(encoding="utf-8"))
+    run_rows = (output / "graph-on.run").read_text(encoding="utf-8").splitlines()
+    trace_rows = [
+        json.loads(line)
+        for line in (output / "graph-traces.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    output_job_ids = [line.split()[2] for line in run_rows]
+    scores_by_qid: dict[str, list[float]] = defaultdict(list)
+    for line in run_rows:
+        fields = line.split()
+        scores_by_qid[fields[0]].append(float(fields[4]))
+    graph_job_ids = {
+        json.loads(line)["job_id"]
+        for line in (fixture["graph"] / graph.GRAPH_FILES["jobs"])
+        .read_text(encoding="utf-8")
+        .splitlines()
+    }
+    assert {"101", "102"}.issubset(output_job_ids)
+    assert "104" in output_job_ids
+    assert "104" not in graph_job_ids
+    assert not {"105", "106", "107"}.intersection(output_job_ids)
+    assert all(
+        left > right for scores in scores_by_qid.values() for left, right in pairwise(scores)
+    )
+    assert manifest["generation"]["parameters"] == candidates.PARAMETERS
+    assert manifest["generation"]["graph_off_run_sha256"] == contract.sha256_file(
+        fixture["baseline"] / "graph-off.run"
+    )
+    assert manifest["generation"]["statistics"]["queries_with_query_exact_anchors"] == 2
+    assert manifest["generation"]["statistics"]["queries_with_consensus_anchors"] == 1
+    assert manifest["canonical_qids"] == ["q1", "q2"]
+    assert manifest["zero_result_qids"] == []
+    assert manifest["generation"]["statistics"]["novel_graph_candidate_rows"] >= 1
+    job_104_trace = next(
+        row for row in trace_rows if row["qid"] == "q2" and row["candidate_job_id"] == "104"
+    )
+    assert job_104_trace["baseline_rank"] is None
+    python_path = next(path for path in job_104_trace["paths"] if path["anchor_skill"] == "python")
+    assert python_path["anchor_source"] == "query_exact"
+    assert python_path["anchor_seed_job_ids"] == []
+    assert python_path["anchor_evidence"][0]["matched_alias"] == "python"
+    assert job_104_trace["path_count_total"] == (
+        job_104_trace["path_count_retained"] + job_104_trace["path_count_omitted"]
+    )
+    assert job_104_trace["graph_evidence_score"] == pytest.approx(
+        job_104_trace["retained_graph_evidence_score"]
+        + job_104_trace["omitted_graph_evidence_score"]
+    )
+    assert python_path["candidate_evidence"]["retriever"] == "temporal_v2_tantivy"
+    assert python_path["candidate_evidence"]["bridge_query"] == "sql"
+    assert "evidence_span" not in python_path["candidate_evidence"]
+
+
+@pytest.mark.parametrize(
+    "line, message",
+    [
+        ("bad/qid Q0 101 1 1 baseline\n", "qid"),
+        ("q1 Q0 job-101 1 1 baseline\n", "job_id"),
+        ("q1 Q0 0101 1 1 baseline\n", "job_id"),
+    ],
+)
+def test_graph_candidate_generation_rejects_unsafe_ids(
+    tmp_path: Path, line: str, message: str
+) -> None:
+    candidates = importlib.import_module("graph_candidate_runner")
+    run = tmp_path / "run"
+    run.write_text(line, encoding="utf-8")
+    with pytest.raises(RuntimeError, match=message):
+        candidates.read_trec_run(run)
+
+
+def test_graph_candidate_generation_rejects_a_larger_off_universe(tmp_path: Path) -> None:
+    candidates = importlib.import_module("graph_candidate_runner")
+    run = tmp_path / "run"
+    maximum = int(candidates.PARAMETERS["maximum_results"])
+    run.write_text(
+        "".join(
+            f"q1 Q0 {job_id} {rank} {maximum + 2 - rank} baseline\n"
+            for rank, job_id in enumerate(range(1, maximum + 2), start=1)
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="maximum_results"):
+        candidates.read_trec_run(run)
+
+
+def test_graph_candidate_protected_order_never_exceeds_novel_top_ten_cap() -> None:
+    candidates = importlib.import_module("graph_candidate_runner")
+    baseline_ranks = {"101": 1, "102": 2}
+    ordered = ["201", "202", "203", "204", "205", "101", "102"]
+
+    ranked = candidates._protected_order(ordered, baseline_ranks)
+
+    assert sum(job_id not in baseline_ranks for job_id in ranked[:10]) == 5
+    assert set(ranked) == set(ordered)
+
+
+def test_graph_candidate_top_ten_replaces_at_most_two_when_baseline_is_full() -> None:
+    candidates = importlib.import_module("graph_candidate_runner")
+    baseline_ranks = {str(job_id): job_id for job_id in range(1, 11)}
+    ordered = ["201", "202", "203", *baseline_ranks]
+
+    ranked = candidates._protected_order(ordered, baseline_ranks)
+
+    assert sum(job_id not in baseline_ranks for job_id in ranked[:10]) == 2
+    assert set(ranked) == set(ordered)
+
+
+def test_graph_ablation_wrapper_generates_before_evaluation() -> None:
+    script = Path(__file__).parents[1] / "scripts" / "run_graph_ablation.sh"
+    check = subprocess.run(["bash", "-n", str(script)], check=False, capture_output=True, text=True)
+
+    assert check.returncode == 0, check.stderr
+    source = script.read_text(encoding="utf-8")
+    assert (
+        source.index("tantivy_graph_off_runner.py")
+        < source.index("graph_candidate_runner.py")
+        < source.index("graph_ablation_runner.py")
+    )
+    assert source.count('--queries "$6"') == 3
+    assert source.count('--jobs-csv "$7"') == 3
+    assert source.count('--tantivy-output "$8"') == 3
+    assert source.count('--evidence "$3"') == 2
+    assert source.count('--extraction-manifest "$4"') == 2
+    assert "OFF_RUN" not in source
 
 
 def test_skill_graph_rejects_test_period_jd(tmp_path: Path) -> None:
@@ -433,70 +834,75 @@ def test_s3_publication_is_content_addressed_and_manifest_last(tmp_path: Path) -
 def test_fixed_input_graph_ablation_uses_external_evaluator(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    evidence, extraction_manifest, split_manifest = _skill_evidence(tmp_path)
-    graph_output = tmp_path / "graph"
-    graph.build_graph(
-        evidence_path=evidence,
-        extraction_manifest_path=extraction_manifest,
-        split_manifest_path=split_manifest,
-        output=graph_output,
-        minimum_support=2,
-    )
-    _, qrels = _split_manifest(tmp_path)
-    graph_manifest_sha256 = contract.sha256_file(graph_output / "manifest.json")
-    split_sha256 = contract.sha256_file(split_manifest)
-    non_graph_inputs = {"queries": "1" * 64, "retrieval_config": "2" * 64}
-    run_paths: dict[str, Path] = {}
-    manifest_paths: dict[str, Path] = {}
-    for variant in ("graph_off", "graph_on"):
-        run_path = tmp_path / f"{variant}.run"
-        run_path.write_text(f"{variant}\n", encoding="utf-8")
-        manifest_path = tmp_path / f"{variant}.json"
-        _write_json(
-            manifest_path,
-            {
-                "schema_version": 1,
-                "complete": True,
-                "variant": variant,
-                "split_manifest_sha256": split_sha256,
-                "graph_manifest_sha256": (graph_manifest_sha256 if variant == "graph_on" else None),
-                "non_graph_inputs": non_graph_inputs,
-                "run_sha256": contract.sha256_file(run_path),
-            },
-        )
-        run_paths[variant] = run_path
-        manifest_paths[variant] = manifest_path
+    fixture = _graph_candidate_fixture(tmp_path)
+    split_manifest = fixture["split"]
+    graph_output = fixture["graph"]
+    qrels = fixture["qrels"]
+    generated = fixture["generated"]
+    run_paths = {"graph_off": fixture["baseline"] / "graph-off.run"}
+    manifest_paths = {"graph_off": fixture["baseline"] / "graph-off.manifest.json"}
+    run_paths["graph_on"] = generated / "graph-on.run"
+    manifest_paths["graph_on"] = generated / "graph-on.manifest.json"
 
+    evaluation = {
+        "query_count": 1,
+        "graph_off": {
+            "ndcg_at_10": 0.10,
+            "precision_at_10": 0.10,
+            "top_1": 0.10,
+            "mrr": 0.10,
+        },
+        "graph_on": {
+            "ndcg_at_10": 0.11,
+            "precision_at_10": 0.10,
+            "top_1": 0.10,
+            "mrr": 0.10,
+        },
+        "delta": {
+            "ndcg_at_10": 0.01,
+            "precision_at_10": 0.0,
+            "top_1": 0.0,
+            "mrr": 0.0,
+        },
+        "significant": True,
+    }
     monkeypatch.setattr(
         ablation,
         "_evaluate",
-        lambda *args, **kwargs: {
-            "query_count": 2,
-            "graph_off": {
-                "ndcg_at_10": 0.10,
-                "precision_at_10": 0.10,
-                "top_1": 0.10,
-                "mrr": 0.10,
-            },
-            "graph_on": {
-                "ndcg_at_10": 0.11,
-                "precision_at_10": 0.10,
-                "top_1": 0.10,
-                "mrr": 0.10,
-            },
-            "delta": {
-                "ndcg_at_10": 0.01,
-                "precision_at_10": 0.0,
-                "top_1": 0.0,
-                "mrr": 0.0,
-            },
-            "significant": True,
-        },
+        lambda *args, **kwargs: evaluation,
     )
+    with pytest.raises(RuntimeError, match="query coverage"):
+        ablation.run_ablation(
+            split_manifest_path=split_manifest,
+            graph_output=graph_output,
+            evidence_path=fixture["evidence"],
+            extraction_manifest_path=fixture["extraction_manifest"],
+            qrels_path=qrels,
+            queries_path=fixture["queries"],
+            jobs_csv=fixture["jobs"],
+            tantivy_output=fixture["tantivy"],
+            artifact_prefix=tantivy_pipeline.DEFAULT_ARTIFACT_PREFIX,
+            graph_off_run=run_paths["graph_off"],
+            graph_off_manifest=manifest_paths["graph_off"],
+            graph_on_run=run_paths["graph_on"],
+            graph_on_manifest=manifest_paths["graph_on"],
+            evaluator_command=["organizer-evaluator"],
+            evaluator_id="organizer-v1",
+            evaluator_kind="organizer",
+            minimum_ndcg_delta=0.005,
+            output=tmp_path / "wrong-query-count.json",
+        )
+    evaluation["query_count"] = 2
     report = ablation.run_ablation(
         split_manifest_path=split_manifest,
         graph_output=graph_output,
+        evidence_path=fixture["evidence"],
+        extraction_manifest_path=fixture["extraction_manifest"],
         qrels_path=qrels,
+        queries_path=fixture["queries"],
+        jobs_csv=fixture["jobs"],
+        tantivy_output=fixture["tantivy"],
+        artifact_prefix=tantivy_pipeline.DEFAULT_ARTIFACT_PREFIX,
         graph_off_run=run_paths["graph_off"],
         graph_off_manifest=manifest_paths["graph_off"],
         graph_on_run=run_paths["graph_on"],
@@ -508,18 +914,59 @@ def test_fixed_input_graph_ablation_uses_external_evaluator(
         output=tmp_path / "ablation.json",
     )
 
-    assert report["promotion_allowed"] is True
-    assert report["publication_allowed"] is True
+    assert report["metric_gate_passed"] is True
+    assert report["promotion_allowed"] is False
+    assert report["publication_allowed"] is False
     assert report["official_score_claimed"] is False
     assert all(not control["enabled"] for control in report["controls"].values())  # type: ignore[union-attr]
-    on_manifest = json.loads(manifest_paths["graph_on"].read_text(encoding="utf-8"))
-    on_manifest["non_graph_inputs"]["retrieval_config"] = "3" * 64
+    original_run = run_paths["graph_on"].read_bytes()
+    original_manifest = manifest_paths["graph_on"].read_bytes()
+    tampered_lines = original_run.decode().splitlines()
+    tampered_fields = tampered_lines[0].split()
+    tampered_fields[4] = "999"
+    tampered_lines[0] = " ".join(tampered_fields)
+    run_paths["graph_on"].write_text("\n".join(tampered_lines) + "\n", encoding="utf-8")
+    on_manifest = json.loads(original_manifest)
+    on_manifest["run_sha256"] = contract.sha256_file(run_paths["graph_on"])
     _write_json(manifest_paths["graph_on"], on_manifest)
-    with pytest.raises(RuntimeError, match="not byte-identical"):
+    with pytest.raises(RuntimeError, match="byte-identical"):
         ablation.run_ablation(
             split_manifest_path=split_manifest,
             graph_output=graph_output,
+            evidence_path=fixture["evidence"],
+            extraction_manifest_path=fixture["extraction_manifest"],
             qrels_path=qrels,
+            queries_path=fixture["queries"],
+            jobs_csv=fixture["jobs"],
+            tantivy_output=fixture["tantivy"],
+            artifact_prefix=tantivy_pipeline.DEFAULT_ARTIFACT_PREFIX,
+            graph_off_run=run_paths["graph_off"],
+            graph_off_manifest=manifest_paths["graph_off"],
+            graph_on_run=run_paths["graph_on"],
+            graph_on_manifest=manifest_paths["graph_on"],
+            evaluator_command=["organizer-evaluator"],
+            evaluator_id="organizer-v1",
+            evaluator_kind="organizer",
+            minimum_ndcg_delta=0.005,
+            output=tmp_path / "tampered.json",
+        )
+
+    run_paths["graph_on"].write_bytes(original_run)
+    manifest_paths["graph_on"].write_bytes(original_manifest)
+    on_manifest = json.loads(original_manifest)
+    on_manifest["non_graph_inputs"]["retrieval_config"] = "3" * 64
+    _write_json(manifest_paths["graph_on"], on_manifest)
+    with pytest.raises(RuntimeError, match="byte-identical"):
+        ablation.run_ablation(
+            split_manifest_path=split_manifest,
+            graph_output=graph_output,
+            evidence_path=fixture["evidence"],
+            extraction_manifest_path=fixture["extraction_manifest"],
+            qrels_path=qrels,
+            queries_path=fixture["queries"],
+            jobs_csv=fixture["jobs"],
+            tantivy_output=fixture["tantivy"],
+            artifact_prefix=tantivy_pipeline.DEFAULT_ARTIFACT_PREFIX,
             graph_off_run=run_paths["graph_off"],
             graph_off_manifest=manifest_paths["graph_off"],
             graph_on_run=run_paths["graph_on"],
@@ -646,19 +1093,25 @@ class FakeBedrock:
     def __init__(self, *, callable: bool = True) -> None:
         self.callable = callable
         self.calls = 0
+        self.requests: list[dict[str, object]] = []
 
     def converse(self, **kwargs: object) -> dict[str, object]:
         if not self.callable:
             raise AssertionError("completed response should have resumed without Bedrock")
         self.calls += 1
+        self.requests.append(kwargs)
         return {
+            "stopReason": "tool_use",
             "output": {
                 "message": {
                     "role": "assistant",
                     "content": [
                         {
-                            "text": json.dumps(
-                                {
+                            "toolUse": {
+                                "toolUseId": "tool-use-1",
+                                "name": llm_extraction.TOOL_NAME,
+                                "type": "tool_use",
+                                "input": {
                                     "skills": [
                                         {
                                             "canonical_name": "python",
@@ -668,8 +1121,8 @@ class FakeBedrock:
                                         }
                                     ],
                                     "relations": [],
-                                }
-                            )
+                                },
+                            }
                         }
                     ],
                 }
@@ -688,6 +1141,7 @@ def test_llm_extraction_is_train_only_evidence_locked_and_resumable(tmp_path: Pa
         output=prepared,
         duty_field="職務小類",
         modified_at_field=tantivy_pipeline.DEFAULT_MODIFIED_AT_FIELD,
+        source_timezone=llm_extraction.DEFAULT_SOURCE_TIMEZONE,
         sample_limit=llm_extraction.DEFAULT_SAMPLE_LIMIT,
     )
     assert prepared_manifest["records"] == 1
@@ -703,6 +1157,17 @@ def test_llm_extraction_is_train_only_evidence_locked_and_resumable(tmp_path: Pa
         bedrock=bedrock,
     )
     assert bedrock.calls == 1
+    tool_config = bedrock.requests[0]["toolConfig"]
+    assert tool_config == llm_extraction.TOOL_CONFIG
+    assert tool_config["toolChoice"] == {"tool": {"name": llm_extraction.TOOL_NAME}}
+    assert llm_extraction.BEDROCK_MAX_OUTPUT_TOKENS == 64_000
+    assert bedrock.requests[0]["inferenceConfig"] == {
+        "temperature": 0,
+        "maxTokens": llm_extraction.BEDROCK_MAX_OUTPUT_TOKENS,
+    }
+    schema = tool_config["tools"][0]["toolSpec"]["inputSchema"]["json"]
+    assert schema["additionalProperties"] is False
+    assert schema["required"] == ["skills", "relations"]
     assert extraction_manifest["canonicalization_policy"] == (
         "open_surface_per_jd_llm_canonicalization_v1"
     )
@@ -725,6 +1190,167 @@ def test_llm_extraction_is_train_only_evidence_locked_and_resumable(tmp_path: Pa
         minimum_support=1,
     )
     assert graph_manifest["source_records"] == 1
+
+
+def test_llm_prepare_localizes_naive_source_time_and_skips_empty_duty(tmp_path: Path) -> None:
+    source = tmp_path / "llm-jobs.csv"
+    fields = list(
+        dict.fromkeys(
+            [
+                *(label for label, _field in FULL_JOB_FIELDS),
+                llm_extraction.JOB_ID_FIELD,
+                llm_extraction.DEFAULT_MODIFIED_AT_FIELD,
+            ]
+        )
+    )
+    with source.open("w", encoding="utf-8", newline="") as target:
+        writer = csv.DictWriter(target, fieldnames=fields)
+        writer.writeheader()
+        for job_id, duty, timestamp in (
+            ("101", "資料工程師", "2026-06-07 10:00:00"),
+            ("102", "NULL", "2026-06-07 11:00:00"),
+            ("103", "資料工程師", "2026-06-08 00:00:00"),
+        ):
+            row = dict.fromkeys(fields, "")
+            row.update(
+                {
+                    llm_extraction.JOB_ID_FIELD: job_id,
+                    "職務名稱": "資料工程師",
+                    "職務小類": duty,
+                    "職務中類": "資訊軟體",
+                    "職務大類": "資訊科技",
+                    "電腦技能資料": "Python SQL",
+                    "職務內容": "使用 Python 與 SQL 建立資料平台",
+                    llm_extraction.DEFAULT_MODIFIED_AT_FIELD: timestamp,
+                }
+            )
+            writer.writerow(row)
+    split, _qrels = _split_manifest(tmp_path)
+
+    manifest = llm_extraction.prepare_requests(
+        jobs_csv=source,
+        split_manifest_path=split,
+        output=tmp_path / "prepared",
+        duty_field=llm_extraction.DEFAULT_DUTY_FIELD,
+        modified_at_field=llm_extraction.DEFAULT_MODIFIED_AT_FIELD,
+        source_timezone="Asia/Taipei",
+        sample_limit=654,
+    )
+
+    request = json.loads((tmp_path / "prepared" / "requests.jsonl").read_text(encoding="utf-8"))
+    assert llm_extraction.DEFAULT_MODIFIED_AT_FIELD == "職缺最後修改時間"
+    assert manifest["source_timezone"] == "Asia/Taipei"
+    assert manifest["source_timestamp_policy"] == llm_extraction.SOURCE_TIMESTAMP_POLICY
+    assert manifest["empty_duty_skipped"] == 1
+    assert manifest["eligible_train_records"] == 1
+    assert manifest["post_cutoff_skipped"] == 1
+    assert request["source_modified_at"] == "2026-06-07T10:00:00+08:00"
+    with pytest.raises(RuntimeError, match="timezone"):
+        llm_extraction._timestamp("2026-06-08T00:00:00", "split timestamp")
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        [{"text": '{"skills":[],"relations":[]}'}],
+        [
+            {
+                "toolUse": {
+                    "toolUseId": "one",
+                    "name": "extract_job_skill_graph",
+                    "type": "tool_use",
+                    "input": {"skills": [], "relations": []},
+                }
+            },
+            {
+                "toolUse": {
+                    "toolUseId": "two",
+                    "name": "extract_job_skill_graph",
+                    "type": "tool_use",
+                    "input": {"skills": [], "relations": []},
+                }
+            },
+        ],
+        [
+            {
+                "toolUse": {
+                    "toolUseId": "one",
+                    "name": "extract_job_skill_graph",
+                    "type": "tool_use",
+                    "input": {"skills": [], "relations": []},
+                },
+                "text": "also text",
+            }
+        ],
+        [
+            {
+                "toolUse": {
+                    "toolUseId": "one",
+                    "name": "wrong_tool",
+                    "type": "tool_use",
+                    "input": {"skills": [], "relations": []},
+                }
+            }
+        ],
+        [
+            {
+                "toolUse": {
+                    "toolUseId": "one",
+                    "name": "extract_job_skill_graph",
+                    "type": "server_tool_use",
+                    "input": {"skills": [], "relations": []},
+                }
+            }
+        ],
+    ],
+)
+def test_llm_extraction_rejects_any_non_exact_tool_use(content: list[dict[str, object]]) -> None:
+    response = {
+        "stopReason": "tool_use",
+        "output": {"message": {"role": "assistant", "content": content}},
+        "usage": {"inputTokens": 1, "outputTokens": 1},
+    }
+
+    with pytest.raises(RuntimeError, match="toolUse"):
+        llm_extraction._tool_input(response)
+
+
+def test_llm_tool_parser_locks_observed_runtime_shape_despite_service_model_drift() -> None:
+    observed_runtime_response = {
+        "stopReason": "tool_use",
+        "output": {
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "toolUse": {
+                            "toolUseId": "observed-runtime-tool-use",
+                            "name": llm_extraction.TOOL_NAME,
+                            "type": "tool_use",
+                            "input": {"skills": [], "relations": []},
+                        }
+                    }
+                ],
+            }
+        },
+        "usage": {"inputTokens": 1, "outputTokens": 1},
+    }
+
+    payload, input_tokens, output_tokens = llm_extraction._tool_input(observed_runtime_response)
+    assert payload == {"skills": [], "relations": []}
+    assert (input_tokens, output_tokens) == (1, 1)
+    assert llm_extraction.TOOL_USE_TYPE == "tool_use"
+
+    service = get_session().get_service_model("bedrock-runtime")
+    tool_use = (
+        service.operation_model("Converse")
+        .output_shape.members["output"]
+        .members["message"]
+        .members["content"]
+        .member.members["toolUse"]
+    )
+    assert tool_use.required_members == ["toolUseId", "name", "input"]
+    assert tool_use.members["type"].metadata["enum"] == ["server_tool_use"]
 
 
 def test_graph_sampling_is_stratified_and_hard_capped() -> None:
@@ -766,6 +1392,97 @@ def test_tantivy_builder_is_independent_with_corrections_explicitly_disabled(
     assert component["build_manifest_path"].endswith("/build-manifest.json")
     assert component["query_corrections"] == {"enabled": False}
     assert not (output / "query-corrections.json").exists()
+
+
+def test_tantivy_graph_off_is_generated_from_canonical_queries_and_index(
+    tmp_path: Path,
+) -> None:
+    source = _full_jobs_csv(tmp_path)
+    index_output = tmp_path / "tantivy"
+    tantivy_pipeline.build_tantivy(
+        jobs_csv=source,
+        output=index_output,
+        artifact_prefix=tantivy_pipeline.DEFAULT_ARTIFACT_PREFIX,
+        location_code_field=tantivy_pipeline.DEFAULT_LOCATION_CODE_FIELD,
+        location_term_field=tantivy_pipeline.DEFAULT_LOCATION_TERM_FIELD,
+        duty_code_field=tantivy_pipeline.DEFAULT_DUTY_CODE_FIELD,
+        duty_term_field=tantivy_pipeline.DEFAULT_DUTY_TERM_FIELD,
+        visibility_field=tantivy_pipeline.DEFAULT_VISIBILITY_FIELD,
+        modified_at_field=tantivy_pipeline.DEFAULT_MODIFIED_AT_FIELD,
+        correction_candidate_path=None,
+        correction_attestation_path=None,
+    )
+    split, _qrels = _split_manifest(tmp_path)
+    queries = tmp_path / "queries.jsonl"
+    _write_jsonl(
+        queries,
+        [
+            {
+                "qid": "q1",
+                "query": "資料工程師 Python",
+                "as_of": "2026-06-08T23:59:59.999+08:00",
+                "location_codes": ["100100"],
+                "duty_codes": ["140200"],
+            },
+            {
+                "qid": "q2",
+                "query": "資料工程師 Python",
+                "as_of": "2026-06-08T23:59:59.999+08:00",
+                "location_codes": ["999999"],
+                "duty_codes": ["140200"],
+            },
+        ],
+    )
+
+    output = tmp_path / "graph-off"
+    manifest = graph_off.generate_graph_off(
+        split_manifest_path=split,
+        queries_path=queries,
+        tantivy_output=index_output,
+        jobs_csv=source,
+        artifact_prefix=tantivy_pipeline.DEFAULT_ARTIFACT_PREFIX,
+        output=output,
+    )
+
+    rows = (output / "graph-off.run").read_text(encoding="utf-8").splitlines()
+    assert [row.split()[0] for row in rows] == ["q1", "q1"]
+    assert [row.split()[2] for row in rows] == ["101", "102"]
+    assert manifest["run_sha256"] == contract.sha256_file(output / "graph-off.run")
+    assert manifest["canonical_qids"] == ["q1", "q2"]
+    assert manifest["zero_result_qids"] == ["q2"]
+    assert manifest["non_graph_inputs"]["canonical_queries"] == contract.sha256_file(queries)
+    assert (
+        manifest["non_graph_inputs"]["tantivy_index"]
+        == json.loads((index_output / "manifest.json").read_text(encoding="utf-8"))["index_sha256"]
+    )
+
+
+@pytest.mark.parametrize(
+    "patch, message",
+    [
+        ({"search_date": "2026-06-08"}, "canonical query"),
+        ({"as_of": "2026-06-08T23:59:59"}, "timezone"),
+        ({"as_of": "2026-06-09T00:00:00+08:00"}, "evaluation window"),
+        ({"location_codes": ["100100", "100100"]}, "location_codes"),
+    ],
+)
+def test_canonical_graph_off_queries_fail_closed(
+    tmp_path: Path, patch: dict[str, object], message: str
+) -> None:
+    split, _qrels = _split_manifest(tmp_path)
+    value: dict[str, object] = {
+        "qid": "q1",
+        "query": "資料工程師",
+        "as_of": "2026-06-08T23:59:59.999+08:00",
+        "location_codes": ["100100"],
+        "duty_codes": ["140200"],
+    }
+    value.update(patch)
+    path = tmp_path / "queries.jsonl"
+    _write_jsonl(path, [value])
+
+    with pytest.raises(RuntimeError, match=message):
+        graph_off.read_canonical_queries(path, split)
 
 
 def test_query_corrections_require_positive_promotion_before_tantivy_enablement(

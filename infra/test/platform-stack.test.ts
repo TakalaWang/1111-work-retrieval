@@ -217,7 +217,11 @@ describe('platform stack', () => {
     ]) {
       expect(endpointText).toContain(service);
     }
-    expect(synthesized.Conditions).toEqual(undefined);
+    expect(synthesized.Conditions).toEqual({
+      AlarmEmailConfigured: {
+        'Fn::Not': [{ 'Fn::Equals': [{ Ref: 'AlarmEmail' }, ''] }]
+      }
+    });
     expect(
       endpoints.every((endpoint) => endpoint.Condition === undefined)
     ).toBe(true);
@@ -312,6 +316,34 @@ describe('platform stack', () => {
     template.hasResourceProperties('AWS::CloudWatch::Alarm', {
       MetricName: 'UnHealthyHostCount',
       TreatMissingData: 'notBreaching'
+    });
+  });
+
+  test('optionally sends operational alarms to a confirmed email subscription', () => {
+    template.hasParameter('AlarmEmail', {
+      Type: 'String',
+      Default: '',
+      AllowedPattern: '^$|^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$'
+    });
+    template.hasResourceProperties('AWS::SNS::Subscription', {
+      Endpoint: { Ref: 'AlarmEmail' },
+      Protocol: 'email',
+      TopicArn: Match.anyValue()
+    });
+    const subscriptions = Object.values(
+      template.findResources('AWS::SNS::Subscription')
+    ).filter(
+      (subscription) => subscription.Properties.Endpoint?.Ref === 'AlarmEmail'
+    );
+    expect(subscriptions).toHaveLength(1);
+    expect(subscriptions.at(0)?.Condition).toBe('AlarmEmailConfigured');
+    for (const alarm of Object.values(
+      template.findResources('AWS::CloudWatch::Alarm')
+    )) {
+      expect(alarm.Properties.AlarmActions).toHaveLength(1);
+    }
+    template.hasOutput('OperationalAlarmTopicArn', {
+      Value: Match.anyValue()
     });
   });
 

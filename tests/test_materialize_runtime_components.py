@@ -235,7 +235,6 @@ def materialize_fixture(
         whole_source_inventory=inventory,
         tantivy_build_root=tantivy,
         output_root=output,
-        source_manifest_key="one111-search/runtime-source/build/manifest.json",
         **approvals,
     )
     return output, whole, tantivy, approvals
@@ -277,7 +276,13 @@ def test_materializer_reuses_sealed_whole_and_round_trips_current_tantivy(
     temporal_path = output / materializer.TANTIVY_DESTINATION / "manifest.json"
     whole = json.loads(whole_path.read_text())
     temporal = json.loads(temporal_path.read_text())
+    source_sha = pipeline.sha256_file(output / "manifest.json")
+    release_spec = json.loads((output / "runtime-release-spec.json").read_text())
 
+    assert release_spec["source_manifest"] == {
+        "key": f"one111-search/materialized/{source_sha}/manifest.json",
+        "sha256": source_sha,
+    }
     assert whole["document_policy_version"] == "2026-07-24-clean-v1"
     assert len(whole["document_fields"]) == 15
     assert whole["source_manifest_sha256"] == promotion.APPROVED_WHOLE_SOURCE_MANIFEST_SHA256
@@ -339,7 +344,6 @@ def test_materializer_rejects_query_correction_attestation_drift(
             whole_source_inventory=inventory,
             tantivy_build_root=tantivy,
             output_root=tmp_path / "output",
-            source_manifest_key="source/hash/manifest.json",
             **approvals,
         )
 
@@ -356,7 +360,6 @@ def test_materializer_rejects_unapproved_or_incomplete_source_inventory(
             whole_source_inventory=inventory,
             tantivy_build_root=tantivy,
             output_root=tmp_path / "output",
-            source_manifest_key="source/hash/manifest.json",
             **approvals,
         )
 
@@ -377,7 +380,6 @@ def test_materializer_rejects_tantivy_v1_component(
             whole_source_inventory=inventory,
             tantivy_build_root=tantivy,
             output_root=tmp_path / "output",
-            source_manifest_key="source/hash/manifest.json",
             **approvals,
         )
 
@@ -403,7 +405,6 @@ def test_materializer_rehashes_each_destination_after_copy(
             whole_source_inventory=inventory,
             tantivy_build_root=tantivy,
             output_root=tmp_path / "output",
-            source_manifest_key="source/hash/manifest.json",
             **approvals,
         )
     assert not (tmp_path / "output").exists()
