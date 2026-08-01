@@ -6,18 +6,25 @@
 ## 現況
 
 - `WorkRetrievalData` 與 `WorkRetrievalPlatform` 均已在 AWS competition account
-  `378849533305`、`us-west-2` 完成部署（CloudFormation `CREATE_COMPLETE`）。
+  `378849533305`、`us-west-2` 完成部署；本次 `WorkRetrievalPlatform` readback 為
+  CloudFormation `UPDATE_COMPLETE`。
 - Web 與 API 目前可由 [https://dukvebbbaov1r.cloudfront.net](https://dukvebbbaov1r.cloudfront.net)
   同源存取。
 - Qwen3 Embedding endpoint `qwen3-embedding-8b-20260801-031826` 與 reranker endpoint
   `work-retrieval-qwen3-reranker-8b` 均為 `InService`。
-- repository source 已包含 fail-closed search-core v2；目前 public deployment 是否仍為舊 deterministic
-  runtime，必須以實際 ECS image digest 與 public audit header 重新確認，不能由 source 推論。
+- `main` commit `6d2bd0e8aaace42ed043f673ad4efd66587131bd` 已由 production workflow
+  [run 30718253906](https://github.com/TakalaWang/1111-work-retrieval/actions/runs/30718253906) 成功部署；runtime
+  manifest 為 `964ae7e235bfdf90f639a216991757f905554ce35b83f4069aa68cb2d8d2ddbf`，ECS 使用的
+  digest-pinned image 為 `sha256:6fa7c4814e1abee26da888868cd1f064828c48bae6f49d3a1617395069f1392b`。
+- 線上 compute profile 為 `cpu-incumbent`：CPU Fargate service 的 desired／running／pending 為
+  `1/1/0`，GPU ASG min／max／desired 與 GPU service desired／running／pending 均為 `0/0/0`。
+- ECR scan 已完成且 Critical／High 均為 `0`；public health、精確 manifest readiness、兩組不同 query
+  ranking、job detail 與 Web UI smoke 均通過。
 - Embedding／reranker endpoint 已上線不代表對應 challenger 已通過 promotion，也不代表任何 retrieval
   品質指標已發布；正式 runtime 仍依 manifest 開關與 live readback 判定。
 
-以上是 2026-08-01 的部署 readback。進行操作或宣稱目前線上狀態前，仍應重新讀取 AWS stack、endpoint、
-Git commit 與 public smoke 結果；各層狀態必須分別確認。
+以上是 2026-08-02 的部署 readback。未來進行操作或再次宣稱線上狀態前，仍應重新讀取 AWS stack、ECS
+service、image digest、runtime manifest、Git commit 與 public smoke 結果；各層狀態必須分別確認。
 
 ## 原始碼與文件
 
@@ -182,15 +189,15 @@ fixed-input NDCG@10 正向驗證才可啟用。
 
 ## 資料與 runtime artifacts
 
-| 項目                      | 已驗證版本                                                                                                                                                                               |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Source code               | 每次交付以 Git commit SHA 固定                                                                                                                                                           |
-| Job dataset               | 1,218,635 rows；SHA-256 `53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089`                                                                                               |
-| Database schema           | Alembic `0002_create_jobs`；Aurora PostgreSQL 16                                                                                                                                         |
-| Runtime manifest contract | [`runtime-manifest.schema.json`](packages/contract/runtime-manifest.schema.json)，repository schema version `2`；promotion tooling 已完成，正式 release 仍需明確 spec 與人工 `--execute` |
-| Embedding endpoint        | `qwen3-embedding-8b-20260801-031826`；`InService`                                                                                                                                        |
-| Reranker endpoint         | `work-retrieval-qwen3-reranker-8b`；`InService`                                                                                                                                          |
-| Production retrieval      | source 已整合；artifact promotion、image rollout 與 live readback 仍須各自驗證                                                                                                           |
+| 項目                      | 已驗證版本                                                                                                                                                                                        |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Source code               | 每次交付以 Git commit SHA 固定                                                                                                                                                                    |
+| Job dataset               | 1,218,635 rows；SHA-256 `53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089`                                                                                                        |
+| Database schema           | Alembic `0002_create_jobs`；Aurora PostgreSQL 16                                                                                                                                                  |
+| Runtime manifest contract | [`runtime-manifest.schema.json`](packages/contract/runtime-manifest.schema.json)，repository schema version `2`；live manifest `964ae7e235bfdf90f639a216991757f905554ce35b83f4069aa68cb2d8d2ddbf` |
+| Embedding endpoint        | `qwen3-embedding-8b-20260801-031826`；`InService`                                                                                                                                                 |
+| Reranker endpoint         | `work-retrieval-qwen3-reranker-8b`；`InService`                                                                                                                                                   |
+| Production retrieval      | temporal BM25 `cpu-incumbent` 已部署；main `6d2bd0e8aaace42ed043f673ad4efd66587131bd`、run `30718253906`、CPU `1/1/0`、GPU `0/0/0`、public smoke 通過                                             |
 
 Runtime v2 promotion 只接受一份已固定 source manifest SHA、selected inventory SHA、component
 manifest SHA 與 challenger promotion evidence 的 release spec。Dry-run 會執行完整 contract 與 component
