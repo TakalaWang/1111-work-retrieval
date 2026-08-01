@@ -1,15 +1,16 @@
 # System Architecture and Data Flow
 
-本文件描述 repository 現有的程式責任邊界，以及 CDK 定義的目標 production flow。它不把尚未實作的
-retrieval engine 或尚未部署的 application plane 描述為已完成能力。
+本文件描述 repository 現有的程式責任邊界與已部署 production flow。它不把暫時的 deterministic
+search engine 描述為正式 retrieval implementation。
 
 ## Delivery status
 
-| Plane                    | 現況                                                                                  |
-| ------------------------ | ------------------------------------------------------------------------------------- |
-| Data plane               | `WorkRetrievalData` 已部署；Aurora 與完整職缺快照已完成 readback                      |
-| Application plane        | `WorkRetrievalPlatform` 已有 CDK 定義，但 API image、runtime artifacts 與服務尚未部署 |
-| Retrieval implementation | `SearchEngine` protocol 已固定，production implementation 尚未提供                    |
+| Plane                    | 現況                                                                                                       |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| Data plane               | `WorkRetrievalData` 已部署；Aurora 與完整職缺快照已完成 readback                                           |
+| Application plane        | `WorkRetrievalPlatform` 已部署；CloudFront、Web、ALB 與 CPU Fargate API 已通過 public smoke                |
+| Model plane              | Embedding 與 reranker SageMaker endpoints 均為 `InService`，runtime artifacts 已提升到 immutable S3 prefix |
+| Retrieval implementation | API 暫時固定回傳 Aurora 前十個 job ID；正式 normalization、ranking 與 model integration 尚未提供           |
 
 ## Source modules
 
@@ -18,7 +19,7 @@ retrieval engine 或尚未部署的 application plane 描述為已完成能力�
 | `apps/api`                      | HTTP validation、error envelope、lifecycle、request ID、OpenAPI        | ranking、database model、fallback engine |
 | `apps/web`                      | 呼叫相對 API path、顯示狀態、驗證不可信 response JSON                  | ranking 或 server-side data access       |
 | `packages/search-core`          | immutable query type 與 `SearchEngine` protocol                        | 具體 retrieval algorithm                 |
-| `packages/database`             | authoritative SQLAlchemy `Job` model                                   | runtime connection/session、HTTP schema  |
+| `packages/database`             | authoritative SQLAlchemy `Job` model 與 PostgreSQL read repository     | HTTP schema                              |
 | `packages/contract`             | committed OpenAPI、generated TypeScript types、runtime manifest schema | runtime artifacts                        |
 | `database`                      | forward-only Alembic migration history                                 | application query logic                  |
 | `infra`                         | `WorkRetrievalData` 與 `WorkRetrievalPlatform` CDK stacks              | production image 或模型內容              |
@@ -27,7 +28,7 @@ retrieval engine 或尚未部署的 application plane 描述為已完成能力�
 這些邊界讓 HTTP、retrieval、persistence 與 deployment 可以獨立演進；沒有共享一個「萬用 model」，也
 沒有在缺少 production implementation 時靜默改走 mock 或 fallback。
 
-## Target request flow
+## Deployed request flow
 
 ```mermaid
 flowchart LR
@@ -35,19 +36,22 @@ flowchart LR
     CF -->|default| Web[S3 static web]
     CF -->|/api/*, /healthz, /readyz| ALB[Application Load Balancer]
     WAF[AWS WAF managed rules] --> ALB
-    ALB -->|origin header + CloudFront prefix list| ECS[GPU ECS task]
+    ALB -->|origin header + CloudFront prefix list| ECS[CPU Fargate task]
     ECS --> API[FastAPI]
-    API --> Engine[SearchEngine]
-    Engine --> Runtime[S3 runtime/manifest-sha256]
-    Engine --> DB[(Aurora PostgreSQL jobs)]
+    API --> Temp[Temporary deterministic SearchEngine]
+    Temp --> DB[(Aurora PostgreSQL jobs)]
+    Artifacts[S3 runtime/manifest-sha256]
+    Embedding[SageMaker embedding]
+    Reranker[SageMaker reranker]
 ```
 
-`WorkRetrievalPlatform` 定義這條 application flow，但目前未部署。`Engine -> Runtime` 與
-`Engine -> DB` 是 production engine 必須明確實作的依賴，不是現有 scaffold 已具備的 runtime path。
+GPU ECS capacity provider 與 service 已建立，但 capacity 與 desired count 維持 `0`；public traffic 只進入
+CPU Fargate service。S3 artifacts、embedding 與 reranker 已可用，但暫時 engine 尚未呼叫它們。正式
+`SearchEngine` 必須顯式整合 normalization、retrieval、reranking 與 lineage，不得靜默 fallback。
 
 ### API lifecycle
 
-1. Application startup 呼叫必要的 engine factory 一次；初始化失敗就中止，不選替代 engine。
+1. Application startup 初始化 PostgreSQL repository 與暫時 engine；任一失敗就中止，不選替代 engine。
 2. FastAPI 在 trust boundary 驗證 body 大小、media type、query 與 filters。
 3. Async route 透過 worker thread 呼叫同步 `SearchEngine.search(query, limit=10)`。
 4. API 再驗證結果最多十筆、job ID 為 ASCII decimal、沒有重複且 rank 連續。

@@ -7,44 +7,84 @@ on:
         description: Type DEPLOY to confirm a production deployment
         required: true
         type: string
-      api_image_uri:
-        description: Immutable ECR image URI including its sha256 digest
-        required: true
-        type: string
       artifact_manifest_sha:
-        description: Lowercase SHA-256 identifying runtime artifacts in S3
+        description: Lowercase SHA-256 identifying the immutable runtime bundle
         required: true
         type: string
       gpu_instance_type:
-        description: EC2 GPU instance type for the ECS capacity provider
+        description: EC2 GPU instance type reserved for the zero-capacity GPU service
         required: true
+        default: g5.xlarge
         type: string
+      cpu_desired_count:
+        description: Desired count for the Fargate API service
+        required: true
+        default: 1
+        type: number
+      gpu_min_capacity:
+        description: GPU Auto Scaling group minimum capacity; must remain zero for now
+        required: true
+        default: 0
+        type: number
+      gpu_max_capacity:
+        description: GPU Auto Scaling group maximum capacity; must remain zero for now
+        required: true
+        default: 0
+        type: number
+      gpu_desired_count:
+        description: GPU ECS service desired count; must remain zero for now
+        required: true
+        default: 0
+        type: number
 
 permissions:
   contents: read
   id-token: write
+
+env:
+  AWS_ACCOUNT_ID: '378849533305'
+  AWS_REGION: us-west-2
 
 jobs:
   deploy:
     if: ${{ github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true' && inputs.confirm == 'DEPLOY' }}
     runs-on: ubuntu-latest
     environment: production
-    concurrency: production
+    concurrency:
+      group: production
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - name: Validate immutable deployment inputs
+
+      - name: Validate deployment inputs
         env:
-          API_IMAGE_URI: ${{ inputs.api_image_uri }}
           ARTIFACT_MANIFEST_SHA: ${{ inputs.artifact_manifest_sha }}
-          GPU_INSTANCE_TYPE: ${{ inputs.gpu_instance_type }}
           AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-          AWS_REGION: ${{ vars.AWS_REGION }}
+          CPU_DESIRED_COUNT: ${{ inputs.cpu_desired_count }}
+          GPU_DESIRED_COUNT: ${{ inputs.gpu_desired_count }}
+          GPU_INSTANCE_TYPE: ${{ inputs.gpu_instance_type }}
+          GPU_MAX_CAPACITY: ${{ inputs.gpu_max_capacity }}
+          GPU_MIN_CAPACITY: ${{ inputs.gpu_min_capacity }}
         run: |
-          test -n "$AWS_DEPLOY_ROLE_ARN"
-          test -n "$AWS_REGION"
-          [[ "$API_IMAGE_URI" =~ ^[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/.+@sha256:[0-9a-f]{64}$ ]]
+          set -euo pipefail
+          [[ "$AWS_DEPLOY_ROLE_ARN" =~ ^arn:aws:iam::378849533305:role/[A-Za-z0-9+=,.@_/-]+$ ]]
           [[ "$ARTIFACT_MANIFEST_SHA" =~ ^[0-9a-f]{64}$ ]]
           [[ "$GPU_INSTANCE_TYPE" =~ ^[a-z0-9][a-z0-9.-]*$ ]]
+          [[ "$CPU_DESIRED_COUNT" =~ ^[0-9]+$ ]]
+          [[ "$GPU_MIN_CAPACITY" =~ ^[0-9]+$ ]]
+          [[ "$GPU_MAX_CAPACITY" =~ ^[0-9]+$ ]]
+          [[ "$GPU_DESIRED_COUNT" =~ ^[0-9]+$ ]]
+          (( CPU_DESIRED_COUNT >= 1 ))
+          (( GPU_MIN_CAPACITY <= GPU_DESIRED_COUNT ))
+          (( GPU_DESIRED_COUNT <= GPU_MAX_CAPACITY ))
+          (( GPU_MIN_CAPACITY == 0 && GPU_MAX_CAPACITY == 0 && GPU_DESIRED_COUNT == 0 ))
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+        with:
+          enable-cache: true
       - uses: pnpm/action-setup@a8198c4bff370c8506180b035930dea56dbd5288 # v5
         with:
           version: 10.28.0
@@ -52,47 +92,151 @@ jobs:
         with:
           node-version: '24'
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm --dir apps/web build
+      - name: Install frozen workspaces
+        run: |
+          uv sync --frozen --all-packages
+          pnpm install --frozen-lockfile
+      - name: Build the static web application
+        run: pnpm --dir apps/web build
+
       - uses: aws-actions/configure-aws-credentials@451ce2a72e8d729a59ebeaacab82dbce58e7af4c # v6
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
-      - name: Validate image ownership
-        env:
-          API_IMAGE_URI: ${{ inputs.api_image_uri }}
-          AWS_REGION: ${{ vars.AWS_REGION }}
+          role-session-name: work-retrieval-production
+          aws-region: us-west-2
+
+      - name: Verify the competition account
         run: |
-          AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-          [[ "$API_IMAGE_URI" == "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/"* ]]
-      - name: Deploy the reviewed stack
-        env:
-          API_IMAGE_URI: ${{ inputs.api_image_uri }}
-          ARTIFACT_MANIFEST_SHA: ${{ inputs.artifact_manifest_sha }}
-          AWS_REGION: ${{ vars.AWS_REGION }}
-          GPU_INSTANCE_TYPE: ${{ inputs.gpu_instance_type }}
+          set -euo pipefail
+          test "$(aws sts get-caller-identity --query Account --output text)" = "$AWS_ACCOUNT_ID"
+          test "${AWS_REGION}" = "us-west-2"
+
+      - name: Deploy the persistent data stack
         run: |
+          set -euo pipefail
           S3_PREFIX_LIST_IDS="$(aws ec2 describe-managed-prefix-lists \
             --filters \
               Name=owner-id,Values=AWS \
               Name=prefix-list-name,Values="com.amazonaws.${AWS_REGION}.s3" \
             --query 'PrefixLists[].PrefixListId' \
             --output json)"
-          jq -e 'length == 1' <<<"$S3_PREFIX_LIST_IDS"
+          jq -e 'length == 1' <<<"$S3_PREFIX_LIST_IDS" >/dev/null
           S3_PREFIX_LIST_ID="$(jq -r '.[0]' <<<"$S3_PREFIX_LIST_IDS")"
           [[ "$S3_PREFIX_LIST_ID" =~ ^pl-[0-9a-f]+$ ]]
-          pnpm --dir infra exec cdk deploy WorkRetrievalData WorkRetrievalPlatform \
+          pnpm --dir infra exec cdk deploy WorkRetrievalData \
             --require-approval never \
-            --outputs-file cdk-outputs.json \
-            --parameters "WorkRetrievalData:S3PrefixListId=$S3_PREFIX_LIST_ID" \
+            --outputs-file "$GITHUB_WORKSPACE/data-outputs.json" \
+            --parameters "WorkRetrievalData:S3PrefixListId=$S3_PREFIX_LIST_ID"
+
+      - name: Verify the runtime manifest exists
+        env:
+          ARTIFACT_MANIFEST_SHA: ${{ inputs.artifact_manifest_sha }}
+        run: |
+          set -euo pipefail
+          RUNTIME_BUCKET="$(jq -er '.WorkRetrievalData.RuntimeBucketName' data-outputs.json)"
+          MANIFEST_HEAD="$(aws s3api head-object \
+            --bucket "$RUNTIME_BUCKET" \
+            --key "runtime/${ARTIFACT_MANIFEST_SHA}/manifest.json" \
+            --expected-bucket-owner "$AWS_ACCOUNT_ID" \
+            --checksum-mode ENABLED)"
+          EXPECTED_CHECKSUM="$(python - "$ARTIFACT_MANIFEST_SHA" <<'PY'
+          import base64
+          import sys
+
+          print(base64.b64encode(bytes.fromhex(sys.argv[1])).decode())
+          PY
+          )"
+          jq -e --arg checksum "$EXPECTED_CHECKSUM" \
+            '.ContentLength > 0 and .ChecksumSHA256 == $checksum' \
+            <<<"$MANIFEST_HEAD" >/dev/null
+
+      - name: Build, publish, and scan the API image
+        env:
+          IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          ECR_URI="$(jq -er '.WorkRetrievalData.ApiRepositoryUri' data-outputs.json)"
+          [[ "$ECR_URI" == "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/"* ]]
+          REPOSITORY_NAME="${ECR_URI#*/}"
+          IMAGE_WITH_TAG="${ECR_URI}:${IMAGE_TAG}"
+          aws ecr get-login-password | \
+            docker login --username AWS --password-stdin \
+              "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+          docker build --platform linux/amd64 --tag "$IMAGE_WITH_TAG" .
+          test "$(docker image inspect "$IMAGE_WITH_TAG" --format '{{.Architecture}}')" = amd64
+          docker push "$IMAGE_WITH_TAG"
+          aws ecr wait image-scan-complete \
+            --repository-name "$REPOSITORY_NAME" \
+            --image-id imageTag="$IMAGE_TAG"
+          IMAGE_DESCRIPTION="$(aws ecr describe-images \
+            --repository-name "$REPOSITORY_NAME" \
+            --image-ids imageTag="$IMAGE_TAG")"
+          jq -e '.imageDetails | length == 1' <<<"$IMAGE_DESCRIPTION" >/dev/null
+          IMAGE_DIGEST="$(jq -er '.imageDetails[0].imageDigest' <<<"$IMAGE_DESCRIPTION")"
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          SCAN="$(aws ecr describe-image-scan-findings \
+            --repository-name "$REPOSITORY_NAME" \
+            --image-id imageDigest="$IMAGE_DIGEST")"
+          jq -e '
+            .imageScanStatus.status == "COMPLETE" and
+            (.imageScanFindings.findingSeverityCounts.CRITICAL // 0) == 0 and
+            (.imageScanFindings.findingSeverityCounts.HIGH // 0) == 0
+          ' <<<"$SCAN" >/dev/null
+          printf 'API_IMAGE_URI=%s@%s\n' "$ECR_URI" "$IMAGE_DIGEST" >>"$GITHUB_ENV"
+
+      - name: Deploy the application stack
+        env:
+          ARTIFACT_MANIFEST_SHA: ${{ inputs.artifact_manifest_sha }}
+          CPU_DESIRED_COUNT: ${{ inputs.cpu_desired_count }}
+          GPU_DESIRED_COUNT: ${{ inputs.gpu_desired_count }}
+          GPU_INSTANCE_TYPE: ${{ inputs.gpu_instance_type }}
+          GPU_MAX_CAPACITY: ${{ inputs.gpu_max_capacity }}
+          GPU_MIN_CAPACITY: ${{ inputs.gpu_min_capacity }}
+        run: |
+          set -euo pipefail
+          [[ "$API_IMAGE_URI" =~ ^378849533305\.dkr\.ecr\.us-west-2\.amazonaws\.com/.+@sha256:[0-9a-f]{64}$ ]]
+          pnpm --dir infra exec cdk deploy WorkRetrievalPlatform \
+            --require-approval never \
+            --outputs-file "$GITHUB_WORKSPACE/platform-outputs.json" \
             --parameters "WorkRetrievalPlatform:ApiImageUri=$API_IMAGE_URI" \
             --parameters "WorkRetrievalPlatform:ArtifactManifestSha256=$ARTIFACT_MANIFEST_SHA" \
-            --parameters "WorkRetrievalPlatform:GpuInstanceType=$GPU_INSTANCE_TYPE"
-      - name: Publish the static web app
+            --parameters "WorkRetrievalPlatform:CpuServiceDesiredCount=$CPU_DESIRED_COUNT" \
+            --parameters "WorkRetrievalPlatform:GpuInstanceType=$GPU_INSTANCE_TYPE" \
+            --parameters "WorkRetrievalPlatform:GpuMinCapacity=$GPU_MIN_CAPACITY" \
+            --parameters "WorkRetrievalPlatform:GpuMaxCapacity=$GPU_MAX_CAPACITY" \
+            --parameters "WorkRetrievalPlatform:GpuServiceDesiredCount=$GPU_DESIRED_COUNT"
+
+      - name: Publish the static web application
         run: |
-          WEB_BUCKET="$(jq -r '.WorkRetrievalPlatform.WebBucketName' cdk-outputs.json)"
-          DISTRIBUTION_ID="$(jq -r '.WorkRetrievalPlatform.DistributionId' cdk-outputs.json)"
+          set -euo pipefail
+          WEB_BUCKET="$(jq -er '.WorkRetrievalPlatform.WebBucketName' platform-outputs.json)"
+          DISTRIBUTION_ID="$(jq -er '.WorkRetrievalPlatform.DistributionId' platform-outputs.json)"
           [[ "$WEB_BUCKET" =~ ^[a-z0-9][a-z0-9.-]+$ ]]
           [[ "$DISTRIBUTION_ID" =~ ^[A-Z0-9]+$ ]]
           aws s3 sync apps/web/build "s3://$WEB_BUCKET" --delete
-          aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths '/*'
+          INVALIDATION="$(aws cloudfront create-invalidation \
+            --distribution-id "$DISTRIBUTION_ID" \
+            --paths '/*')"
+          INVALIDATION_ID="$(jq -er '.Invalidation.Id' <<<"$INVALIDATION")"
+          aws cloudfront wait invalidation-completed \
+            --distribution-id "$DISTRIBUTION_ID" \
+            --id "$INVALIDATION_ID"
+
+      - name: Smoke test the public application
+        run: |
+          set -euo pipefail
+          WEB_URL="$(jq -er '.WorkRetrievalPlatform.WebUrl' platform-outputs.json)"
+          [[ "$WEB_URL" =~ ^https://[a-z0-9.-]+$ ]]
+          CURL=(curl --silent --show-error --fail-with-body --retry 18 --retry-all-errors --retry-delay 10)
+          "${CURL[@]}" "$WEB_URL/healthz" >/dev/null
+          "${CURL[@]}" "$WEB_URL/readyz" >/dev/null
+          WEB_HTML="$("${CURL[@]}" "$WEB_URL/")"
+          grep -F '搜尋服務展示' <<<"$WEB_HTML" >/dev/null
+          SEARCH="$("${CURL[@]}" \
+            --header 'content-type: application/json' \
+            --data '{"query":"deployment smoke test","location_code":[],"duty_code":[]}' \
+            "$WEB_URL/api/v1/jobs/search")"
+          jq -e '
+            (.request_id | type == "string" and length > 0) and
+            (.result | type == "array" and length > 0 and length <= 10)
+          ' <<<"$SEARCH" >/dev/null

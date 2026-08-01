@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { SearchApiError, searchJobs, serializeSearch } from './search';
+import { ApiError, searchJobs, serializeSearch } from './search';
 
 describe('search API boundary', () => {
   it('trims the query and serializes deduplicated code lists', () => {
@@ -54,7 +54,9 @@ describe('search API boundary', () => {
 
     await expect(
       searchJobs({ query: '工程師', location_code: [], duty_code: [] }, fetcher)
-    ).rejects.toEqual(new SearchApiError('暫時無法搜尋。', 'req_failed'));
+    ).rejects.toEqual(
+      new ApiError('暫時無法搜尋。', 'req_failed', 'search_unavailable')
+    );
   });
 
   it('rejects a malformed successful response', async () => {
@@ -70,7 +72,65 @@ describe('search API boundary', () => {
 
     await expect(
       searchJobs({ query: '工程師', location_code: [], duty_code: [] }, fetcher)
-    ).rejects.toEqual(new SearchApiError('搜尋服務回傳了無法辨識的內容。'));
+    ).rejects.toEqual(new ApiError('搜尋服務回傳了無法辨識的內容。'));
+  });
+
+  it('rejects duplicate IDs, non-contiguous ranks, blank IDs, and more than 10 results', async () => {
+    const malformedResults = [
+      [
+        { job_id: '1', rank: 1 },
+        { job_id: '1', rank: 2 }
+      ],
+      [
+        { job_id: '1', rank: 1 },
+        { job_id: '2', rank: 3 }
+      ],
+      [{ job_id: '   ', rank: 1 }],
+      Array.from({ length: 11 }, (_, index) => ({
+        job_id: String(index + 1),
+        rank: index + 1
+      }))
+    ];
+
+    for (const result of malformedResults) {
+      const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(JSON.stringify({ request_id: 'req_invalid', result }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        })
+      );
+      await expect(
+        searchJobs(
+          { query: '工程師', location_code: [], duty_code: [] },
+          fetcher
+        )
+      ).rejects.toEqual(new ApiError('搜尋服務回傳了無法辨識的內容。'));
+    }
+  });
+
+  it('rejects extra keys in search response and result items', async () => {
+    const malformedPayloads = [
+      { request_id: 'req_invalid', result: [], unexpected: true },
+      {
+        request_id: 'req_invalid',
+        result: [{ job_id: '1', rank: 1, unexpected: true }]
+      }
+    ];
+
+    for (const payload of malformedPayloads) {
+      const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(JSON.stringify(payload), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        })
+      );
+      await expect(
+        searchJobs(
+          { query: '工程師', location_code: [], duty_code: [] },
+          fetcher
+        )
+      ).rejects.toEqual(new ApiError('搜尋服務回傳了無法辨識的內容。'));
+    }
   });
 
   it.each([
@@ -106,7 +166,7 @@ describe('search API boundary', () => {
 
     await expect(
       searchJobs({ query: '工程師', location_code: [], duty_code: [] }, fetcher)
-    ).rejects.toEqual(new SearchApiError('搜尋服務回傳了無法辨識的內容。'));
+    ).rejects.toEqual(new ApiError('搜尋服務回傳了無法辨識的內容。'));
   });
 
   it('maps invalid JSON to the API boundary error', async () => {
@@ -116,7 +176,7 @@ describe('search API boundary', () => {
 
     await expect(
       searchJobs({ query: '工程師', location_code: [], duty_code: [] }, fetcher)
-    ).rejects.toEqual(new SearchApiError('搜尋服務回傳了無法辨識的內容。'));
+    ).rejects.toEqual(new ApiError('搜尋服務回傳了無法辨識的內容。'));
   });
 
   it('rejects a malformed error envelope', async () => {
@@ -132,6 +192,43 @@ describe('search API boundary', () => {
 
     await expect(
       searchJobs({ query: '工程師', location_code: [], duty_code: [] }, fetcher)
-    ).rejects.toEqual(new SearchApiError('搜尋服務回傳了無法辨識的錯誤。'));
+    ).rejects.toEqual(new ApiError('搜尋服務回傳了無法辨識的錯誤。'));
+  });
+
+  it('rejects extra keys at every error-envelope level', async () => {
+    const baseError = {
+      code: 'search_unavailable',
+      message: '暫時無法搜尋。',
+      details: [{ field: 'query', code: 'invalid', message: '無效。' }]
+    };
+    const malformedPayloads = [
+      { request_id: 'req_invalid', error: baseError, unexpected: true },
+      {
+        request_id: 'req_invalid',
+        error: { ...baseError, unexpected: true }
+      },
+      {
+        request_id: 'req_invalid',
+        error: {
+          ...baseError,
+          details: [{ ...baseError.details[0], unexpected: true }]
+        }
+      }
+    ];
+
+    for (const payload of malformedPayloads) {
+      const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(JSON.stringify(payload), {
+          status: 503,
+          headers: { 'content-type': 'application/json' }
+        })
+      );
+      await expect(
+        searchJobs(
+          { query: '工程師', location_code: [], duty_code: [] },
+          fetcher
+        )
+      ).rejects.toEqual(new ApiError('搜尋服務回傳了無法辨識的錯誤。'));
+    }
   });
 });

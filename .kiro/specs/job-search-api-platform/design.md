@@ -8,21 +8,23 @@ the normative design decisions behind those documents.
 ## Architecture
 
 ```text
-Browser -> CloudFront + WAF -> /api/* -> ALB -> GPU ECS service -> SearchEngine
+Browser -> CloudFront + WAF -> /api/* -> ALB -> CPU Fargate API -> temporary fake SearchEngine
                               static UI
 
-GPU ECS -> S3 runtime/<manifest-sha256>/...
-GPU ECS -> Aurora PostgreSQL
+API startup -> Aurora PostgreSQL -> ten real seed IDs -> close NullPool reader
+GPU ECS scaffold (desired 0) -> S3 runtime/<manifest-sha256>/...
+SageMaker embedding + reranker endpoints (InService, not integrated into SearchEngine)
 ```
 
 The API owns transport validation and observability. `search-core` owns only the stable interface
-between transport and the future retrieval implementation. Ranking, normalization, lineage, and
-corpus audit belong to that future engine and are deliberately absent from this scaffold.
+between transport and retrieval. The user-approved temporary engine ignores query content and
+returns a stable slice of real Aurora IDs; the Web UI labels that behavior explicitly. Ranking,
+normalization, lineage, and corpus audit belong to the future evaluated engine and remain absent.
 
 ## Runtime flow
 
-1. Application startup calls the required engine factory once; initialization failure aborts
-   startup.
+1. Application startup calls the required factory once. It opens a `NullPool` PostgreSQL reader,
+   loads ten source-ordered job IDs, closes the reader, and aborts startup on any failure.
 2. FastAPI validates and normalizes the request at the trust boundary.
 3. The async route invokes the synchronous engine through a worker thread with `limit=10`.
 4. The route validates engine output for count, uniqueness, and ASCII-decimal job IDs before
@@ -60,15 +62,16 @@ timestamp, and a unique zero-based `source_row` for import lineage. `job_id` is 
 key. No search indexes, normalized children, or unrelated tables are inferred from the snapshot.
 
 SQLAlchemy owns this database model and exposes its metadata to Alembic, while Alembic owns
-migration history and Pydantic separately owns HTTP validation. Snapshot persistence does not add
-a runtime session factory or the future job-detail endpoint; those wait for an approved consuming
-flow and API contract.
+migration history and Pydantic separately owns HTTP validation. The only current application read
+selects seed IDs at startup with `NullPool`; snapshot persistence does not add the future job-detail
+endpoint, which waits for a separate approved contract change.
 
 The artifact bucket blocks all public access and enforces encryption. In the platform stack,
 CloudFront is the public origin for UI and API traffic; the ALB requires both CloudFront's
 origin-facing managed prefix list and a generated origin header. WAF applies AWS managed common
-rules. ECS uses an EC2 GPU capacity provider and starts at zero instances/tasks to avoid cost
-before a real image and artifacts exist.
+rules. One CPU Fargate task serves the temporary API. ECS also defines an EC2 GPU capacity provider
+at zero instances/tasks; the two available G-family endpoint slots are currently used by the
+separate SageMaker embedding and reranker endpoints.
 
 ## Delivery
 

@@ -7,10 +7,11 @@ out of scope until it is promoted through a separate, evidence-backed change.
 
 - `packages/search-core` exposes immutable `SearchQuery` data and a synchronous `SearchEngine`
   protocol with `search(query, limit)` and `close()`.
-- No concrete engine, in-memory implementation, runtime mock, or automatic fallback ships in
-  production code.
-- API startup fails when its explicitly supplied engine factory cannot initialize required
-  artifacts.
+- Until the evaluated production engine is approved, the explicitly temporary runtime may return
+  the first ten real Aurora job IDs for every valid query. It must be labeled as fake search in the
+  UI and documentation, must not claim retrieval quality, and must not become an automatic fallback.
+- API startup fails when its explicitly supplied factory cannot connect to PostgreSQL or load ten
+  valid seed IDs. Test doubles remain confined to tests.
 
 ## R2. HTTP contract
 
@@ -47,7 +48,8 @@ out of scope until it is promoted through a separate, evidence-backed change.
   fields remain nullable.
 - Revision `0001_baseline` establishes version history; `0002_create_jobs` creates only `jobs`, its
   primary key, and source-row uniqueness. No speculative lookup indexes or normalized child tables
-  are included, and no runtime engine/session factory exists yet.
+  are included. The temporary runtime uses a `NullPool` SQLAlchemy reader only during startup to
+  load ten seed IDs, then immediately closes it so Aurora auto-pause is not blocked.
 - Loading a verified snapshot into `jobs` does not add the future job-detail API. That API requires
   a separate contract and implementation change.
 - Runtime models, embeddings, and indexes are private immutable S3 objects under
@@ -58,19 +60,21 @@ out of scope until it is promoted through a separate, evidence-backed change.
 - `WorkRetrievalData` owns the shared VPC, private versioned artifact bucket, database security
   group, and private encrypted Aurora Serverless v2 with Secrets Manager, Data API, S3 import,
   0–4 ACU scaling, and a ten-minute auto-pause.
-- Deploying `WorkRetrievalData` alone creates no NAT gateway or application-plane resources. Its
-  only VPC endpoint is the free S3 gateway endpoint; it creates no interface endpoints, ALB,
-  CloudFront, WAF, ECR, ECS, Auto Scaling group, web bucket, application logs, or GitHub OIDC role.
+- Deploying `WorkRetrievalData` alone creates no NAT gateway or running application-plane resources.
+  Its only VPC endpoint is the free S3 gateway endpoint. It owns the retained ECR repository needed
+  to break the initial image/deployment cycle, but creates no interface endpoints, ALB, CloudFront,
+  WAF, ECS, Auto Scaling group, web bucket, application logs, or GitHub OIDC role.
 - `WorkRetrievalPlatform` reuses the exact VPC, artifact bucket, Aurora cluster, and database
   security group from `WorkRetrievalData`; it never creates a second database or artifact bucket.
-  It owns ECR, GPU ECS on EC2 capacity, interface endpoints, ALB, CloudFront `/api/*` routing, WAF,
-  CloudWatch, the web bucket, and the least-privilege GitHub OIDC role.
+  It owns the active CPU Fargate API service, zero-capacity GPU ECS on EC2 scaffold, interface
+  endpoints, ALB, CloudFront `/api/*` routing, WAF, CloudWatch, the web bucket, and the
+  least-privilege GitHub OIDC role.
 - The GitHub OIDC role may assume only the standard deploy, file-publishing, image-publishing, and
   lookup roles for the default CDK bootstrap qualifier, account, and region; `cdk-*` is
   forbidden.
 - ALB ingress accepts only the CloudFront origin-facing managed prefix list.
-- GPU desired capacity defaults to zero. Image URI, artifact manifest SHA-256, and GPU instance type
-  are required deployment inputs.
+- CPU desired capacity defaults to one; GPU min/max/desired capacities remain zero. Image URI,
+  artifact manifest SHA-256, and GPU instance type are required deployment inputs.
 
 ## R6. Delivery safety
 

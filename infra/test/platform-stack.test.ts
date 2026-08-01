@@ -5,12 +5,17 @@ import { describe, expect, test } from 'vitest';
 import { DataStack } from '../lib/data-stack.ts';
 import { PlatformStack } from '../lib/platform-stack.ts';
 
-const app = new App();
+const app = new App({
+  context: {
+    '@aws-cdk/aws-autoscaling:generateLaunchTemplateInsteadOfLaunchConfig': true
+  }
+});
 const data = new DataStack(app, 'TestData', {
   env: { account: '111111111111', region: 'us-east-1' }
 });
 const template = Template.fromStack(
   new PlatformStack(app, 'TestPlatform', {
+    apiRepository: data.apiRepository,
     cluster: data.cluster,
     databaseSecurityGroup: data.databaseSecurityGroup,
     env: { account: '111111111111', region: 'us-east-1' },
@@ -19,8 +24,10 @@ const template = Template.fromStack(
   })
 );
 
+const synthesized = template.toJSON();
+
 describe('platform stack', () => {
-  test('requires immutable deployment inputs and defaults GPU capacity to zero', () => {
+  test('requires immutable deployment inputs and keeps GPU capacity off', () => {
     template.hasParameter('ApiImageUri', {
       Type: 'String',
       AllowedPattern:
@@ -29,6 +36,11 @@ describe('platform stack', () => {
     template.hasParameter('ArtifactManifestSha256', {
       Type: 'String',
       AllowedPattern: '^[a-f0-9]{64}$'
+    });
+    template.hasParameter('CpuServiceDesiredCount', {
+      Type: 'Number',
+      Default: 1,
+      MinValue: 0
     });
     template.hasParameter('GpuInstanceType', { Type: 'String' });
     for (const id of [
@@ -43,48 +55,170 @@ describe('platform stack', () => {
       MaxSize: { Ref: 'GpuMaxCapacity' },
       DesiredCapacity: Match.absent()
     });
-    template.hasResourceProperties('AWS::ECS::Service', {
-      DesiredCount: { Ref: 'GpuServiceDesiredCount' }
-    });
+    template.resourceCountIs('AWS::EC2::LaunchTemplate', 1);
+    template.resourceCountIs('AWS::AutoScaling::LaunchConfiguration', 0);
+    expect(JSON.stringify(synthesized.Parameters)).toContain(
+      '/aws/service/ecs/optimized-ami/amazon-linux-2023/gpu/recommended/image_id'
+    );
   });
 
-  test('reuses the data plane without duplicating persistent resources', () => {
+  test('routes CPU Fargate and keeps the zero-capacity GPU service isolated', () => {
+    template.resourceCountIs('AWS::ECS::Service', 2);
+    template.resourceCountIs('AWS::ECS::TaskDefinition', 2);
+    const taskDefinitionsById = template.findResources(
+      'AWS::ECS::TaskDefinition'
+    );
+    expect(
+      Object.values(taskDefinitionsById).map(
+        (taskDefinition) => taskDefinition.Properties.RuntimePlatform
+      )
+    ).toEqual(
+      expect.arrayContaining([
+        { CpuArchitecture: 'X86_64', OperatingSystemFamily: 'LINUX' },
+        undefined
+      ])
+    );
+    template.hasResourceProperties('AWS::ECS::Service', {
+      DesiredCount: { Ref: 'CpuServiceDesiredCount' },
+      HealthCheckGracePeriodSeconds: 120,
+      LaunchType: 'FARGATE',
+      LoadBalancers: [
+        Match.objectLike({ ContainerName: 'Api', ContainerPort: 8000 })
+      ]
+    });
+    template.hasResourceProperties('AWS::ECS::Service', {
+      DesiredCount: { Ref: 'GpuServiceDesiredCount' },
+      HealthCheckGracePeriodSeconds: 600,
+      LaunchType: 'EC2',
+      LoadBalancers: Match.absent()
+    });
+    template.hasResourceProperties('AWS::ElasticLoadBalancingV2::TargetGroup', {
+      HealthCheckPath: '/readyz',
+      Port: 8000,
+      Protocol: 'HTTP',
+      TargetType: 'ip'
+    });
+
+    const taskDefinitions = Object.values(
+      template.findResources('AWS::ECS::TaskDefinition')
+    );
+    const containers = taskDefinitions.map(
+      (resource) => resource.Properties.ContainerDefinitions[0]
+    );
+    expect(JSON.stringify(containers)).not.toContain('NVIDIA_VISIBLE_DEVICES');
+    for (const container of containers) {
+      expect(container.Image).toEqual({ Ref: 'ApiImageUri' });
+      expect(container.Secrets).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ Name: 'DB_USER' }),
+          expect.objectContaining({ Name: 'DB_PASSWORD' })
+        ])
+      );
+      expect(container.Environment).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ Name: 'DB_HOST' }),
+          expect.objectContaining({ Name: 'DB_PORT' }),
+          expect.objectContaining({ Name: 'DB_NAME', Value: 'work_retrieval' }),
+          expect.objectContaining({
+            Name: 'EMBEDDING_ENDPOINT_NAME',
+            Value: 'qwen3-embedding-8b-20260801-031826'
+          }),
+          expect.objectContaining({
+            Name: 'RERANKER_ENDPOINT_NAME',
+            Value: 'work-retrieval-qwen3-reranker-8b'
+          })
+        ])
+      );
+    }
+    const gpuContainer = containers.find(
+      (container) => container.ResourceRequirements?.[0]?.Type === 'GPU'
+    );
+    expect(gpuContainer).toMatchObject({
+      ResourceRequirements: [{ Type: 'GPU', Value: '1' }]
+    });
+    expect(gpuContainer?.Environment).toEqual(
+      expect.arrayContaining([
+        { Name: 'NVIDIA_DRIVER_CAPABILITIES', Value: 'compute,utility' }
+      ])
+    );
+  });
+
+  test('reuses persistent resources and creates only required private endpoints', () => {
+    template.resourceCountIs('AWS::ECR::Repository', 0);
     template.resourceCountIs('AWS::RDS::DBCluster', 0);
     template.resourceCountIs('AWS::RDS::DBInstance', 0);
     template.resourceCountIs('AWS::S3::Bucket', 1);
     const endpoints = Object.values(
       template.findResources('AWS::EC2::VPCEndpoint')
     );
-    expect(endpoints).toHaveLength(7);
-    expect(endpoints).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          Properties: expect.objectContaining({ VpcEndpointType: 'Interface' })
-        })
-      ])
+    expect(endpoints).toHaveLength(8);
+    const endpointText = JSON.stringify(endpoints);
+    for (const service of [
+      '.ecr.api',
+      '.ecr.dkr',
+      '.logs',
+      '.secretsmanager',
+      '.sagemaker.runtime',
+      '.ecs',
+      '.ecs-agent',
+      '.ecs-telemetry'
+    ]) {
+      expect(endpointText).toContain(service);
+    }
+    expect(synthesized.Conditions.GpuCapacityEnabled).toEqual({
+      'Fn::Not': [
+        {
+          'Fn::Equals': [{ Ref: 'GpuMaxCapacity' }, 0]
+        }
+      ]
+    });
+    const conditionalEndpoints = endpoints.filter(
+      (endpoint) => endpoint.Condition === 'GpuCapacityEnabled'
     );
-    expect(endpoints).not.toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          Properties: expect.objectContaining({ VpcEndpointType: 'Gateway' })
-        })
-      ])
-    );
+    expect(conditionalEndpoints).toHaveLength(3);
+    expect(JSON.stringify(conditionalEndpoints)).toContain('.ecs');
+    expect(JSON.stringify(conditionalEndpoints)).toContain('.ecs-agent');
+    expect(JSON.stringify(conditionalEndpoints)).toContain('.ecs-telemetry');
     template.hasResourceProperties('AWS::EC2::SecurityGroupIngress', {
-      Description: 'ECS tasks only',
+      Description: 'API tasks only',
       FromPort: 5432,
       ToPort: 5432
     });
+    template.hasResourceProperties('AWS::EC2::SecurityGroupIngress', {
+      Description: 'Load balancer to target',
+      FromPort: 8000,
+      IpProtocol: 'tcp',
+      SourceSecurityGroupId: Match.anyValue(),
+      ToPort: 8000
+    });
   });
 
-  test('routes API traffic through CloudFront and restricts the ALB source', () => {
+  test('grants artifact and model access only to immutable runtime resources', () => {
+    const policies = Object.values(template.findResources('AWS::IAM::Policy'));
+    const taskPolicies = policies.filter((policy) =>
+      JSON.stringify(policy).includes('sagemaker:InvokeEndpoint')
+    );
+    expect(taskPolicies).toHaveLength(2);
+    for (const policy of taskPolicies) {
+      const text = JSON.stringify(policy);
+      expect(text).toContain('/runtime/');
+      expect(text).toContain('ArtifactManifestSha256');
+      expect(text).toContain('endpoint/qwen3-embedding-8b-20260801-031826');
+      expect(text).toContain('endpoint/work-retrieval-qwen3-reranker-8b');
+      expect(text).not.toContain(':endpoint/*');
+    }
+  });
+
+  test('routes only CloudFront-authorized API traffic and monitors targets', () => {
     template.hasResourceProperties('AWS::CloudFront::Distribution', {
       DistributionConfig: Match.objectLike({
         CacheBehaviors: Match.arrayWith([
           Match.objectLike({
             PathPattern: '/api/*',
             ViewerProtocolPolicy: 'https-only'
-          })
+          }),
+          Match.objectLike({ PathPattern: '/healthz' }),
+          Match.objectLike({ PathPattern: '/readyz' })
         ])
       })
     });
@@ -97,55 +231,112 @@ describe('platform stack', () => {
       CidrIp: Match.absent(),
       CidrIpv6: Match.absent()
     });
-    const serialized = JSON.stringify(template.toJSON());
-    expect(serialized).toContain('X-Origin-Verify');
-    expect(serialized).toContain('/healthz');
-    expect(serialized).toContain('/readyz');
+    expect(JSON.stringify(synthesized)).toContain('X-Origin-Verify');
+    template.hasResourceProperties('AWS::WAFv2::WebACL', {
+      Rules: Match.arrayWith([
+        Match.objectLike({
+          Name: 'AWSManagedCommonRules',
+          Statement: Match.objectLike({
+            ManagedRuleGroupStatement: Match.anyValue()
+          })
+        }),
+        Match.objectLike({
+          Name: 'IpRateLimit',
+          Action: { Block: {} },
+          Statement: {
+            RateBasedStatement: {
+              AggregateKeyType: 'FORWARDED_IP',
+              ForwardedIPConfig: {
+                FallbackBehavior: 'MATCH',
+                HeaderName: 'X-Forwarded-For'
+              },
+              Limit: 1000
+            }
+          }
+        })
+      ])
+    });
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      MetricName: 'HTTPCode_Target_5XX_Count',
+      TreatMissingData: 'notBreaching'
+    });
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      MetricName: 'UnHealthyHostCount',
+      TreatMissingData: 'notBreaching'
+    });
   });
 
-  test('provides the private endpoints required by ECS container instances', () => {
-    const endpoints = JSON.stringify(
-      template.findResources('AWS::EC2::VPCEndpoint')
-    );
-    expect(endpoints).toContain('.ecs');
-    expect(endpoints).toContain('.ecs-agent');
-    expect(endpoints).toContain('.ecs-telemetry');
-  });
-
-  test('locks GitHub federation to the approved production environment', () => {
+  test('locks GitHub federation and deployment writes to approved resources', () => {
+    template.hasResourceProperties('Custom::AWSCDKOpenIdConnectProvider', {
+      ClientIDList: ['sts.amazonaws.com'],
+      Url: 'https://token.actions.githubusercontent.com'
+    });
     const roles = template.findResources('AWS::IAM::Role');
-    expect(JSON.stringify(roles)).toContain(
-      'repo:TakalaWang/1111-work-retrieval:environment:production'
-    );
+    const immutableSubject =
+      'repo:TakalaWang@50894789/1111-work-retrieval@1318865130:environment:production';
     const githubRoleId = Object.keys(roles).find((id) =>
-      JSON.stringify(roles[id]).includes(
-        'repo:TakalaWang/1111-work-retrieval:environment:production'
-      )
+      JSON.stringify(roles[id]).includes(immutableSubject)
     );
     expect(githubRoleId).toBeDefined();
-    template.hasResourceProperties('AWS::IAM::Policy', {
-      PolicyDocument: {
-        Statement: Match.arrayWith([
-          Match.objectLike({
-            Action: 'ec2:DescribeManagedPrefixLists',
-            Effect: 'Allow',
-            Resource: '*'
-          })
-        ])
-      },
-      Roles: Match.arrayWith([{ Ref: githubRoleId }])
-    });
-    const policies = JSON.stringify(template.findResources('AWS::IAM::Policy'));
-    expect(policies).toContain('s3:DeleteObject');
-    expect(policies).toContain('cloudfront:CreateInvalidation');
-    expect(policies).not.toContain('role/cdk-*');
+    expect(JSON.stringify(roles)).not.toContain(
+      'repo:TakalaWang/1111-work-retrieval:environment:production'
+    );
+
+    const githubPolicies = Object.values(
+      template.findResources('AWS::IAM::Policy')
+    ).filter((policy) =>
+      policy.Properties.Roles?.some(
+        (role: { Ref?: string }) => role.Ref === githubRoleId
+      )
+    );
+    expect(githubPolicies).toHaveLength(1);
+    const policyText = JSON.stringify(githubPolicies[0]);
+    expect(policyText).toContain('ecr:PutImage');
+    expect(policyText).toContain('ecr:GetAuthorizationToken');
+    expect(policyText).toContain('ecr:DescribeImages');
+    expect(policyText).toContain('ecr:DescribeImageScanFindings');
+    expect(policyText).toContain('s3:PutObject');
+    expect(policyText).toContain('s3:DeleteObject');
+    expect(policyText).toContain('cloudfront:CreateInvalidation');
+    expect(policyText).toContain('ec2:DescribeManagedPrefixLists');
+    expect(policyText).toContain('/runtime/*/manifest.json');
+    expect(policyText).not.toContain('repository/*');
+    expect(policyText).not.toContain('role/cdk-*');
     for (const role of [
       'deploy-role',
       'file-publishing-role',
       'image-publishing-role',
       'lookup-role'
     ]) {
-      expect(policies).toContain(`cdk-hnb659fds-${role}`);
+      expect(policyText).toContain(`cdk-hnb659fds-${role}`);
+    }
+  });
+
+  test('exports all deployment and operational identifiers', () => {
+    for (const output of [
+      'ApiRepositoryUri',
+      'ApiBaseUrl',
+      'WebUrl',
+      'DistributionDomainName',
+      'DistributionId',
+      'AlbDnsName',
+      'AlbArn',
+      'ApiTargetGroupArn',
+      'EcsClusterName',
+      'EcsClusterArn',
+      'CpuServiceName',
+      'CpuServiceArn',
+      'GpuServiceName',
+      'GpuServiceArn',
+      'GpuAutoScalingGroupName',
+      'GpuAutoScalingGroupArn',
+      'WebAclArn',
+      'Target5xxAlarmName',
+      'UnhealthyHostAlarmName',
+      'GitHubDeployRoleArn',
+      'WebBucketName'
+    ]) {
+      template.hasOutput(output, { Value: Match.anyValue() });
     }
   });
 });

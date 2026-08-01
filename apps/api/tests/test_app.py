@@ -143,7 +143,36 @@ def test_chunked_body_is_rejected_before_unbounded_buffering(
     assert response.json()["error"]["code"] == "payload_too_large"
 
 
-@pytest.mark.parametrize("method,status", [("get", 405), ("delete", 405)])
+def test_body_rules_apply_to_get_without_breaking_bodyless_get(
+    client: Callable[[], TestClient],
+) -> None:
+    def oversized_chunks() -> Iterator[bytes]:
+        yield b"x" * (8 * 1024)
+        yield b"x" * (8 * 1024 + 1)
+
+    with client() as http:
+        bodyless = http.get("/healthz")
+        oversized = http.request(
+            "GET",
+            "/healthz",
+            content=oversized_chunks(),
+            headers={"content-type": "application/json"},
+        )
+        wrong_type = http.request(
+            "GET",
+            "/healthz",
+            content=b"{}",
+            headers={"content-type": "text/plain"},
+        )
+
+    assert bodyless.status_code == 200
+    assert oversized.status_code == 413
+    assert oversized.json()["error"]["code"] == "payload_too_large"
+    assert wrong_type.status_code == 415
+    assert wrong_type.json()["error"]["code"] == "unsupported_media_type"
+
+
+@pytest.mark.parametrize("method,status", [("put", 405), ("delete", 405)])
 def test_method_and_path_errors_use_error_envelope(
     client: Callable[[], TestClient], method: str, status: int
 ) -> None:
@@ -195,7 +224,7 @@ def test_every_invalid_engine_result_fails_closed(
             return invalid_result  # type: ignore[return-value]
 
     with TestClient(
-        create_app(InvalidEngine),
+        create_app(lambda: InvalidEngine()),
         raise_server_exceptions=False,
     ) as http:
         response = http.post("/api/v1/jobs/search", json={"query": "工程師"})
@@ -222,8 +251,8 @@ def test_factory_is_required_and_startup_errors_propagate() -> None:
             pass
 
     with (
-        pytest.raises(TypeError, match="engine_factory must return a SearchEngine"),
-        TestClient(create_app(InvalidEngine)),  # type: ignore[arg-type]
+        pytest.raises(TypeError, match="runtime_factory must return a SearchEngine"),
+        TestClient(create_app(lambda: InvalidEngine())),  # type: ignore[arg-type]
     ):
         pass
 

@@ -11,13 +11,14 @@ export interface SearchForm {
   dutyCodes: string;
 }
 
-export class SearchApiError extends Error {
+export class ApiError extends Error {
   constructor(
     message: string,
-    readonly requestId?: string
+    readonly requestId?: string,
+    readonly code?: string
   ) {
     super(message);
-    this.name = 'SearchApiError';
+    this.name = 'ApiError';
   }
 }
 
@@ -36,9 +37,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function hasExactKeys(
+  value: Record<string, unknown>,
+  expectedKeys: readonly string[]
+): boolean {
+  const keys = Object.keys(value);
+  return (
+    keys.length === expectedKeys.length &&
+    keys.every((key) => expectedKeys.includes(key))
+  );
+}
+
 function isSearchResponse(value: unknown): value is SearchResponse {
   if (
     !isRecord(value) ||
+    !hasExactKeys(value, ['request_id', 'result']) ||
     typeof value.request_id !== 'string' ||
     !Array.isArray(value.result) ||
     value.result.length > 10
@@ -49,6 +62,7 @@ function isSearchResponse(value: unknown): value is SearchResponse {
   return value.result.every((item, index) => {
     if (
       !isRecord(item) ||
+      !hasExactKeys(item, ['job_id', 'rank']) ||
       typeof item.job_id !== 'string' ||
       !/^[0-9]+$/u.test(item.job_id) ||
       item.rank !== index + 1 ||
@@ -63,14 +77,17 @@ function isSearchResponse(value: unknown): value is SearchResponse {
 function isErrorResponse(value: unknown): value is ErrorResponse {
   return (
     isRecord(value) &&
+    hasExactKeys(value, ['request_id', 'error']) &&
     typeof value.request_id === 'string' &&
     isRecord(value.error) &&
+    hasExactKeys(value.error, ['code', 'message', 'details']) &&
     typeof value.error.code === 'string' &&
     typeof value.error.message === 'string' &&
     Array.isArray(value.error.details) &&
     value.error.details.every(
       (detail) =>
         isRecord(detail) &&
+        hasExactKeys(detail, ['field', 'code', 'message']) &&
         typeof detail.field === 'string' &&
         typeof detail.code === 'string' &&
         typeof detail.message === 'string'
@@ -93,7 +110,7 @@ async function jsonPayload(
   try {
     return await response.json();
   } catch {
-    throw new SearchApiError(invalidMessage);
+    throw new ApiError(invalidMessage);
   }
 }
 
@@ -115,10 +132,14 @@ export async function searchJobs(
 
   if (!response.ok) {
     if (isErrorResponse(payload))
-      throw new SearchApiError(payload.error.message, payload.request_id);
-    throw new SearchApiError('搜尋服務回傳了無法辨識的錯誤。');
+      throw new ApiError(
+        payload.error.message,
+        payload.request_id,
+        payload.error.code
+      );
+    throw new ApiError('搜尋服務回傳了無法辨識的錯誤。');
   }
   if (!isSearchResponse(payload))
-    throw new SearchApiError('搜尋服務回傳了無法辨識的內容。');
+    throw new ApiError('搜尋服務回傳了無法辨識的內容。');
   return payload;
 }

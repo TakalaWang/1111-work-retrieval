@@ -5,7 +5,7 @@ import logging
 import time
 import uuid
 from collections import deque
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, cast
 
@@ -28,8 +28,8 @@ from work_retrieval_api.models import (
     SearchResultItem,
     validation_details,
 )
+from work_retrieval_api.runtime import RuntimeFactory
 
-EngineFactory = Callable[[], SearchEngine]
 MAX_BODY_BYTES = 16 * 1024
 MAX_RESULTS = 10
 SEARCH_PATH = "/api/v1/jobs/search"
@@ -104,30 +104,36 @@ class RequestContextMiddleware:
             await send(message)
 
         headers = Headers(scope=scope)
+        content_type = headers.get("content-type", "").split(";", 1)[0].lower()
         response: Response | None = None
-        if method == "POST" and path == SEARCH_PATH:
-            content_type = headers.get("content-type", "").split(";", 1)[0].lower()
-            request = Request(scope)
-            if content_type != "application/json":
+        declared_length: int | None = None
+        if (length := headers.get("content-length")) is not None:
+            if not length.isdecimal() or int(length) > MAX_BODY_BYTES:
                 response = _error(
-                    request,
-                    415,
-                    "unsupported_media_type",
-                    "Content-Type must be application/json.",
-                )
-            elif (length := headers.get("content-length")) is not None and (
-                not length.isdecimal() or int(length) > MAX_BODY_BYTES
-            ):
-                response = _error(
-                    request,
+                    Request(scope),
                     413,
                     "payload_too_large",
                     f"Request body must not exceed {MAX_BODY_BYTES} bytes.",
                 )
+            else:
+                declared_length = int(length)
+
+        requires_json = method == "POST" and path == SEARCH_PATH
+        if (
+            response is None
+            and (requires_json or (declared_length or 0) > 0)
+            and content_type != "application/json"
+        ):
+            response = _error(
+                Request(scope),
+                415,
+                "unsupported_media_type",
+                "Content-Type must be application/json.",
+            )
 
         buffered: deque[Message] = deque()
-        if response is None and method == "POST" and path == SEARCH_PATH:
-            consumed = 0
+        consumed = 0
+        if response is None:
             while True:
                 message = await receive()
                 buffered.append(message)
@@ -145,6 +151,15 @@ class RequestContextMiddleware:
                     break
                 if not message.get("more_body", False):
                     break
+
+        if response is None and consumed > 0 and content_type != "application/json":
+            response = _error(
+                Request(scope),
+                415,
+                "unsupported_media_type",
+                "Content-Type must be application/json.",
+            )
+            buffered.clear()
 
         async def replay_receive() -> Message:
             return buffered.popleft() if buffered else await receive()
@@ -172,12 +187,12 @@ class RequestContextMiddleware:
             )
 
 
-def create_app(engine_factory: EngineFactory) -> FastAPI:
+def create_app(runtime_factory: RuntimeFactory) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        engine = engine_factory()
+        engine = runtime_factory()
         if not isinstance(engine, SearchEngine):
-            raise TypeError("engine_factory must return a SearchEngine")
+            raise TypeError("runtime_factory must return a SearchEngine")
         app.state.engine = engine
         try:
             yield

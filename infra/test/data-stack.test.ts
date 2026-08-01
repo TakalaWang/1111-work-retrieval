@@ -14,6 +14,7 @@ describe('data stack', () => {
 
     template.resourceCountIs('AWS::EC2::NatGateway', 0);
     template.resourceCountIs('AWS::EC2::SecurityGroupIngress', 0);
+    template.resourceCountIs('AWS::ECR::Repository', 1);
     template.resourceCountIs('AWS::S3::Bucket', 1);
     template.hasParameter('S3PrefixListId', {
       AllowedPattern: '^pl-[0-9a-f]+$',
@@ -40,6 +41,14 @@ describe('data stack', () => {
           RestrictPublicBuckets: true
         },
         VersioningConfiguration: { Status: 'Enabled' }
+      })
+    });
+    template.hasResource('AWS::ECR::Repository', {
+      DeletionPolicy: 'Retain',
+      UpdateReplacePolicy: 'Retain',
+      Properties: Match.objectLike({
+        EncryptionConfiguration: { EncryptionType: 'AES256' },
+        ImageScanningConfiguration: { ScanOnPush: true }
       })
     });
 
@@ -78,15 +87,15 @@ describe('data stack', () => {
     for (const output of [
       'RuntimeBucketName',
       'DatabaseClusterArn',
-      'DatabaseSecretArn'
+      'DatabaseSecretArn',
+      'ApiRepositoryUri'
     ]) {
       template.hasOutput(output, { Value: Match.anyValue() });
     }
-    expect(Object.keys(template.toJSON().Outputs)).toHaveLength(3);
+    expect(Object.keys(template.toJSON().Outputs)).toHaveLength(4);
     for (const resource of [
       'AWS::AutoScaling::AutoScalingGroup',
       'AWS::CloudFront::Distribution',
-      'AWS::ECR::Repository',
       'AWS::ECS::Cluster',
       'AWS::ECS::Service',
       'AWS::ElasticLoadBalancingV2::LoadBalancer',

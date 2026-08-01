@@ -11,6 +11,7 @@ const env = {
 };
 const data = new DataStack(app, 'WorkRetrievalData', { env });
 new PlatformStack(app, 'WorkRetrievalPlatform', {
+  apiRepository: data.apiRepository,
   cluster: data.cluster,
   databaseSecurityGroup: data.databaseSecurityGroup,
   env,

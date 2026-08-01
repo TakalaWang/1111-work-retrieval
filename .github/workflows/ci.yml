@@ -25,8 +25,8 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --frozen --all-packages
-      - run: uv run ruff check .
       - run: uv run ruff format --check .
+      - run: uv run ruff check .
       - run: uv run mypy
       - run: uv run pytest
       - name: Verify committed OpenAPI
@@ -110,3 +110,13 @@ jobs:
       - run: pnpm --dir infra test
       - run: pnpm --dir infra build
       - run: pnpm --dir infra synth
+
+  container:
+    name: API container
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Build the production image
+        run: |
+          docker build --platform linux/amd64 --tag work-retrieval-api:ci .
+          test "$(docker image inspect work-retrieval-api:ci --format '{{.Architecture}}')" = amd64

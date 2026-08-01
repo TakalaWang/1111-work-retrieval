@@ -7,11 +7,13 @@ import {
   type StackProps
 } from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
+import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as rds from 'aws-cdk-lib/aws-rds';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import type { Construct } from 'constructs';
 
 export class DataStack extends Stack {
+  readonly apiRepository: ecr.Repository;
   readonly cluster: rds.DatabaseCluster;
   readonly databaseSecurityGroup: ec2.SecurityGroup;
   readonly runtimeBucket: s3.Bucket;
@@ -43,6 +45,15 @@ export class DataStack extends Stack {
       removalPolicy: RemovalPolicy.RETAIN,
       versioned: true
     });
+    this.apiRepository = new ecr.Repository(this, 'ApiRepository', {
+      encryption: ecr.RepositoryEncryption.AES_256,
+      imageScanOnPush: true,
+      lifecycleRules: [{ maxImageCount: 20 }],
+      removalPolicy: RemovalPolicy.RETAIN
+    });
+    const cfnApiRepository = this.apiRepository.node
+      .defaultChild as ecr.CfnRepository;
+    cfnApiRepository.encryptionConfiguration = { encryptionType: 'AES256' };
     this.databaseSecurityGroup = new ec2.SecurityGroup(
       this,
       'DatabaseSecurityGroup',
@@ -86,6 +97,9 @@ export class DataStack extends Stack {
     });
     new CfnOutput(this, 'RuntimeBucketName', {
       value: this.runtimeBucket.bucketName
+    });
+    new CfnOutput(this, 'ApiRepositoryUri', {
+      value: this.apiRepository.repositoryUri
     });
   }
 }
