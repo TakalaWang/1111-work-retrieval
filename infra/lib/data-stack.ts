@@ -1,7 +1,6 @@
 import {
   CfnOutput,
   CfnParameter,
-  Duration,
   RemovalPolicy,
   Stack,
   type StackProps
@@ -78,9 +77,8 @@ export class DataStack extends Stack {
       defaultDatabaseName: 'work_retrieval',
       deletionProtection: true,
       enableDataApi: true,
-      serverlessV2AutoPauseDuration: Duration.minutes(10),
       serverlessV2MaxCapacity: 4,
-      serverlessV2MinCapacity: 0,
+      serverlessV2MinCapacity: 0.5,
       storageEncrypted: true,
       removalPolicy: RemovalPolicy.RETAIN,
       s3ImportBuckets: [this.runtimeBucket],
