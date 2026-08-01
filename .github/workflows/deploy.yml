@@ -247,7 +247,35 @@ jobs:
             --header 'content-type: application/json' \
             --data '{"query":"deployment smoke test","location_code":[],"duty_code":[]}' \
             "$WEB_URL/api/v1/jobs/search")"
-          jq -e '
-            (.request_id | type == "string" and length > 0) and
-            (.result | type == "array" and length > 0 and length <= 10)
-          ' <<<"$SEARCH" >/dev/null
+          JOB_ID="$(SEARCH_JSON="$SEARCH" python - <<'PY'
+          import json
+          import os
+
+          payload = json.loads(os.environ["SEARCH_JSON"])
+          request_id = payload.get("request_id")
+          results = payload.get("result")
+          if not isinstance(request_id, str) or not request_id:
+              raise SystemExit("search smoke returned no request_id")
+          if not isinstance(results, list) or not 1 <= len(results) <= 10:
+              raise SystemExit("search smoke returned an invalid result list")
+          job_id = results[0].get("job_id") if isinstance(results[0], dict) else None
+          if not isinstance(job_id, str) or not job_id.isascii() or not job_id.isdecimal():
+              raise SystemExit("search smoke returned an invalid job_id")
+          print(job_id)
+          PY
+          )"
+          DETAIL="$("${CURL[@]}" "$WEB_URL/api/v1/job-details/$JOB_ID")"
+          DETAIL_JSON="$DETAIL" EXPECTED_JOB_ID="$JOB_ID" python - <<'PY'
+          import json
+          import os
+
+          payload = json.loads(os.environ["DETAIL_JSON"])
+          details = payload.get("details")
+          if payload.get("job_id") != os.environ["EXPECTED_JOB_ID"]:
+              raise SystemExit("job detail smoke returned a different job_id")
+          if not isinstance(details, dict):
+              raise SystemExit("job detail smoke returned invalid details")
+          title = details.get("職務名稱")
+          if not isinstance(title, str) or not title.strip():
+              raise SystemExit("job detail smoke returned no title")
+          PY

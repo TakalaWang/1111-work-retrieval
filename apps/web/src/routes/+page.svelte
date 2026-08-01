@@ -1,14 +1,13 @@
 <script>
-  import { ApiError, searchJobs, serializeSearch } from '$lib/search';
+  import { ApiError, searchJobDetails } from '$lib/search';
 
   let query = $state('');
-  let locationCodes = $state('');
-  let dutyCodes = $state('');
-  let timeoutSeconds = $state(10);
+  let searchDate = $state('');
   let loading = $state(false);
   let searched = $state(false);
-  /** @type {import('$lib/search').SearchResult[]} */
-  let results = $state([]);
+  /** @type {import('$lib/search').PresentedJob[]} */
+  let jobs = $state([]);
+  let failedCount = $state(0);
   /** @type {{ message: string; requestId?: string } | undefined} */
   let error = $state();
   /** @type {string | undefined} */
@@ -17,28 +16,25 @@
   async function submit() {
     loading = true;
     searched = false;
+    jobs = [];
+    failedCount = 0;
     error = undefined;
-    results = [];
     requestId = undefined;
 
     try {
-      const response = await searchJobs(
-        serializeSearch({ query, locationCodes, dutyCodes }),
-        fetch,
-        AbortSignal.timeout(timeoutSeconds * 1_000)
-      );
-      results = response.result;
-      requestId = response.request_id;
+      const outcome = await searchJobDetails({
+        query,
+        searchDate: searchDate || undefined
+      });
+      jobs = outcome.jobs;
+      failedCount = outcome.failedCount;
+      requestId = outcome.requestId;
       searched = true;
     } catch (caught) {
       error =
-        caught instanceof DOMException && caught.name === 'TimeoutError'
-          ? {
-              message: `搜尋超過 ${timeoutSeconds} 秒，請調高最長等待時間後重試。`
-            }
-          : caught instanceof ApiError
-            ? { message: caught.message, requestId: caught.requestId }
-            : { message: '目前無法連線到搜尋服務，請稍後再試。' };
+        caught instanceof ApiError
+          ? { message: caught.message, requestId: caught.requestId }
+          : { message: '目前無法連線到職缺服務，請稍後再試。' };
     } finally {
       loading = false;
     }
@@ -47,10 +43,7 @@
 
 <svelte:head>
   <title>職缺搜尋</title>
-  <meta
-    name="description"
-    content="以關鍵字、地區代碼與職務代碼搜尋 1111 人力銀行職缺。"
-  />
+  <meta name="description" content="輸入關鍵字，搜尋最相關的 1111 職缺。" />
 </svelte:head>
 
 <main>
@@ -63,82 +56,40 @@
         void submit();
       }}
     >
-      <div class="primary-search">
-        <label class="sr-only" for="job-query">搜尋職缺</label>
-        <input
-          id="job-query"
-          bind:value={query}
-          type="search"
-          name="query"
-          required
-          disabled={loading}
-          maxlength="512"
-          autocomplete="off"
-          placeholder="輸入職務、技能或工作地點"
-        />
-        <button type="submit" disabled={loading || !query.trim()}>
-          {loading ? '搜尋中…' : '搜尋'}
-        </button>
-      </div>
-
-      <div class="filters">
-        <label>
-          <span>地區代碼 <small>選填</small></span>
-          <textarea
-            bind:value={locationCodes}
-            name="location_code"
-            rows="2"
-            disabled={loading}
-            placeholder="100100, 100200"
-          ></textarea>
-          <small>以逗號、空白或換行分隔</small>
-        </label>
-
-        <label>
-          <span>職務代碼 <small>選填</small></span>
-          <textarea
-            bind:value={dutyCodes}
-            name="duty_code"
-            rows="2"
-            disabled={loading}
-            placeholder="140200, 140300"
-          ></textarea>
-          <small>重複代碼會自動合併</small>
-        </label>
-
-        <label class="timeout-control">
-          <span>最長等待時間 <small>秒</small></span>
-          <input
-            bind:value={timeoutSeconds}
-            name="timeout_seconds"
-            type="number"
-            min="1"
-            max="60"
-            step="1"
-            required
-            disabled={loading}
-          />
-          <small>可調整 1–60 秒</small>
-        </label>
-      </div>
+      <label class="sr-only" for="job-query">搜尋職缺</label>
+      <input
+        id="job-query"
+        bind:value={query}
+        type="search"
+        name="query"
+        required
+        maxlength="512"
+        autocomplete="off"
+        placeholder="輸入職務、技能或工作地點"
+      />
+      <button type="submit" disabled={loading || !query.trim()}>
+        {loading ? '搜尋中…' : '搜尋'}
+      </button>
     </form>
+    <div class="controls">
+      <label for="search-date">搜尋日期</label>
+      <input
+        id="search-date"
+        bind:value={searchDate}
+        type="date"
+        name="search_date"
+        disabled={loading}
+        aria-describedby="search-date-default"
+      />
+      <small id="search-date-default">留空使用 2026-06-08</small>
+    </div>
   </section>
 
-  <section
-    class="results"
-    aria-labelledby="results-title"
-    aria-live="polite"
-    aria-busy={loading}
-  >
-    <div class="results-heading">
-      <h2 id="results-title">搜尋結果</h2>
-      {#if requestId}<span class="request-id">{requestId}</span>{/if}
-    </div>
-
+  <section class="results" aria-live="polite" aria-busy={loading}>
     {#if loading}
-      <div class="skeleton" role="status">
-        <span class="sr-only">正在搜尋職缺</span>
-        <span></span><span></span><span></span>
+      <div class="status loading" role="status">
+        <span class="spinner" aria-hidden="true"></span>
+        <span>正在搜尋並載入職缺資料…</span>
       </div>
     {:else if error}
       <div class="status error" role="alert">
@@ -146,30 +97,81 @@
         <p>{error.message}</p>
         {#if error.requestId}<code>{error.requestId}</code>{/if}
       </div>
-    {:else if searched && results.length === 0}
+    {:else if searched && jobs.length === 0}
       <div class="status">
         <strong>找不到符合條件的職缺</strong>
-        <p>試著改用其他關鍵字或減少篩選條件。</p>
+        <p>試著改用其他職稱、技能或地點重新搜尋。</p>
       </div>
-    {:else if results.length > 0}
-      <p class="result-summary">找到 {results.length} 筆職缺</p>
+    {:else if jobs.length > 0}
+      <div class="result-summary">
+        <p>找到 {jobs.length} 筆相關職缺</p>
+        {#if failedCount > 0}
+          <p class="partial" role="status">
+            另有 {failedCount} 筆職缺資料暫時無法載入
+          </p>
+        {/if}
+      </div>
+
       <ol>
-        {#each results as result (result.job_id)}
+        {#each jobs as job (job.jobId)}
           <li>
             <article>
-              <span class="rank" aria-label={`搜尋排名第 ${result.rank} 名`}>
-                {result.rank}
-              </span>
-              <div>
-                <span class="result-label">職缺編號</span>
-                <h3>{result.job_id}</h3>
+              <div class="job-heading">
+                <span class="rank" aria-label={`搜尋排名第 ${job.rank} 名`}>
+                  {job.rank}
+                </span>
+                <div>
+                  <h2>{job.title}</h2>
+                  <span class="job-id">職缺編號 {job.jobId}</span>
+                </div>
               </div>
+
+              {#if job.city || job.salary || job.category}
+                <ul class="metadata" aria-label="職缺摘要">
+                  {#if job.city}<li>{job.city}</li>{/if}
+                  {#if job.salary}<li>{job.salary}</li>{/if}
+                  {#if job.category}<li>{job.category}</li>{/if}
+                </ul>
+              {/if}
+
+              {#if job.description}
+                <p class="description">{job.description}</p>
+              {/if}
+
+              {#if job.experience || job.education || job.skills}
+                <dl>
+                  {#if job.experience}
+                    <div>
+                      <dt>工作經驗</dt>
+                      <dd>{job.experience}</dd>
+                    </div>
+                  {/if}
+                  {#if job.education}
+                    <div>
+                      <dt>學歷要求</dt>
+                      <dd>{job.education}</dd>
+                    </div>
+                  {/if}
+                  {#if job.skills}
+                    <div>
+                      <dt>工作技能</dt>
+                      <dd>{job.skills}</dd>
+                    </div>
+                  {/if}
+                </dl>
+              {/if}
+
+              {#if job.updatedAt}
+                <p class="updated">更新時間 {job.updatedAt}</p>
+              {/if}
             </article>
           </li>
         {/each}
       </ol>
-    {:else}
-      <p class="empty">輸入關鍵字開始搜尋。</p>
+    {/if}
+
+    {#if requestId}
+      <p class="request-id">Request ID：{requestId}</p>
     {/if}
   </section>
 </main>
@@ -199,30 +201,23 @@
   }
 
   :global(button),
-  :global(input),
-  :global(textarea) {
+  :global(input) {
     font: inherit;
   }
 
   main {
     width: min(100% - 2rem, 52rem);
     margin: 0 auto;
-    padding: 4rem 0 5rem;
+    padding: clamp(3rem, 10vh, 6rem) 0 5rem;
   }
 
   h1 {
     margin: 0 0 1rem;
-    font-size: 2rem;
+    font-size: clamp(1.5rem, 4vw, 2rem);
     letter-spacing: -0.03em;
-    text-wrap: balance;
   }
 
   form {
-    display: grid;
-    gap: 1rem;
-  }
-
-  .primary-search {
     display: flex;
     padding: 0.35rem;
     border: 1px solid #cfd1d5;
@@ -234,14 +229,14 @@
       box-shadow 160ms ease;
   }
 
-  .primary-search:focus-within {
+  form:focus-within {
     border-color: #d7195f;
     box-shadow:
       0 0 0 3px rgb(215 25 95 / 12%),
       0 8px 28px rgb(32 33 36 / 9%);
   }
 
-  .primary-search input {
+  form input {
     min-width: 0;
     min-height: 3.25rem;
     flex: 1;
@@ -252,9 +247,8 @@
     color: inherit;
   }
 
-  .primary-search input::placeholder,
-  textarea::placeholder {
-    color: #62656a;
+  form input::placeholder {
+    color: #767980;
   }
 
   button {
@@ -286,97 +280,46 @@
 
   button:disabled {
     background: #c8c9cc;
-    color: #56595f;
+    color: #62656a;
     cursor: not-allowed;
   }
 
-  .filters {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr)) minmax(8rem, 0.45fr);
-    gap: 0.75rem;
-  }
-
-  label {
-    display: grid;
-    gap: 0.4rem;
-    color: #3f4248;
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    margin-top: 0.75rem;
+    color: #686b72;
     font-size: 0.82rem;
-    font-weight: 650;
   }
 
-  label small {
-    color: #62656a;
-    font-weight: 400;
+  .controls label {
+    font-weight: 700;
   }
 
-  textarea {
-    width: 100%;
-    min-height: 4.5rem;
-    resize: vertical;
-    border: 1px solid #d8d9dc;
-    border-radius: 0.65rem;
-    padding: 0.7rem 0.8rem;
-    background: #fff;
-    color: inherit;
-    line-height: 1.45;
-  }
-
-  .timeout-control input {
-    width: 100%;
-    min-height: 2.75rem;
-    border: 1px solid #d8d9dc;
-    border-radius: 0.65rem;
-    padding: 0.7rem 0.8rem;
+  .controls input {
+    min-height: 2.25rem;
+    border: 1px solid #cfd1d5;
+    border-radius: 0.5rem;
+    padding: 0.35rem 0.55rem;
     background: #fff;
     color: inherit;
   }
 
-  textarea:focus-visible,
-  .timeout-control input:focus-visible {
-    outline: 3px solid rgb(215 25 95 / 12%);
+  .controls input:focus-visible {
+    outline: 3px solid rgb(215 25 95 / 18%);
     border-color: #d7195f;
   }
 
   .results {
-    margin-top: 2rem;
-  }
-
-  .results-heading {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 1rem;
-    margin-bottom: 0.75rem;
-  }
-
-  h2 {
-    margin: 0;
-    font-size: 1rem;
+    margin-top: 1.5rem;
   }
 
   .request-id,
-  code {
-    color: #62656a;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.72rem;
-    overflow-wrap: anywhere;
-  }
-
-  .result-summary,
-  .empty,
-  .result-label,
-  .status p {
-    color: #62656a;
-  }
-
-  .result-summary,
-  .empty {
-    margin: 0 0 0.75rem;
-    font-size: 0.88rem;
-  }
-
-  .empty {
-    text-align: center;
+  .updated,
+  .job-id,
+  .result-summary p {
+    color: #686b72;
   }
 
   .status {
@@ -386,8 +329,20 @@
     background: #fff;
   }
 
+  .status strong,
+  .status p {
+    display: block;
+  }
+
   .status p {
     margin: 0.4rem 0 0;
+    color: #686b72;
+  }
+
+  .status.loading {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
   }
 
   .status.error {
@@ -395,27 +350,62 @@
     background: #fff7fa;
   }
 
-  .status code {
+  code {
     display: inline-block;
     margin-top: 0.8rem;
+    color: #686b72;
+    font-size: 0.78rem;
   }
 
-  ol {
-    display: grid;
-    gap: 0.75rem;
+  .spinner {
+    width: 1rem;
+    height: 1rem;
+    flex: 0 0 auto;
+    border: 2px solid #e2a7bd;
+    border-top-color: #d7195f;
+    border-radius: 50%;
+    animation: spin 700ms linear infinite;
+  }
+
+  .result-summary {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .result-summary p {
+    margin: 0;
+    font-size: 0.88rem;
+  }
+
+  .result-summary .partial {
+    color: #9b4e00;
+  }
+
+  ol,
+  .metadata {
     margin: 0;
     padding: 0;
     list-style: none;
   }
 
+  ol {
+    display: grid;
+    gap: 0.75rem;
+  }
+
   article {
-    display: flex;
-    align-items: flex-start;
-    gap: 0.85rem;
     padding: 1.25rem;
     border: 1px solid #dedfe2;
     border-radius: 0.7rem;
     background: #fff;
+  }
+
+  .job-heading {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.85rem;
   }
 
   .rank {
@@ -431,29 +421,80 @@
     font-weight: 800;
   }
 
-  h3 {
+  h2 {
     margin: 0;
     font-size: 1.08rem;
     line-height: 1.4;
-    text-wrap: balance;
   }
 
-  .result-label {
+  .job-id {
     display: inline-block;
     margin-top: 0.25rem;
     font-size: 0.74rem;
   }
 
-  .skeleton {
+  .metadata {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-top: 0.9rem;
+    padding-left: 2.65rem;
+  }
+
+  .metadata li {
+    border-radius: 999px;
+    padding: 0.3rem 0.65rem;
+    background: #f1f2f4;
+    color: #50535a;
+    font-size: 0.78rem;
+  }
+
+  .description {
+    display: -webkit-box;
+    overflow: hidden;
+    margin: 1rem 0 0 2.65rem;
+    color: #4e5157;
+    font-size: 0.9rem;
+    line-height: 1.65;
+    line-clamp: 3;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+  }
+
+  dl {
     display: grid;
+    gap: 0.45rem;
+    margin: 1rem 0 0 2.65rem;
+    padding-top: 0.85rem;
+    border-top: 1px solid #ececef;
+    font-size: 0.82rem;
+  }
+
+  dl div {
+    display: grid;
+    grid-template-columns: 5rem 1fr;
     gap: 0.75rem;
   }
 
-  .skeleton span {
-    height: 4.5rem;
-    border-radius: 0.7rem;
-    background: #e9eaec;
-    animation: pulse 800ms ease-in-out infinite alternate;
+  dt {
+    color: #767980;
+  }
+
+  dd {
+    margin: 0;
+    color: #3f4248;
+  }
+
+  .updated {
+    margin: 0.85rem 0 0 2.65rem;
+    font-size: 0.75rem;
+  }
+
+  .request-id {
+    margin: 1rem 0 0;
+    text-align: right;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.7rem;
   }
 
   .sr-only {
@@ -466,9 +507,9 @@
     clip-path: inset(50%);
   }
 
-  @keyframes pulse {
+  @keyframes spin {
     to {
-      background: #f2f2f3;
+      transform: rotate(360deg);
     }
   }
 
@@ -478,30 +519,39 @@
       padding-top: 2rem;
     }
 
-    .primary-search,
-    .filters {
+    form {
       display: grid;
-      grid-template-columns: 1fr;
     }
 
     button {
       min-height: 3rem;
     }
 
-    .results-heading {
+    .controls {
+      flex-wrap: wrap;
+    }
+
+    .result-summary {
       display: grid;
-      gap: 0.35rem;
+      gap: 0.25rem;
+    }
+
+    .metadata,
+    .description,
+    dl,
+    .updated {
+      margin-left: 0;
     }
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .primary-search,
+    form,
     button {
       transition: none;
     }
 
-    .skeleton span {
-      animation: none;
+    .spinner {
+      animation-duration: 1.5s;
     }
   }
 </style>

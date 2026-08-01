@@ -23,12 +23,14 @@ from work_retrieval_api.models import (
     ErrorBody,
     ErrorDetail,
     ErrorResponse,
+    JobId,
+    JobResponse,
     SearchRequest,
     SearchResponse,
     SearchResultItem,
     validation_details,
 )
-from work_retrieval_api.runtime import RuntimeFactory
+from work_retrieval_api.runtime import RetrievalRuntime, RuntimeFactory
 
 MAX_BODY_BYTES = 16 * 1024
 MAX_RESULTS = 10
@@ -191,8 +193,8 @@ def create_app(runtime_factory: RuntimeFactory) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = runtime_factory()
-        if not isinstance(engine, SearchEngine):
-            raise TypeError("runtime_factory must return a SearchEngine")
+        if not isinstance(engine, RetrievalRuntime):
+            raise TypeError("runtime_factory must return a RetrievalRuntime")
         app.state.engine = engine
         try:
             yield
@@ -263,6 +265,7 @@ def create_app(runtime_factory: RuntimeFactory) -> FastAPI:
         request.state.duty_code_count = len(payload.duty_code)
         query = SearchQuery(
             text=payload.query,
+            search_date=payload.search_date,
             location_codes=tuple(payload.location_code),
             duty_codes=tuple(payload.duty_code),
         )
@@ -276,5 +279,27 @@ def create_app(runtime_factory: RuntimeFactory) -> FastAPI:
                 SearchResultItem(job_id=job_id, rank=rank) for rank, job_id in enumerate(job_ids, 1)
             ],
         )
+
+    @app.get(
+        "/api/v1/job-details/{job_id}",
+        response_model=JobResponse,
+        responses={
+            404: {"model": ErrorResponse},
+            422: {"model": ErrorResponse},
+            500: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
+    )
+    async def job_detail(job_id: JobId, request: Request) -> JobResponse | JSONResponse:
+        runtime = cast(RetrievalRuntime, request.app.state.engine)
+        details = await run_in_threadpool(runtime.job_details, job_id)
+        if details is None:
+            return _error(
+                request,
+                404,
+                "job_not_found",
+                "The requested job was not found.",
+            )
+        return JobResponse(job_id=job_id, details=details)
 
     return app
