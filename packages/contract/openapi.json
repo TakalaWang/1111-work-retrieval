@@ -70,6 +70,36 @@
         "title": "ErrorResponse",
         "type": "object"
       },
+      "JobResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "details": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "Details",
+            "type": "object"
+          },
+          "job_id": {
+            "pattern": "^[0-9]+$",
+            "title": "Job Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "details"
+        ],
+        "title": "JobResponse",
+        "type": "object"
+      },
       "SearchRequest": {
         "additionalProperties": false,
         "properties": {
@@ -93,6 +123,12 @@
             "maxLength": 512,
             "minLength": 1,
             "title": "Query",
+            "type": "string"
+          },
+          "search_date": {
+            "default": "2026-06-08",
+            "format": "date",
+            "title": "Search Date",
             "type": "string"
           }
         },
@@ -155,6 +191,76 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/job-details/{job_id}": {
+      "get": {
+        "operationId": "job_detail_api_v1_job_details__job_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9]+$",
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Job Detail"
+      }
+    },
     "/api/v1/jobs/search": {
       "post": {
         "operationId": "search_api_v1_jobs_search_post",

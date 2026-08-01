@@ -1,7 +1,9 @@
 from collections.abc import Mapping, Sequence
+from datetime import date
 from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from work_retrieval_core import DEMO_SEARCH_DATE
 
 Code = Annotated[str, StringConstraints(strict=True, strip_whitespace=True, min_length=1)]
 Query = Annotated[
@@ -9,14 +11,29 @@ Query = Annotated[
     StringConstraints(strict=True, strip_whitespace=True, min_length=1, max_length=512),
 ]
 JobId = Annotated[str, StringConstraints(strict=True, pattern=r"^[0-9]+$")]
+SearchDate = Annotated[date, Field(strict=True)]
 
 
 class SearchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query: Query
+    search_date: SearchDate = DEMO_SEARCH_DATE
     location_code: list[Code] = Field(default_factory=list)
     duty_code: list[Code] = Field(default_factory=list)
+
+    @field_validator("search_date", mode="before")
+    @classmethod
+    def parse_iso_date(cls, value: object) -> date:
+        if not isinstance(value, str):
+            raise ValueError("search_date must be an ISO date")
+        try:
+            parsed = date.fromisoformat(value)
+        except ValueError as error:
+            raise ValueError("search_date must be an ISO date") from error
+        if parsed.isoformat() != value:
+            raise ValueError("search_date must be an ISO date")
+        return parsed
 
     @field_validator("location_code", "duty_code")
     @classmethod
@@ -36,6 +53,13 @@ class SearchResponse(BaseModel):
 
     request_id: str
     result: Annotated[list[SearchResultItem], Field(max_length=10)]
+
+
+class JobResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: JobId
+    details: dict[str, str | None]
 
 
 class ErrorDetail(BaseModel):

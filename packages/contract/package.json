@@ -14,7 +14,7 @@
     "generate": "pnpm generate:openapi && pnpm generate:types",
     "generate:openapi": "uv run python -m work_retrieval_api.export_openapi openapi.json",
     "generate:check": "node scripts/check-generated.mjs",
-    "generate:types": "openapi-typescript openapi.json -o types.d.ts"
+    "generate:types": "openapi-typescript openapi.json -o types.d.ts --default-non-nullable false"
   },
   "devDependencies": {
     "openapi-typescript": "^7.13.0"

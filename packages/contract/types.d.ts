@@ -4,6 +4,23 @@
  */
 
 export interface paths {
+    "/api/v1/job-details/{job_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Job Detail */
+        get: operations["job_detail_api_v1_job_details__job_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/jobs/search": {
         parameters: {
             query?: never;
@@ -49,6 +66,15 @@ export interface components {
             /** Request Id */
             request_id: string;
         };
+        /** JobResponse */
+        JobResponse: {
+            /** Details */
+            details: {
+                [key: string]: string | null;
+            };
+            /** Job Id */
+            job_id: string;
+        };
         /** SearchRequest */
         SearchRequest: {
             /** Duty Code */
@@ -57,6 +83,12 @@ export interface components {
             location_code?: string[];
             /** Query */
             query: string;
+            /**
+             * Search Date
+             * Format: date
+             * @default 2026-06-08
+             */
+            search_date?: string;
         };
         /** SearchResponse */
         SearchResponse: {
@@ -81,6 +113,64 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    job_detail_api_v1_job_details__job_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     search_api_v1_jobs_search_post: {
         parameters: {
             query?: never;
