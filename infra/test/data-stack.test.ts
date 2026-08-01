@@ -70,11 +70,13 @@ describe('data stack', () => {
       EngineVersion: '16.13',
       ServerlessV2ScalingConfiguration: {
         MaxCapacity: 4,
-        MinCapacity: 0,
-        SecondsUntilAutoPause: 600
+        MinCapacity: 0.5
       },
       StorageEncrypted: true
     });
+    expect(JSON.stringify(template.toJSON())).not.toContain(
+      'SecondsUntilAutoPause'
+    );
     template.hasResourceProperties('AWS::RDS::DBInstance', {
       DBInstanceClass: 'db.serverless',
       PubliclyAccessible: false
