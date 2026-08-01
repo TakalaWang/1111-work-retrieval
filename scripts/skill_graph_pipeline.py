@@ -60,6 +60,10 @@ EXTRACTION_MANIFEST_KEYS = {
     "requests_sha256",
     "responses_inventory_sha256",
     "evidence_sha256",
+    "sampling_policy",
+    "sample_limit",
+    "eligible_train_records",
+    "sampling_sha256",
     "source_records",
     "processed_records",
     "input_tokens",
@@ -185,16 +189,29 @@ def _load_extraction(
         require_sha256(manifest[name], name)
     for name in ("prompt_sha256", "requests_sha256", "responses_inventory_sha256"):
         require_sha256(manifest[name], name)
+    require_sha256(manifest["sampling_sha256"], "sampling SHA-256")
     if (
         manifest["canonicalization_policy"] != "open_surface_per_jd_llm_canonicalization_v1"
         or manifest["oov_policy"] != "accept_open_surface_with_exact_train_jd_evidence"
     ):
         raise RuntimeError("LLM extraction OOV/canonicalization policy is incompatible")
-    for name in ("source_records", "processed_records", "input_tokens", "output_tokens"):
+    for name in (
+        "sample_limit",
+        "eligible_train_records",
+        "source_records",
+        "processed_records",
+        "input_tokens",
+        "output_tokens",
+    ):
         value = manifest[name]
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise RuntimeError(f"{name} must be a non-negative integer")
-    if manifest["source_records"] != manifest["processed_records"]:
+    if (
+        manifest["sampling_policy"] != "duty_stratified_sqrt_support_stable_hash_v1"
+        or not 1 <= manifest["sample_limit"] <= 10_000
+        or not manifest["source_records"] <= manifest["eligible_train_records"]
+        or manifest["source_records"] != manifest["processed_records"]
+    ):
         raise RuntimeError("LLM extraction is incomplete")
     if sha256_file(evidence_path) != manifest["evidence_sha256"]:
         raise RuntimeError("LLM evidence bytes differ from extraction manifest")
@@ -219,10 +236,17 @@ def _load_extraction(
             if not isinstance(raw, dict):
                 raise RuntimeError(f"evidence line {line_number} must be an object")
             exact_keys(raw, EVIDENCE_KEYS, f"evidence line {line_number}")
-            record_id = _normalize(raw["record_id"], "record_id")
+            record_id = raw["record_id"]
             job_id = raw["job_id"]
-            if not isinstance(job_id, str) or not job_id.isascii() or not job_id.isdecimal():
-                raise RuntimeError("evidence has an invalid job_id")
+            if (
+                not isinstance(record_id, str)
+                or len(record_id) != 64
+                or any(character not in "0123456789abcdef" for character in record_id)
+                or not isinstance(job_id, str)
+                or not job_id.isascii()
+                or not job_id.isdecimal()
+            ):
+                raise RuntimeError("evidence has an invalid record_id or job_id")
             if record_id in seen_records or job_id in seen_jobs:
                 raise RuntimeError("evidence has a duplicate record or job_id")
             seen_records.add(record_id)
@@ -237,8 +261,12 @@ def _load_extraction(
             if not isinstance(source_text, str) or not source_text.strip():
                 raise RuntimeError("evidence source_text is empty")
             expected_source_sha = require_sha256(raw["source_text_sha256"], "source_text_sha256")
-            if hashlib.sha256(source_text.encode()).hexdigest() != expected_source_sha:
-                raise RuntimeError("evidence source_text SHA-256 differs")
+            if (
+                hashlib.sha256(source_text.encode()).hexdigest() != expected_source_sha
+                or hashlib.sha256(f"{job_id}\0{expected_source_sha}".encode()).hexdigest()
+                != record_id
+            ):
+                raise RuntimeError("evidence source or record identity differs")
             skills = _skills(raw["skills"], source_text)
             relations = _relations(raw["relations"], source_text, set(skills))
             rejection_counts: dict[str, int] = {}
@@ -259,7 +287,21 @@ def _load_extraction(
                     **rejection_counts,
                 }
             )
-    if not records or observed_maximum != maximum:
+    if (
+        not records
+        or observed_maximum != maximum
+        or len(records) != manifest["source_records"]
+        or len(records) != manifest["processed_records"]
+        or hashlib.sha256(
+            json.dumps(
+                [record["record_id"] for record in records],
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        != manifest["sampling_sha256"]
+    ):
         raise RuntimeError("evidence is empty or maximum source timestamp differs")
     rejection_totals = {
         "skill_rejections": sum(record["skill_rejection_count"] for record in records),
@@ -478,6 +520,10 @@ def build_graph(
         "oov_policy": extraction["oov_policy"],
         "requests_sha256": extraction["requests_sha256"],
         "responses_inventory_sha256": extraction["responses_inventory_sha256"],
+        "sampling_policy": extraction["sampling_policy"],
+        "sample_limit": extraction["sample_limit"],
+        "eligible_train_records": extraction["eligible_train_records"],
+        "sampling_sha256": extraction["sampling_sha256"],
         "source_records": extraction["source_records"],
         "processed_records": extraction["processed_records"],
         "input_tokens": extraction["input_tokens"],
@@ -532,6 +578,10 @@ def validate_graph(output: Path, split_manifest_path: Path) -> dict[str, object]
         "oov_policy",
         "requests_sha256",
         "responses_inventory_sha256",
+        "sampling_policy",
+        "sample_limit",
+        "eligible_train_records",
+        "sampling_sha256",
         "source_records",
         "processed_records",
         "input_tokens",
@@ -549,6 +599,8 @@ def validate_graph(output: Path, split_manifest_path: Path) -> dict[str, object]
         or manifest["complete"] is not True
         or manifest["publication_allowed"] is not False
         or manifest["publication_gate"] != "pending_fixed_input_graph_ablation"
+        or manifest["graph_schema_version"] != 1
+        or manifest["graph_kind"] != "llm-evidence-locked-typed-entity-graph"
         or manifest["source_policy"] != "train_jd_only"
         or manifest["test_jd_used"] is not False
         or manifest["uses_ground_truth"] is not False
@@ -558,6 +610,7 @@ def validate_graph(output: Path, split_manifest_path: Path) -> dict[str, object]
         or _timestamp(manifest["train_cutoff_exclusive"], "graph train cutoff") != train_cutoff
         or _timestamp(manifest["max_source_timestamp"], "max_source_timestamp") >= train_cutoff
         or manifest["maximum_traversal_hops"] != 1
+        or manifest["sampling_policy"] != "duty_stratified_sqrt_support_stable_hash_v1"
         or any(
             isinstance(manifest[name], bool)
             or not isinstance(manifest[name], int)
@@ -566,6 +619,40 @@ def validate_graph(output: Path, split_manifest_path: Path) -> dict[str, object]
         )
     ):
         raise RuntimeError("skill graph manifest policy differs")
+    for name in (
+        "split_manifest_sha256",
+        "source_jd_sha256",
+        "evidence_sha256",
+        "prompt_sha256",
+        "requests_sha256",
+        "responses_inventory_sha256",
+        "sampling_sha256",
+    ):
+        require_sha256(manifest[name], f"skill graph {name}")
+    for name in (
+        "sample_limit",
+        "eligible_train_records",
+        "source_records",
+        "processed_records",
+        "minimum_support",
+    ):
+        value = manifest[name]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise RuntimeError(f"skill graph {name} must be a positive integer")
+    for name in ("input_tokens", "output_tokens"):
+        value = manifest[name]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise RuntimeError(f"skill graph {name} must be a non-negative integer")
+    if (
+        manifest["sample_limit"] > 10_000
+        or manifest["source_records"] > manifest["sample_limit"]
+        or manifest["source_records"] > manifest["eligible_train_records"]
+        or manifest["processed_records"] != manifest["source_records"]
+    ):
+        raise RuntimeError("skill graph sampling lineage differs")
+    for name in ("model_id", "prompt_version", "canonicalization_policy", "oov_policy"):
+        if not isinstance(manifest[name], str) or not manifest[name]:
+            raise RuntimeError(f"skill graph {name} must be non-empty")
     artifacts = verify_local_inventory(output, manifest["artifacts"])
     if {artifact["path"] for artifact in artifacts} != set(GRAPH_FILES.values()):
         raise RuntimeError("skill graph artifact inventory differs from the closed schema")
@@ -582,12 +669,29 @@ def validate_graph(output: Path, split_manifest_path: Path) -> dict[str, object]
         for position, row in enumerate(rows):
             exact_keys(row, schema[name], f"{name} row {position}")
     job_ids = [str(row["job_id"]) for row in tables["jobs"]]
+    job_timestamps = [
+        _timestamp(row["source_modified_at"], "graph job source timestamp")
+        for row in tables["jobs"]
+    ]
     skills = [str(row["skill"]) for row in tables["skills"]]
     relations = {
         (str(row["source"]), str(row["type"]), str(row["target"]))
         for row in tables["skill_relations"]
     }
-    if job_ids != sorted(set(job_ids)) or skills != sorted(set(skills)):
+    if (
+        job_ids != sorted(set(job_ids))
+        or any(not job_id.isascii() or not job_id.isdecimal() for job_id in job_ids)
+        or skills != sorted(set(skills))
+        or not job_timestamps
+        or max(job_timestamps)
+        != _timestamp(manifest["max_source_timestamp"], "graph maximum source timestamp")
+        or any(timestamp >= train_cutoff for timestamp in job_timestamps)
+        or any(
+            require_sha256(row["source_text_sha256"], "graph job source text SHA-256")
+            != row["source_text_sha256"]
+            for row in tables["jobs"]
+        )
+    ):
         raise RuntimeError("skill graph entities are duplicated or not canonical")
     if any(
         str(row["job_id"]) not in job_ids or str(row["skill"]) not in skills
@@ -608,7 +712,7 @@ def validate_graph(output: Path, split_manifest_path: Path) -> dict[str, object]
     ):
         raise RuntimeError("relation evidence references an unknown relation")
     counts = {name: len(rows) for name, rows in tables.items()}
-    if counts != manifest["counts"]:
+    if counts != manifest["counts"] or len(job_ids) != manifest["source_records"]:
         raise RuntimeError("skill graph row counts differ from manifest")
     inventory_bytes = json.dumps(
         artifacts,

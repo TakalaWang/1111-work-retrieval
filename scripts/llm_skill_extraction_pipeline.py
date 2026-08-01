@@ -6,27 +6,33 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import heapq
 import json
+import math
 import os
 import shutil
 import unicodedata
-from collections.abc import Mapping
+from collections import Counter
+from collections.abc import Iterator, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol, cast
 
 import boto3  # type: ignore[import-untyped]
+from botocore.config import Config  # type: ignore[import-untyped]
 from pipeline_contract import (
     atomic_json,
     canonical_json,
     exact_keys,
     read_json_object,
+    require_sha256,
     sha256_file,
 )
 from skill_graph_pipeline import load_split_manifest
 from work_retrieval_core.serialization import (
     DOCUMENT_POLICY_VERSION,
     FULL_JOB_FIELDS,
+    canonical_code,
     canonical_text,
     document_template_sha256,
     serialize_full_job,
@@ -48,6 +54,10 @@ PROMPT_SHA256 = hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()
 JOB_ID_FIELD = "職缺編號"
 DEFAULT_DUTY_FIELD = "職務小類"
 DEFAULT_MODIFIED_AT_FIELD = "更新日期"
+DEFAULT_SAMPLE_LIMIT = 5_000
+MAX_SAMPLE_LIMIT = 10_000
+BEDROCK_TOTAL_MAX_ATTEMPTS = 4
+SAMPLING_POLICY = "duty_stratified_sqrt_support_stable_hash_v1"
 PREPARE_KEYS = {
     "schema_version",
     "complete",
@@ -62,6 +72,12 @@ PREPARE_KEYS = {
     "job_id_field",
     "duty_field",
     "modified_at_field",
+    "sampling_policy",
+    "sample_limit",
+    "eligible_train_records",
+    "eligible_max_source_timestamp",
+    "strata",
+    "sampling_sha256",
     "records",
     "post_cutoff_skipped",
     "max_source_timestamp",
@@ -119,6 +135,40 @@ def _timestamp(value: object, name: str) -> datetime:
     return parsed
 
 
+def _sample_quotas(counts: Mapping[str, int], limit: int) -> dict[str, int]:
+    if not 1 <= limit <= MAX_SAMPLE_LIMIT:
+        raise ValueError(f"sample limit must be between 1 and {MAX_SAMPLE_LIMIT}")
+    if len(counts) > limit:
+        raise RuntimeError("duty strata exceed the sample limit; increase it within the hard cap")
+    target = min(limit, sum(counts.values()))
+    quotas = dict.fromkeys(counts, 1)
+    remaining = target - len(quotas)
+    while remaining:
+        active = {
+            duty: count - quotas[duty] for duty, count in counts.items() if count > quotas[duty]
+        }
+        if not active:
+            break
+        weight_total = sum(math.sqrt(counts[duty]) for duty in active)
+        raw = {duty: remaining * math.sqrt(counts[duty]) / weight_total for duty in active}
+        additions = {
+            duty: min(capacity, math.floor(raw[duty])) for duty, capacity in active.items()
+        }
+        allocated = sum(additions.values())
+        if allocated == 0:
+            duty = min(active, key=lambda value: (-raw[value], value))
+            additions[duty] = 1
+            allocated = 1
+        for duty, addition in additions.items():
+            quotas[duty] += addition
+        remaining -= allocated
+    if sum(quotas.values()) != target or any(
+        quotas[duty] > count for duty, count in counts.items()
+    ):
+        raise RuntimeError("deterministic sampling quota allocation failed")
+    return quotas
+
+
 def prepare_requests(
     *,
     jobs_csv: Path,
@@ -126,6 +176,7 @@ def prepare_requests(
     output: Path,
     duty_field: str,
     modified_at_field: str,
+    sample_limit: int,
 ) -> dict[str, object]:
     if output.exists():
         raise RuntimeError("prepared extraction output already exists; builds never overwrite")
@@ -138,20 +189,19 @@ def prepare_requests(
     requests_path = partial / "requests.jsonl"
     try:
         csv.field_size_limit(64 * 1024 * 1024)
+        dataset_sha256 = sha256_file(jobs_csv)
         required = {
             JOB_ID_FIELD,
             duty_field,
             modified_at_field,
             *(label for label, _field in FULL_JOB_FIELDS),
         }
+        split_sha256 = sha256_file(split_manifest_path)
         seen: set[str] = set()
-        records = 0
+        eligible_counts: Counter[str] = Counter()
         skipped = 0
-        maximum = None
-        with (
-            jobs_csv.open(encoding="utf-8-sig", newline="") as source,
-            requests_path.open("wb") as target,
-        ):
+        eligible_maximum = None
+        with jobs_csv.open(encoding="utf-8-sig", newline="") as source:
             reader = csv.DictReader(source)
             if reader.fieldnames is None or not required.issubset(reader.fieldnames):
                 missing = sorted(required.difference(reader.fieldnames or ()))
@@ -167,6 +217,22 @@ def prepare_requests(
                 if modified >= cutoff:
                     skipped += 1
                     continue
+                duty = canonical_code(row[duty_field])
+                if not duty:
+                    raise RuntimeError(f"train JD {job_id} has an empty duty stratum")
+                eligible_counts[duty] += 1
+                eligible_maximum = max(eligible_maximum, modified) if eligible_maximum else modified
+        if not eligible_counts or eligible_maximum is None:
+            raise RuntimeError("time cutoff produced no train JDs")
+        quotas = _sample_quotas(eligible_counts, sample_limit)
+        heaps: dict[str, list[tuple[int, str, dict[str, object]]]] = {duty: [] for duty in quotas}
+        with jobs_csv.open(encoding="utf-8-sig", newline="") as source:
+            reader = csv.DictReader(source)
+            for row in reader:
+                modified = _timestamp(row[modified_at_field], "source modified timestamp")
+                if modified >= cutoff:
+                    continue
+                job_id = canonical_text(row[JOB_ID_FIELD])
                 values = {field: row[label] for label, field in FULL_JOB_FIELDS}
                 source_text = serialize_full_job(values)
                 duty = canonical_text(row[duty_field])
@@ -182,28 +248,62 @@ def prepare_requests(
                     "source_text": source_text,
                     "source_text_sha256": source_sha,
                 }
+                stratum = canonical_code(duty)
+                priority = int.from_bytes(
+                    hashlib.sha256(f"{split_sha256}\0{job_id}\0{source_sha}".encode()).digest(),
+                    "big",
+                )
+                entry = (-priority, job_id, request)
+                heap = heaps[stratum]
+                if len(heap) < quotas[stratum]:
+                    heapq.heappush(heap, entry)
+                elif entry[:2] > heap[0][:2]:
+                    heapq.heapreplace(heap, entry)
+        selected = sorted(
+            (
+                (-negative_priority, job_id, request)
+                for heap in heaps.values()
+                for negative_priority, job_id, request in heap
+            ),
+            key=lambda item: (canonical_code(item[2]["duty"]), item[0], item[1]),
+        )
+        maximum = max(
+            _timestamp(request["source_modified_at"], "selected source timestamp")
+            for _priority, _job_id, request in selected
+        )
+        with requests_path.open("wb") as target:
+            for _priority, _job_id, request in selected:
                 target.write(canonical_json(request) + b"\n")
-                records += 1
-                maximum = max(maximum, modified) if maximum else modified
             target.flush()
             os.fsync(target.fileno())
-        if not records or maximum is None:
-            raise RuntimeError("time cutoff produced no train JDs")
+        if sha256_file(jobs_csv) != dataset_sha256:
+            raise RuntimeError("source CSV bytes changed during deterministic sampling")
+        selected_ids = [request["record_id"] for _priority, _job_id, request in selected]
+        strata = [
+            {"duty": duty, "eligible": eligible_counts[duty], "selected": quotas[duty]}
+            for duty in sorted(quotas)
+        ]
         manifest = {
             "schema_version": 1,
             "complete": True,
             "source_policy": "train_jd_only",
             "split_id": split["split_id"],
-            "split_manifest_sha256": sha256_file(split_manifest_path),
+            "split_manifest_sha256": split_sha256,
             "train_cutoff_exclusive": cutoff.isoformat(),
-            "source_jd_sha256": sha256_file(jobs_csv),
+            "source_jd_sha256": dataset_sha256,
             "document_policy_version": DOCUMENT_POLICY_VERSION,
             "document_template_sha256": document_template_sha256(),
             "document_fields": [label for label, _field in FULL_JOB_FIELDS],
             "job_id_field": JOB_ID_FIELD,
             "duty_field": duty_field,
             "modified_at_field": modified_at_field,
-            "records": records,
+            "sampling_policy": SAMPLING_POLICY,
+            "sample_limit": sample_limit,
+            "eligible_train_records": sum(eligible_counts.values()),
+            "eligible_max_source_timestamp": eligible_maximum.isoformat(),
+            "strata": strata,
+            "sampling_sha256": hashlib.sha256(canonical_json(selected_ids)).hexdigest(),
+            "records": len(selected),
             "post_cutoff_skipped": skipped,
             "max_source_timestamp": maximum.isoformat(),
             "requests_sha256": sha256_file(requests_path),
@@ -217,9 +317,9 @@ def prepare_requests(
         raise
 
 
-def _requests(path: Path) -> list[dict[str, Any]]:
-    values: list[dict[str, Any]] = []
+def _iter_requests(path: Path) -> Iterator[dict[str, Any]]:
     seen: set[str] = set()
+    seen_jobs: set[str] = set()
     with path.open(encoding="utf-8") as source:
         for line_number, line in enumerate(source, start=1):
             try:
@@ -231,31 +331,37 @@ def _requests(path: Path) -> list[dict[str, Any]]:
             exact_keys(raw, REQUEST_KEYS, f"extraction request {line_number}")
             record_id = raw["record_id"]
             job_id = raw["job_id"]
+            duty = raw["duty"]
             source_text = raw["source_text"]
+            source_sha = raw["source_text_sha256"]
             if (
                 not isinstance(record_id, str)
                 or len(record_id) != 64
+                or any(character not in "0123456789abcdef" for character in record_id)
                 or record_id in seen
                 or not isinstance(job_id, str)
                 or not job_id.isascii()
                 or not job_id.isdecimal()
+                or job_id in seen_jobs
+                or not isinstance(duty, str)
+                or not duty.strip()
                 or not isinstance(source_text, str)
                 or not source_text
-                or hashlib.sha256(source_text.encode()).hexdigest() != raw["source_text_sha256"]
+                or not isinstance(source_sha, str)
+                or hashlib.sha256(source_text.encode()).hexdigest() != source_sha
+                or hashlib.sha256(f"{job_id}\0{source_sha}".encode()).hexdigest() != record_id
                 or _timestamp(raw["source_modified_at"], "request source timestamp").isoformat()
                 != raw["source_modified_at"]
             ):
                 raise RuntimeError("extraction request lineage differs")
             seen.add(record_id)
-            values.append(raw)
-    if not values:
+            seen_jobs.add(job_id)
+            yield raw
+    if not seen:
         raise RuntimeError("extraction requests are empty")
-    return values
 
 
-def _prepared(
-    output: Path, split_manifest_path: Path
-) -> tuple[dict[str, object], list[dict[str, Any]]]:
+def _prepared(output: Path, split_manifest_path: Path) -> dict[str, object]:
     split, cutoff = load_split_manifest(split_manifest_path)
     manifest = read_json_object(output / "manifest.json", "prepared extraction manifest")
     exact_keys(manifest, PREPARE_KEYS, "prepared extraction manifest")
@@ -274,15 +380,96 @@ def _prepared(
     }
     if any(manifest[name] != value for name, value in expected.items()):
         raise RuntimeError("prepared extraction policy or split differs")
+    for name in ("source_jd_sha256", "requests_sha256", "sampling_sha256"):
+        require_sha256(manifest[name], f"prepared extraction {name}")
+    if (
+        not isinstance(manifest["duty_field"], str)
+        or not manifest["duty_field"]
+        or not isinstance(manifest["modified_at_field"], str)
+        or not manifest["modified_at_field"]
+        or isinstance(manifest["post_cutoff_skipped"], bool)
+        or not isinstance(manifest["post_cutoff_skipped"], int)
+        or manifest["post_cutoff_skipped"] < 0
+    ):
+        raise RuntimeError("prepared extraction source field contract differs")
     if sha256_file(requests_path) != manifest["requests_sha256"]:
         raise RuntimeError("prepared extraction request bytes differ")
-    requests = _requests(requests_path)
-    if manifest["records"] != len(requests):
+    sample_limit = manifest["sample_limit"]
+    eligible = manifest["eligible_train_records"]
+    declared_records = manifest["records"]
+    if (
+        isinstance(sample_limit, bool)
+        or not isinstance(sample_limit, int)
+        or not 1 <= sample_limit <= MAX_SAMPLE_LIMIT
+        or isinstance(eligible, bool)
+        or not isinstance(eligible, int)
+        or isinstance(declared_records, bool)
+        or not isinstance(declared_records, int)
+        or declared_records < 1
+        or manifest["sampling_policy"] != SAMPLING_POLICY
+    ):
         raise RuntimeError("prepared extraction record count differs")
-    maximum = max(_timestamp(row["source_modified_at"], "request timestamp") for row in requests)
-    if maximum.isoformat() != manifest["max_source_timestamp"] or maximum >= cutoff:
+    strata = manifest["strata"]
+    if not isinstance(strata, list) or not strata:
+        raise RuntimeError("prepared extraction strata are missing")
+    actual: Counter[str] = Counter()
+    selected_hasher = hashlib.sha256()
+    selected_hasher.update(b"[")
+    request_count = 0
+    maximum: datetime | None = None
+    for row in _iter_requests(requests_path):
+        if request_count:
+            selected_hasher.update(b",")
+        selected_hasher.update(canonical_json(row["record_id"]))
+        request_count += 1
+        actual[canonical_code(row["duty"])] += 1
+        modified = _timestamp(row["source_modified_at"], "request timestamp")
+        maximum = max(maximum, modified) if maximum else modified
+    selected_hasher.update(b"]")
+    if (
+        declared_records != request_count
+        or eligible < request_count
+        or request_count > sample_limit
+        or maximum is None
+    ):
+        raise RuntimeError("prepared extraction record count differs")
+    declared_eligible = 0
+    declared_selected = 0
+    for position, value in enumerate(strata):
+        if not isinstance(value, dict):
+            raise RuntimeError("prepared extraction stratum must be an object")
+        exact_keys(value, {"duty", "eligible", "selected"}, f"sampling stratum {position}")
+        duty, count, selected = value["duty"], value["eligible"], value["selected"]
+        if (
+            not isinstance(duty, str)
+            or canonical_code(duty) != duty
+            or isinstance(count, bool)
+            or not isinstance(count, int)
+            or isinstance(selected, bool)
+            or not isinstance(selected, int)
+            or not 1 <= selected <= count
+            or actual[duty] != selected
+        ):
+            raise RuntimeError("prepared extraction stratum lineage differs")
+        declared_eligible += count
+        declared_selected += selected
+    if (
+        declared_eligible != eligible
+        or declared_selected != request_count
+        or selected_hasher.hexdigest() != manifest["sampling_sha256"]
+    ):
+        raise RuntimeError("prepared extraction sampling attestation differs")
+    eligible_maximum = _timestamp(
+        manifest["eligible_max_source_timestamp"], "eligible train maximum"
+    )
+    if (
+        maximum.isoformat() != manifest["max_source_timestamp"]
+        or maximum >= cutoff
+        or eligible_maximum >= cutoff
+        or maximum > eligible_maximum
+    ):
         raise RuntimeError("prepared extraction contains non-train evidence")
-    return manifest, requests
+    return manifest
 
 
 def _raw_json(response: Mapping[str, object]) -> tuple[dict[str, object], int, int]:
@@ -483,56 +670,75 @@ def extract(
 ) -> dict[str, object]:
     if not model_id.strip():
         raise ValueError("Bedrock model ID is required")
-    source, requests = _prepared(prepared, split_manifest_path)
+    source = _prepared(prepared, split_manifest_path)
+    records = source["records"]
+    if isinstance(records, bool) or not isinstance(records, int) or records > MAX_SAMPLE_LIMIT:
+        raise RuntimeError("Bedrock extraction request count exceeds the hard safety cap")
     output.mkdir(parents=True, exist_ok=True)
     responses_dir = output / "responses"
     responses_dir.mkdir(exist_ok=True)
-    evidence_rows: list[dict[str, object]] = []
-    response_inventory: list[dict[str, str]] = []
-    input_tokens = output_tokens = skill_rejections = relation_rejections = 0
-    for request in requests:
-        response_path = responses_dir / f"{request['record_id']}.json"
-        if response_path.exists():
-            response = _validate_response(
-                read_json_object(response_path, "Bedrock extraction response"),
-                request=request,
-                model_id=model_id,
-            )
-        else:
-            response = _response(request=request, model_id=model_id, bedrock=bedrock)
-            atomic_json(response_path, response)
-        response_inventory.append(
-            {
-                "path": response_path.relative_to(output).as_posix(),
-                "sha256": sha256_file(response_path),
-            }
-        )
-        input_tokens += cast(int, response["input_tokens"])
-        output_tokens += cast(int, response["output_tokens"])
-        skill_rejections += cast(int, response["skill_rejection_count"])
-        relation_rejections += cast(int, response["relation_rejection_count"])
-        evidence_rows.append(
-            {
-                **request,
-                "skills": response["skills"],
-                "relations": response["relations"],
-                "skill_rejection_count": response["skill_rejection_count"],
-                "relation_rejection_count": response["relation_rejection_count"],
-            }
-        )
-    evidence_bytes = b"".join(canonical_json(row) + b"\n" for row in evidence_rows)
     evidence_path = output / "evidence.jsonl"
-    if evidence_path.exists():
-        if evidence_path.read_bytes() != evidence_bytes:
-            raise RuntimeError("sealed extraction evidence differs from resumable responses")
-    else:
-        temporary = evidence_path.with_suffix(".jsonl.partial")
-        with temporary.open("xb") as target:
-            target.write(evidence_bytes)
-            target.flush()
-            os.fsync(target.fileno())
-        temporary.replace(evidence_path)
-    inventory_sha256 = hashlib.sha256(canonical_json(response_inventory)).hexdigest()
+    temporary = evidence_path.with_name(f".{evidence_path.name}.{os.getpid()}.partial")
+    if temporary.exists():
+        raise RuntimeError(f"partial extraction evidence already exists: {temporary}")
+    inventory_hasher = hashlib.sha256()
+    inventory_hasher.update(b"[")
+    input_tokens = output_tokens = skill_rejections = relation_rejections = 0
+    processed_records = 0
+    try:
+        with temporary.open("xb") as evidence_output:
+            for request in _iter_requests(prepared / "requests.jsonl"):
+                response_path = responses_dir / f"{request['record_id']}.json"
+                if response_path.exists():
+                    response = _validate_response(
+                        read_json_object(response_path, "Bedrock extraction response"),
+                        request=request,
+                        model_id=model_id,
+                    )
+                else:
+                    response = _response(request=request, model_id=model_id, bedrock=bedrock)
+                    atomic_json(response_path, response)
+                inventory_entry = {
+                    "path": response_path.relative_to(output).as_posix(),
+                    "sha256": sha256_file(response_path),
+                }
+                if processed_records:
+                    inventory_hasher.update(b",")
+                inventory_hasher.update(canonical_json(inventory_entry))
+                input_tokens += cast(int, response["input_tokens"])
+                output_tokens += cast(int, response["output_tokens"])
+                skill_rejections += cast(int, response["skill_rejection_count"])
+                relation_rejections += cast(int, response["relation_rejection_count"])
+                evidence_output.write(
+                    canonical_json(
+                        {
+                            **request,
+                            "skills": response["skills"],
+                            "relations": response["relations"],
+                            "skill_rejection_count": response["skill_rejection_count"],
+                            "relation_rejection_count": response["relation_rejection_count"],
+                        }
+                    )
+                    + b"\n"
+                )
+                processed_records += 1
+            evidence_output.flush()
+            os.fsync(evidence_output.fileno())
+        if processed_records != records:
+            raise RuntimeError("streamed extraction record count differs")
+        if evidence_path.exists():
+            if evidence_path.stat().st_size != temporary.stat().st_size or sha256_file(
+                evidence_path
+            ) != sha256_file(temporary):
+                raise RuntimeError("sealed extraction evidence differs from resumable responses")
+            temporary.unlink()
+        else:
+            temporary.replace(evidence_path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    inventory_hasher.update(b"]")
+    inventory_sha256 = inventory_hasher.hexdigest()
     manifest = {
         "schema_version": 1,
         "complete": True,
@@ -551,8 +757,12 @@ def extract(
         "requests_sha256": source["requests_sha256"],
         "responses_inventory_sha256": inventory_sha256,
         "evidence_sha256": sha256_file(evidence_path),
+        "sampling_policy": source["sampling_policy"],
+        "sample_limit": source["sample_limit"],
+        "eligible_train_records": source["eligible_train_records"],
+        "sampling_sha256": source["sampling_sha256"],
         "source_records": source["records"],
-        "processed_records": len(evidence_rows),
+        "processed_records": processed_records,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "skill_rejections": skill_rejections,
@@ -574,7 +784,18 @@ def _bedrock(profile: str | None, region: str, expected_account: str) -> Bedrock
     identity = cast(AwsIdentity, session.client("sts")).get_caller_identity()
     if identity.get("Account") != expected_account:
         raise RuntimeError("AWS caller identity differs from approved Bedrock account")
-    return cast(BedrockRuntime, session.client("bedrock-runtime"))
+    return cast(
+        BedrockRuntime,
+        session.client(
+            "bedrock-runtime",
+            config=Config(
+                retries={"mode": "standard", "total_max_attempts": BEDROCK_TOTAL_MAX_ATTEMPTS},
+                connect_timeout=10,
+                read_timeout=120,
+                max_pool_connections=1,
+            ),
+        ),
+    )
 
 
 def main() -> None:
@@ -586,6 +807,7 @@ def main() -> None:
     prepare.add_argument("--output", type=Path, required=True)
     prepare.add_argument("--duty-field", default=DEFAULT_DUTY_FIELD)
     prepare.add_argument("--modified-at-field", default=DEFAULT_MODIFIED_AT_FIELD)
+    prepare.add_argument("--max-records", type=int, default=DEFAULT_SAMPLE_LIMIT)
     run = commands.add_parser("extract")
     run.add_argument("--prepared", type=Path, required=True)
     run.add_argument("--split-manifest", type=Path, required=True)
@@ -602,6 +824,7 @@ def main() -> None:
             output=args.output,
             duty_field=args.duty_field,
             modified_at_field=args.modified_at_field,
+            sample_limit=args.max_records,
         )
     else:
         result = extract(

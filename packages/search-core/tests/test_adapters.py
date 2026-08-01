@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
@@ -20,6 +21,7 @@ from work_retrieval_core.adapters import (
     WholeEmbeddingLayout,
     WholeQwenExactRetriever,
     lexical_tokens,
+    load_job_ids,
 )
 from work_retrieval_core.manifest import TemporalTantivy, WholeEmbedding
 from work_retrieval_core.serialization import (
@@ -195,31 +197,71 @@ def test_full_job_serializer_includes_description_and_is_deterministic() -> None
     )
 
 
+def test_bm25_job_ids_do_not_require_a_whole_embedding_row_count(tmp_path: Path) -> None:
+    path = tmp_path / "job-ids.json"
+    path.write_text('["1","2"]', encoding="utf-8")
+
+    assert load_job_ids(path) == ("1", "2")
+    with pytest.raises(RuntimeError, match="serving contract"):
+        load_job_ids(path, expected_rows=3)
+
+
 def test_query_compiler_uses_only_pre_cutoff_corpus_rules(tmp_path: Path) -> None:
     path = tmp_path / "corrections.json"
     path.write_text(
         json.dumps(
             {
                 "schema_version": 1,
+                "complete": True,
+                "publication_allowed": False,
                 "source_policy": "train_jd_only",
+                "test_jd_used": False,
+                "uses_ground_truth": False,
+                "uses_behavior_logs": False,
                 "train_cutoff_exclusive": "2026-06-08T00:00:00+08:00",
                 "max_source_timestamp": "2026-06-07T23:59:59+08:00",
+                "source_manifest_sha256": "1" * 64,
+                "evidence_sha256": "2" * 64,
+                "minimum_support": 3,
                 "corrections": {"kuberntes": "kubernetes"},
             }
         ),
         encoding="utf-8",
     )
+    candidate_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+    attestation_path = tmp_path / "corrections-attestation.json"
+    attestation_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "complete": True,
+                "attestation_kind": "fixed-input-query-correction-promotion",
+                "candidate_sha256": candidate_sha256,
+                "promotion_report_sha256": "3" * 64,
+                "publication_allowed": True,
+                "evaluator_kind": "organizer",
+                "significant": True,
+                "primary_metric": "ndcg_at_10",
+                "absolute_delta": 0.001,
+                "evaluation_split_sha256": "4" * 64,
+                "baseline_run_sha256": "5" * 64,
+                "candidate_run_sha256": "6" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
 
-    compiled = CorpusQueryCompiler.from_path(path).compile("Kuberntes")
+    compiled = CorpusQueryCompiler.from_promoted_paths(path, attestation_path).compile("Kuberntes")
 
     assert compiled.lexical_texts == ("Kuberntes", "kubernetes")
     assert compiled.rewrites[0].policy == "train_jd_corpus_v1"
+    assert CorpusQueryCompiler.identity().compile("Kuberntes").lexical_texts == ("Kuberntes",)
 
     invalid = json.loads(path.read_text(encoding="utf-8"))
     invalid["max_source_timestamp"] = invalid["train_cutoff_exclusive"]
     path.write_text(json.dumps(invalid), encoding="utf-8")
     with pytest.raises(RuntimeError, match="post-cutoff"):
-        CorpusQueryCompiler.from_path(path)
+        CorpusQueryCompiler.from_promoted_paths(path, attestation_path)
 
 
 def test_exact_dense_scan_rejects_unbounded_or_expired_work(tmp_path: Path) -> None:
@@ -374,18 +416,16 @@ def test_whole_layout_requires_new_full_jd_build_lineage(tmp_path: Path) -> None
 
 
 def test_tantivy_layout_pins_lexical_policy_and_build_lineage(tmp_path: Path) -> None:
-    component_path = "indexes/tantivy-bm25-temporal-v1/manifest.json"
-    index_file = "indexes/tantivy-bm25-temporal-v1/index/meta.json"
-    taxonomy_path = "indexes/tantivy-bm25-temporal-v1/taxonomy.json"
-    job_ids_path = "indexes/tantivy-bm25-temporal-v1/job-ids.json"
-    corrections_path = "indexes/tantivy-bm25-temporal-v1/query-corrections.json"
-    build_path = "indexes/tantivy-bm25-temporal-v1/build-manifest.json"
+    component_path = "indexes/tantivy-bm25-temporal-v2/manifest.json"
+    index_file = "indexes/tantivy-bm25-temporal-v2/index/meta.json"
+    taxonomy_path = "indexes/tantivy-bm25-temporal-v2/taxonomy.json"
+    job_ids_path = "indexes/tantivy-bm25-temporal-v2/job-ids.json"
+    build_path = "indexes/tantivy-bm25-temporal-v2/build-manifest.json"
     artifacts = (
         (component_path, Artifact("index", "b" * 64, 1)),
         (index_file, Artifact("index", "c" * 64, 1)),
         (taxonomy_path, Artifact("index", "d" * 64, 1)),
         (job_ids_path, Artifact("index", "e" * 64, 1)),
-        (corrections_path, Artifact("index", "f" * 64, 1)),
         (build_path, Artifact("evidence", "1" * 64, 1)),
     )
     semantics = "updated_at >= as_of - 180 days before Top-K; future rows retained"
@@ -402,11 +442,11 @@ def test_tantivy_layout_pins_lexical_policy_and_build_lineage(tmp_path: Path) ->
         "jobs_sha256": HEX,
         "job_row_order_sha256": HEX,
         "index_sha256": HEX,
-        "index_directory": "indexes/tantivy-bm25-temporal-v1/index",
+        "index_directory": "indexes/tantivy-bm25-temporal-v2/index",
         "index_files": [index_file],
         "taxonomy_path": taxonomy_path,
         "job_ids_path": job_ids_path,
-        "query_corrections_path": corrections_path,
+        "query_corrections": {"enabled": False},
         "build_manifest_path": build_path,
         "build_manifest_sha256": "1" * 64,
         "schema_fields": [
@@ -427,7 +467,9 @@ def test_tantivy_layout_pins_lexical_policy_and_build_lineage(tmp_path: Path) ->
     path = tmp_path / "tantivy-manifest.json"
     path.write_text(json.dumps(component), encoding="utf-8")
 
-    assert TantivyLayout.from_path(path, manifest).query_corrections_path == corrections_path
+    layout = TantivyLayout.from_path(path, manifest)
+    assert layout.query_corrections_path is None
+    assert layout.query_corrections_attestation_path is None
 
     component["source_fields"] = {"body": ["description"]}
     path.write_text(json.dumps(component), encoding="utf-8")

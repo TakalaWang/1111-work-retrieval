@@ -30,7 +30,7 @@ Git commit 與 public smoke 結果；各層狀態必須分別確認。
 | [`packages/contract`](packages/contract)                     | OpenAPI、TypeScript types 與 runtime manifest schema |
 | [`database`](database)                                       | PostgreSQL Alembic migrations                        |
 | [`infra`](infra)                                             | AWS CDK infrastructure                               |
-| [`scripts`](scripts)                                         | 職缺資料驗證、AWS importer 與 artifact promotion     |
+| [`scripts`](scripts)                                         | 職缺資料驗證、檢索 artifact 建置／消融與 promotion   |
 | [`docs/architecture.md`](docs/architecture.md)               | 系統架構與資料流程                                   |
 | [`docs/benchmark.md`](docs/benchmark.md)                     | Benchmark 重現範圍與版本證據要求                     |
 | [`docs/retrieval-pipelines.md`](docs/retrieval-pipelines.md) | Graph 與 multi-view embedding 重現、驗證及 AWS 契約  |
@@ -129,6 +129,12 @@ EMBEDDING_ENDPOINT_NAME, EMBEDDING_ENDPOINT_CONFIG_NAME, EMBEDDING_MODEL_NAME
 - `GET /healthz` 與 `GET /readyz`：process 與 initialized-runtime health。
 
 Aurora credentials 由 ECS 經 Secrets Manager 注入，不保存於 image、Git 或 workflow。
+
+BM25 index、whole-JD embedding、LLM extraction、skill Graph、query-correction promotion 與 graph-on/off
+ablation 的可重現命令都保留在 [`scripts`](scripts)，完整契約見
+[`docs/retrieval-pipelines.md`](docs/retrieval-pipelines.md)。BM25 預設不依賴 LLM；Graph extraction 使用
+職務分層的 deterministic 5,000 筆代表樣本（hard cap 10,000），Graph 與 query correction 都必須經
+fixed-input NDCG@10 正向驗證才可啟用。
 
 ## 資料與 runtime artifacts
 

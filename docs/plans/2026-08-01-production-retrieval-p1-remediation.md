@@ -13,6 +13,7 @@
 ### Task 1: Lock ranking and manifest failures with tests
 
 **Files:**
+
 - Modify: `packages/search-core/tests/test_engine.py`
 - Modify: `packages/search-core/tests/test_adapters.py`
 
@@ -24,6 +25,7 @@
 ### Task 2: Implement bounded BM25-incumbent serving
 
 **Files:**
+
 - Modify: `packages/search-core/src/work_retrieval_core/engine.py`
 - Modify: `packages/search-core/src/work_retrieval_core/adapters.py`
 - Modify: `packages/search-core/src/work_retrieval_core/manifest.py`
@@ -37,6 +39,7 @@
 ### Task 3: Complete lexical and endpoint identity contracts
 
 **Files:**
+
 - Modify: `packages/search-core/src/work_retrieval_core/serialization.py`
 - Modify: `packages/search-core/src/work_retrieval_core/adapters.py`
 - Modify: `apps/api/src/work_retrieval_api/production.py`
@@ -52,6 +55,7 @@
 ### Task 4: Make GPU deployment rollable
 
 **Files:**
+
 - Modify: `infra/lib/platform-stack.ts`
 - Modify: `infra/test/platform-stack.test.ts`
 - Modify: `.github/workflows/deploy.yml`

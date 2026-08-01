@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import math
 import re
 import unicodedata
 from collections.abc import Callable, Mapping
@@ -193,25 +194,53 @@ class CorpusQueryCompiler:
     corrections: Mapping[str, str]
 
     @classmethod
-    def from_path(cls, path: Path) -> CorpusQueryCompiler:
-        raw = _json_object(path, "query corrections")
+    def identity(cls) -> CorpusQueryCompiler:
+        """Return the compiler only for an explicitly disabled manifest branch."""
+        return cls({})
+
+    @classmethod
+    def from_promoted_paths(
+        cls, artifact_path: Path, attestation_path: Path
+    ) -> CorpusQueryCompiler:
+        raw = _json_object(artifact_path, "query corrections")
         _exact_keys(
             raw,
             {
                 "schema_version",
+                "complete",
+                "publication_allowed",
                 "source_policy",
+                "test_jd_used",
+                "uses_ground_truth",
+                "uses_behavior_logs",
                 "train_cutoff_exclusive",
                 "max_source_timestamp",
+                "source_manifest_sha256",
+                "evidence_sha256",
+                "minimum_support",
                 "corrections",
             },
             "query corrections",
         )
-        if raw["schema_version"] != 1 or raw["source_policy"] != "train_jd_only":
+        if (
+            raw["schema_version"] != 1
+            or raw["complete"] is not True
+            or raw["publication_allowed"] is not False
+            or raw["source_policy"] != "train_jd_only"
+            or raw["test_jd_used"] is not False
+            or raw["uses_ground_truth"] is not False
+            or raw["uses_behavior_logs"] is not False
+        ):
             raise RuntimeError("query corrections are not train-JD corpus safe")
         cutoff = _aware_timestamp(raw["train_cutoff_exclusive"], "train cutoff")
         maximum = _aware_timestamp(raw["max_source_timestamp"], "max source timestamp")
         if maximum >= cutoff:
             raise RuntimeError("query corrections include post-cutoff source data")
+        for name in ("source_manifest_sha256", "evidence_sha256"):
+            _sha(raw[name], f"query corrections {name}")
+        minimum_support = _integer(raw["minimum_support"], "query correction minimum support")
+        if minimum_support < 1:
+            raise RuntimeError("query correction minimum support must be positive")
         values = _object(raw["corrections"], "query corrections mapping")
         corrections: dict[str, str] = {}
         for source, target in values.items():
@@ -226,6 +255,55 @@ class CorpusQueryCompiler:
             ):
                 raise RuntimeError("query corrections contain a non-canonical rule")
             corrections[normalized_source] = normalized_target
+        if not corrections:
+            raise RuntimeError("enabled query corrections cannot be empty")
+        candidate_sha256 = _sha(
+            hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
+            "query correction candidate",
+        )
+        attestation = _json_object(attestation_path, "query correction promotion attestation")
+        _exact_keys(
+            attestation,
+            {
+                "schema_version",
+                "complete",
+                "attestation_kind",
+                "candidate_sha256",
+                "promotion_report_sha256",
+                "publication_allowed",
+                "evaluator_kind",
+                "significant",
+                "primary_metric",
+                "absolute_delta",
+                "evaluation_split_sha256",
+                "baseline_run_sha256",
+                "candidate_run_sha256",
+            },
+            "query correction promotion attestation",
+        )
+        delta = attestation["absolute_delta"]
+        if (
+            attestation["schema_version"] != 1
+            or attestation["complete"] is not True
+            or attestation["attestation_kind"] != "fixed-input-query-correction-promotion"
+            or attestation["candidate_sha256"] != candidate_sha256
+            or attestation["publication_allowed"] is not True
+            or attestation["evaluator_kind"] != "organizer"
+            or attestation["significant"] is not True
+            or attestation["primary_metric"] != "ndcg_at_10"
+            or isinstance(delta, bool)
+            or not isinstance(delta, (int, float))
+            or not math.isfinite(delta)
+            or delta <= 0
+        ):
+            raise RuntimeError("query correction promotion attestation did not pass")
+        for name in (
+            "promotion_report_sha256",
+            "evaluation_split_sha256",
+            "baseline_run_sha256",
+            "candidate_run_sha256",
+        ):
+            _sha(attestation[name], f"query correction attestation {name}")
         return cls(corrections)
 
     def compile(self, text: str) -> CompiledQuery:
@@ -360,7 +438,8 @@ class TantivyLayout:
     index_directory: str
     taxonomy_path: str
     job_ids_path: str
-    query_corrections_path: str
+    query_corrections_path: str | None
+    query_corrections_attestation_path: str | None
 
     @classmethod
     def from_path(cls, path: Path, manifest: RuntimeManifest) -> TantivyLayout:
@@ -376,7 +455,7 @@ class TantivyLayout:
             "index_files",
             "taxonomy_path",
             "job_ids_path",
-            "query_corrections_path",
+            "query_corrections",
             "build_manifest_path",
             "build_manifest_sha256",
             "schema_fields",
@@ -400,7 +479,7 @@ class TantivyLayout:
                 "jobs_sha256": temporal.jobs_sha256,
                 "job_row_order_sha256": temporal.job_row_order_sha256,
                 "index_sha256": temporal.index_sha256,
-                "index_directory": "indexes/tantivy-bm25-temporal-v1/index",
+                "index_directory": "indexes/tantivy-bm25-temporal-v2/index",
                 "schema_fields": [
                     "title",
                     "duty",
@@ -432,9 +511,6 @@ class TantivyLayout:
         directory = _artifact_path(raw["index_directory"], "Tantivy index directory")
         taxonomy_path = _artifact_path(raw["taxonomy_path"], "Tantivy filter taxonomy")
         job_ids_path = _artifact_path(raw["job_ids_path"], "Tantivy job IDs")
-        query_corrections_path = _artifact_path(
-            raw["query_corrections_path"], "Tantivy query corrections"
-        )
         build_manifest_path = _artifact_path(raw["build_manifest_path"], "Tantivy build manifest")
         build_manifest_sha256 = _sha(raw["build_manifest_sha256"], "Tantivy build manifest")
         prefix = directory + "/"
@@ -445,7 +521,6 @@ class TantivyLayout:
             _require_inventory_kind(manifest, file_path, "index")
         _require_inventory_kind(manifest, taxonomy_path, "index")
         _require_inventory_kind(manifest, job_ids_path, "index")
-        _require_inventory_kind(manifest, query_corrections_path, "index")
         build_artifact = manifest.artifact(build_manifest_path)
         if (
             build_artifact is None
@@ -460,12 +535,53 @@ class TantivyLayout:
                 directory,
                 taxonomy_path,
                 job_ids_path,
-                query_corrections_path,
                 build_manifest_path,
             )
         ):
             raise RuntimeError("Tantivy component artifact escapes its component")
-        return cls(directory, taxonomy_path, job_ids_path, query_corrections_path)
+        correction = _object(raw["query_corrections"], "Tantivy query corrections")
+        if correction == {"enabled": False}:
+            return cls(directory, taxonomy_path, job_ids_path, None, None)
+        _exact_keys(
+            correction,
+            {
+                "enabled",
+                "artifact_path",
+                "artifact_sha256",
+                "promotion_attestation_path",
+                "promotion_attestation_sha256",
+            },
+            "enabled Tantivy query corrections",
+        )
+        if correction["enabled"] is not True:
+            raise RuntimeError("query correction enabled flag must be boolean")
+        correction_path = _artifact_path(
+            correction["artifact_path"], "Tantivy query correction artifact"
+        )
+        correction_sha256 = _sha(correction["artifact_sha256"], "Tantivy query correction artifact")
+        attestation_path = _artifact_path(
+            correction["promotion_attestation_path"],
+            "Tantivy query correction attestation",
+        )
+        attestation_sha256 = _sha(
+            correction["promotion_attestation_sha256"],
+            "Tantivy query correction attestation",
+        )
+        for candidate in (correction_path, attestation_path):
+            if not candidate.startswith(component_prefix):
+                raise RuntimeError("query correction artifact escapes its Tantivy component")
+        correction_artifact = manifest.artifact(correction_path)
+        attestation_artifact = manifest.artifact(attestation_path)
+        if (
+            correction_artifact is None
+            or correction_artifact.kind != "index"
+            or correction_artifact.sha256 != correction_sha256
+            or attestation_artifact is None
+            or attestation_artifact.kind != "evidence"
+            or attestation_artifact.sha256 != attestation_sha256
+        ):
+            raise RuntimeError("enabled query correction artifacts are absent or differ")
+        return cls(directory, taxonomy_path, job_ids_path, correction_path, attestation_path)
 
 
 class TantivyBm25Retriever:
@@ -793,21 +909,22 @@ class WholeQwenExactRetriever:
         return cast(npt.NDArray[np.float16], values)
 
 
-def load_job_ids(path: Path, *, expected_rows: int) -> tuple[str, ...]:
+def load_job_ids(path: Path, *, expected_rows: int | None = None) -> tuple[str, ...]:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise RuntimeError("whole-Qwen job IDs cannot be read") from error
+        raise RuntimeError("retrieval job IDs cannot be read") from error
     if (
         not isinstance(raw, list)
-        or len(raw) != expected_rows
+        or not raw
+        or (expected_rows is not None and len(raw) != expected_rows)
         or any(
             not isinstance(value, str) or not value.isascii() or not value.isdecimal()
             for value in raw
         )
         or len(set(raw)) != len(raw)
     ):
-        raise RuntimeError("whole-Qwen job IDs violate the serving contract")
+        raise RuntimeError("retrieval job IDs violate the serving contract")
     return tuple(raw)
 
 
