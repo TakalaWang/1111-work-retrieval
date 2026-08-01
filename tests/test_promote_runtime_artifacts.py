@@ -26,22 +26,6 @@ HEX = {
     "e": "e" * 64,
     "f": "f" * 64,
 }
-TEST_APPROVED_WHOLE_SHA256 = "0" * 64
-TEST_APPROVED_TANTIVY_SHA256 = "1" * 64
-TEST_APPROVED_TANTIVY_INDEX_SHA256 = "2" * 64
-
-
-@pytest.fixture(autouse=True)
-def approved_whole_build(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        promotion, "APPROVED_WHOLE_BUILD_MANIFEST_SHA256", TEST_APPROVED_WHOLE_SHA256
-    )
-    monkeypatch.setattr(
-        promotion, "APPROVED_TANTIVY_BUILD_MANIFEST_SHA256", TEST_APPROVED_TANTIVY_SHA256
-    )
-    monkeypatch.setattr(
-        promotion, "APPROVED_TANTIVY_INDEX_SHA256", TEST_APPROVED_TANTIVY_INDEX_SHA256
-    )
 
 
 def encoded(value: object) -> bytes:
@@ -53,10 +37,50 @@ def digest(value: bytes) -> str:
 
 
 def base_documents() -> dict[str, bytes]:
-    vectors_path = "embeddings/qwen3-embedding-8b/whole/shards/00000.f16.npy"
-    job_ids_path = "embeddings/qwen3-embedding-8b/whole/job-ids.json"
+    whole_manifest_path = f"{promotion.WHOLE_RUNTIME_PREFIX}/manifest.json"
+    vectors_path = f"{promotion.WHOLE_RUNTIME_PREFIX}/shards/00000.f16.npy"
+    job_ids_path = f"{promotion.WHOLE_RUNTIME_PREFIX}/job-ids.json"
     vectors = b"verified-vectors"
     job_ids = b'["1"]\n'
+    source_manifest = {
+        "schema_version": 1,
+        "complete": True,
+        "model": promotion.APPROVED_MODEL,
+        "revision": promotion.APPROVED_MODEL_REVISION,
+        "rows": 1_218_635,
+        "dataset_sha256": promotion.APPROVED_JOBS_DATASET_SHA256,
+        "jobs_sha256": HEX["a"],
+        "job_row_order_sha256": HEX["b"],
+        "dimension": promotion.APPROVED_SOURCE_EMBEDDING_DIMENSION,
+        "dtype": "float16",
+        "normalized": True,
+        "document_policy_version": promotion.APPROVED_DOCUMENT_POLICY_VERSION,
+        "document_template_sha256": promotion.APPROVED_DOCUMENT_TEMPLATE_SHA256,
+        "document_fields": promotion.APPROVED_DOCUMENT_FIELDS,
+        "query_prompt": promotion.APPROVED_QUERY_PROMPT,
+        "job_ids_path": "artifacts/experiments/qwen3-8b/full/job-ids.json",
+        "shards": [
+            {
+                "index": 0,
+                "vectors_path": "artifacts/experiments/qwen3-8b/full/shards/00000.f16.npy",
+                "rows": 1_218_635,
+                "dimension": promotion.APPROVED_SOURCE_EMBEDDING_DIMENSION,
+                "sha256": HEX["c"],
+            }
+        ],
+    }
+    source_manifest_payload = encoded(source_manifest)
+    source_inventory = {
+        "schema_version": 3,
+        "files": [
+            {
+                "path": "artifacts/experiments/qwen3-8b/full/manifest.json",
+                "sha256": digest(source_manifest_payload),
+                "size": len(source_manifest_payload),
+            }
+        ],
+    }
+    source_inventory_payload = encoded(source_inventory)
     whole = {
         "schema_version": 1,
         "complete": True,
@@ -68,15 +92,17 @@ def base_documents() -> dict[str, bytes]:
         "dtype": "float16",
         "normalized": True,
         "rows": 1_218_635,
-        "dataset_sha256": HEX["e"],
+        "dataset_sha256": promotion.APPROVED_JOBS_DATASET_SHA256,
         "jobs_sha256": HEX["a"],
         "job_row_order_sha256": HEX["b"],
         "document_policy_version": promotion.APPROVED_DOCUMENT_POLICY_VERSION,
         "document_template_sha256": promotion.APPROVED_DOCUMENT_TEMPLATE_SHA256,
         "document_fields": promotion.APPROVED_DOCUMENT_FIELDS,
         "query_prompt": promotion.APPROVED_QUERY_PROMPT,
-        "build_manifest_path": promotion.APPROVED_WHOLE_BUILD_PROVENANCE_PATH,
-        "build_manifest_sha256": TEST_APPROVED_WHOLE_SHA256,
+        "source_manifest_path": promotion.APPROVED_WHOLE_SOURCE_MANIFEST_PATH,
+        "source_manifest_sha256": digest(source_manifest_payload),
+        "source_inventory_path": promotion.APPROVED_WHOLE_SOURCE_INVENTORY_PATH,
+        "source_inventory_sha256": digest(source_inventory_payload),
         "job_ids_path": job_ids_path,
         "shards": [
             {
@@ -85,11 +111,13 @@ def base_documents() -> dict[str, bytes]:
                 "row_end": 1_218_635,
                 "rows": 1_218_635,
                 "dimension": promotion.APPROVED_WHOLE_DIMENSION,
+                "vectors_sha256": digest(vectors),
+                "source_vectors_sha256": HEX["c"],
             }
         ],
     }
-    index_path = "indexes/tantivy-bm25-temporal-v1/index/meta.json"
-    taxonomy_path = "indexes/tantivy-bm25-temporal-v1/filter-taxonomy.json"
+    index_path = f"{promotion.TANTIVY_RUNTIME_PREFIX}/index/meta.json"
+    taxonomy_path = f"{promotion.TANTIVY_RUNTIME_PREFIX}/filter-taxonomy.json"
     index_file = b'{"segments":[]}\n'
     taxonomy = encoded(
         {
@@ -98,23 +126,52 @@ def base_documents() -> dict[str, bytes]:
             "duty_code_to_terms": {"140200": ["軟體工程師"]},
         }
     )
+    index_tree = [
+        {
+            "path": "meta.json",
+            "sha256": digest(index_file),
+            "size_bytes": len(index_file),
+        }
+    ]
+    index_sha256 = promotion._canonical_sha256(index_tree)
+    query_corrections = {"enabled": False}
+    tantivy_build = {
+        "schema_version": 1,
+        "complete": True,
+        "builder": "tantivy_index_pipeline.py",
+        "engine": promotion.APPROVED_TANTIVY_ENGINE,
+        "dataset_sha256": promotion.APPROVED_JOBS_DATASET_SHA256,
+        "jobs_sha256": HEX["a"],
+        "job_row_order_sha256": HEX["b"],
+        "rows": 1_218_635,
+        "index_sha256": index_sha256,
+        "index_tree": index_tree,
+        "taxonomy_sha256": digest(taxonomy),
+        "query_corrections": query_corrections,
+        "lexical_policy_version": promotion.APPROVED_LEXICAL_POLICY_VERSION,
+        "lexical_policy_sha256": promotion.APPROVED_LEXICAL_POLICY_SHA256,
+        "tokenizers": promotion.APPROVED_TANTIVY_TOKENIZERS,
+        "source_fields": promotion.APPROVED_TANTIVY_SOURCE_FIELDS,
+        "source_csv_fields": {"title": "職務名稱"},
+    }
+    tantivy_build_payload = encoded(tantivy_build)
     temporal = {
         "schema_version": 1,
         "complete": True,
         "engine": "tantivy v0.26.0, index_format v7",
         "jobs_sha256": HEX["a"],
         "job_row_order_sha256": HEX["b"],
-        "index_sha256": TEST_APPROVED_TANTIVY_INDEX_SHA256,
+        "index_sha256": index_sha256,
         "updated_at_field": "updated_at_epoch_ms",
         "filter_semantics": "visibility AND (location OR) AND (duty OR), applied before Top-K",
         "temporal_filter_semantics": promotion.TEMPORAL_FILTER_SEMANTICS,
-        "index_directory": "indexes/tantivy-bm25-temporal-v1/index",
+        "index_directory": f"{promotion.TANTIVY_RUNTIME_PREFIX}/index",
         "index_files": [index_path],
         "taxonomy_path": taxonomy_path,
         "job_ids_path": promotion.TANTIVY_JOB_IDS_RUNTIME_PATH,
-        "query_corrections_path": promotion.QUERY_CORRECTIONS_RUNTIME_PATH,
+        "query_corrections": query_corrections,
         "build_manifest_path": promotion.APPROVED_TANTIVY_BUILD_PROVENANCE_PATH,
-        "build_manifest_sha256": TEST_APPROVED_TANTIVY_SHA256,
+        "build_manifest_sha256": digest(tantivy_build_payload),
         "schema_fields": promotion.APPROVED_TANTIVY_SCHEMA_FIELDS,
         "field_boosts": promotion.APPROVED_TANTIVY_FIELD_BOOSTS,
         "lexical_policy_version": promotion.APPROVED_LEXICAL_POLICY_VERSION,
@@ -123,84 +180,111 @@ def base_documents() -> dict[str, bytes]:
         "source_fields": promotion.APPROVED_TANTIVY_SOURCE_FIELDS,
     }
     documents = {
-        "embeddings/qwen3-embedding-8b/whole/manifest.json": encoded(whole),
+        whole_manifest_path: encoded(whole),
         vectors_path: vectors,
         job_ids_path: job_ids,
-        "indexes/tantivy-bm25-temporal-v1/manifest.json": encoded(temporal),
+        f"{promotion.TANTIVY_RUNTIME_PREFIX}/manifest.json": encoded(temporal),
         index_path: index_file,
         taxonomy_path: taxonomy,
         promotion.TANTIVY_JOB_IDS_RUNTIME_PATH: job_ids,
-        promotion.QUERY_CORRECTIONS_RUNTIME_PATH: encoded(
-            {
-                "schema_version": 1,
-                "source_policy": "train_jd_only",
-                "train_cutoff_exclusive": promotion.APPROVED_GRAPH_TRAIN_CUTOFF,
-                "max_source_timestamp": promotion.APPROVED_GRAPH_MAX_SOURCE_TIMESTAMP,
-                "corrections": {"sofware": "software"},
-            }
-        ),
+        promotion.APPROVED_WHOLE_SOURCE_MANIFEST_PATH: source_manifest_payload,
+        promotion.APPROVED_WHOLE_SOURCE_INVENTORY_PATH: source_inventory_payload,
+        promotion.APPROVED_TANTIVY_BUILD_PROVENANCE_PATH: tantivy_build_payload,
     }
     documents[promotion.MATERIALIZATION_REPORT_PATH] = encoded(
         {
             "schema_version": 1,
-            "whole_build_manifest_sha256": TEST_APPROVED_WHOLE_SHA256,
-            "whole_runtime_manifest_sha256": digest(
-                documents["embeddings/qwen3-embedding-8b/whole/manifest.json"]
-            ),
-            "tantivy_build_manifest_sha256": (TEST_APPROVED_TANTIVY_SHA256),
+            "whole_source_manifest_sha256": digest(source_manifest_payload),
+            "whole_source_inventory_sha256": digest(source_inventory_payload),
+            "whole_runtime_manifest_sha256": digest(documents[whole_manifest_path]),
+            "projection": promotion.APPROVED_WHOLE_PROJECTION,
+            "tantivy_build_manifest_sha256": digest(tantivy_build_payload),
             "tantivy_runtime_manifest_sha256": digest(
-                documents["indexes/tantivy-bm25-temporal-v1/manifest.json"]
+                documents[f"{promotion.TANTIVY_RUNTIME_PREFIX}/manifest.json"]
             ),
-            "tantivy_index_sha256": TEST_APPROVED_TANTIVY_INDEX_SHA256,
-            "dataset_sha256": HEX["e"],
+            "tantivy_index_sha256": index_sha256,
+            "dataset_sha256": promotion.APPROVED_JOBS_DATASET_SHA256,
             "jobs_sha256": HEX["a"],
             "job_row_order_sha256": HEX["b"],
             "rows": 1_218_635,
             "placement": "copy_sha256_verified",
-            "city_taxonomy_sha256": promotion.APPROVED_CITY_TAXONOMY_SHA256,
-            "duty_taxonomy_sha256": promotion.APPROVED_DUTY_TAXONOMY_SHA256,
-            "query_corrections_sha256": digest(documents[promotion.QUERY_CORRECTIONS_RUNTIME_PATH]),
+            "query_corrections": query_corrections,
         }
     )
     return documents
 
 
+@pytest.fixture(autouse=True)
+def approved_lineage(monkeypatch: pytest.MonkeyPatch) -> None:
+    documents = base_documents()
+    source_manifest = documents[promotion.APPROVED_WHOLE_SOURCE_MANIFEST_PATH]
+    source_inventory = json.loads(documents[promotion.APPROVED_WHOLE_SOURCE_INVENTORY_PATH])
+    source_cache_files = source_inventory["files"]
+    tantivy_build = documents[promotion.APPROVED_TANTIVY_BUILD_PROVENANCE_PATH]
+    temporal = json.loads(documents[f"{promotion.TANTIVY_RUNTIME_PREFIX}/manifest.json"])
+    monkeypatch.setattr(promotion, "APPROVED_WHOLE_SOURCE_MANIFEST_SHA256", digest(source_manifest))
+    monkeypatch.setattr(
+        promotion,
+        "APPROVED_WHOLE_SOURCE_INVENTORY_SHA256",
+        digest(documents[promotion.APPROVED_WHOLE_SOURCE_INVENTORY_PATH]),
+    )
+    monkeypatch.setattr(promotion, "APPROVED_WHOLE_SOURCE_FILE_COUNT", 1)
+    monkeypatch.setattr(promotion, "APPROVED_WHOLE_SOURCE_SHARDS", 1)
+    monkeypatch.setattr(
+        promotion,
+        "APPROVED_WHOLE_SOURCE_BYTES",
+        sum(item["size"] for item in source_cache_files),
+    )
+    monkeypatch.setattr(promotion, "APPROVED_TANTIVY_BUILD_MANIFEST_SHA256", digest(tantivy_build))
+    monkeypatch.setattr(promotion, "APPROVED_TANTIVY_INDEX_SHA256", temporal["index_sha256"])
+
+
 def base_source(documents: dict[str, bytes]) -> dict[str, object]:
+    whole_prefix = promotion.WHOLE_RUNTIME_PREFIX
+    tantivy_prefix = promotion.TANTIVY_RUNTIME_PREFIX
     paths = {
-        "embeddings/qwen3-embedding-8b/whole/manifest.json": (
-            "runtime/embeddings/qwen3-embedding-8b/whole/manifest.json",
+        f"{whole_prefix}/manifest.json": (
+            f"runtime/{whole_prefix}/manifest.json",
             "embedding",
         ),
-        "embeddings/qwen3-embedding-8b/whole/shards/00000.f16.npy": (
-            "runtime/embeddings/qwen3-embedding-8b/whole/shards/00000.f16.npy",
+        f"{whole_prefix}/shards/00000.f16.npy": (
+            f"runtime/{whole_prefix}/shards/00000.f16.npy",
             "embedding",
         ),
-        "embeddings/qwen3-embedding-8b/whole/job-ids.json": (
-            "runtime/embeddings/qwen3-embedding-8b/whole/job-ids.json",
+        f"{whole_prefix}/job-ids.json": (
+            f"runtime/{whole_prefix}/job-ids.json",
             "embedding",
         ),
-        "indexes/tantivy-bm25-temporal-v1/manifest.json": (
-            "runtime/indexes/tantivy-bm25-temporal-v1/manifest.json",
+        f"{tantivy_prefix}/manifest.json": (
+            f"runtime/{tantivy_prefix}/manifest.json",
             "index",
         ),
-        "indexes/tantivy-bm25-temporal-v1/index/meta.json": (
-            "runtime/indexes/tantivy-bm25-temporal-v1/index/meta.json",
+        f"{tantivy_prefix}/index/meta.json": (
+            f"runtime/{tantivy_prefix}/index/meta.json",
             "index",
         ),
-        "indexes/tantivy-bm25-temporal-v1/filter-taxonomy.json": (
-            "runtime/indexes/tantivy-bm25-temporal-v1/filter-taxonomy.json",
+        f"{tantivy_prefix}/filter-taxonomy.json": (
+            f"runtime/{tantivy_prefix}/filter-taxonomy.json",
             "index",
         ),
         promotion.TANTIVY_JOB_IDS_RUNTIME_PATH: (
             f"runtime/{promotion.TANTIVY_JOB_IDS_RUNTIME_PATH}",
             "index",
         ),
-        promotion.QUERY_CORRECTIONS_RUNTIME_PATH: (
-            f"runtime/{promotion.QUERY_CORRECTIONS_RUNTIME_PATH}",
-            "index",
-        ),
         promotion.MATERIALIZATION_REPORT_PATH: (
             f"runtime/{promotion.MATERIALIZATION_REPORT_PATH}",
+            "evidence",
+        ),
+        promotion.APPROVED_WHOLE_SOURCE_MANIFEST_PATH: (
+            promotion.WHOLE_SOURCE_MANIFEST_SOURCE_PATH,
+            "evidence",
+        ),
+        promotion.APPROVED_WHOLE_SOURCE_INVENTORY_PATH: (
+            promotion.WHOLE_SOURCE_INVENTORY_SOURCE_PATH,
+            "evidence",
+        ),
+        promotion.APPROVED_TANTIVY_BUILD_PROVENANCE_PATH: (
+            promotion.TANTIVY_BUILD_PROVENANCE_SOURCE_PATH,
             "evidence",
         ),
     }
@@ -212,38 +296,28 @@ def base_source(documents: dict[str, bytes]) -> dict[str, object]:
         }
         for destination_path, (source_path, _) in paths.items()
     ]
-    files.extend(
-        [
-            {
-                "path": promotion.WHOLE_BUILD_PROVENANCE_SOURCE_PATH,
-                "sha256": TEST_APPROVED_WHOLE_SHA256,
-                "size": 56_203,
-            },
-            {
-                "path": promotion.TANTIVY_BUILD_PROVENANCE_SOURCE_PATH,
-                "sha256": TEST_APPROVED_TANTIVY_SHA256,
-                "size": 4_096,
-            },
-            {
-                "path": "artifacts/production/query-history/answers.sqlite3",
-                "sha256": HEX["f"],
-                "size": 99,
-            },
-        ]
+    files.append(
+        {
+            "path": "artifacts/production/query-history/answers.sqlite3",
+            "sha256": HEX["f"],
+            "size": 99,
+        }
     )
     return {"schema_version": 3, "files": files}
 
 
 def base_spec(source: dict[str, object], documents: dict[str, bytes]) -> dict[str, object]:
+    whole_prefix = promotion.WHOLE_RUNTIME_PREFIX
+    tantivy_prefix = promotion.TANTIVY_RUNTIME_PREFIX
     selections = [
         {
-            "source_prefix": "runtime/embeddings/qwen3-embedding-8b/whole/",
-            "destination_prefix": "embeddings/qwen3-embedding-8b/whole/",
+            "source_prefix": f"runtime/{whole_prefix}/",
+            "destination_prefix": f"{whole_prefix}/",
             "kind": "embedding",
         },
         {
-            "source_prefix": "runtime/indexes/tantivy-bm25-temporal-v1/",
-            "destination_prefix": "indexes/tantivy-bm25-temporal-v1/",
+            "source_prefix": f"runtime/{tantivy_prefix}/",
+            "destination_prefix": f"{tantivy_prefix}/",
             "kind": "index",
         },
         {
@@ -252,13 +326,13 @@ def base_spec(source: dict[str, object], documents: dict[str, bytes]) -> dict[st
             "kind": "evidence",
         },
         {
-            "source_prefix": "provenance/qwen3-embedding-8b/",
-            "destination_prefix": "embeddings/qwen3-embedding-8b/whole/",
+            "source_prefix": "provenance/qwen3-embedding-8b-clean-v1/",
+            "destination_prefix": f"{whole_prefix}/",
             "kind": "evidence",
         },
         {
-            "source_prefix": "provenance/tantivy-bm25-temporal-v1/",
-            "destination_prefix": "indexes/tantivy-bm25-temporal-v1/",
+            "source_prefix": "provenance/tantivy-bm25-temporal-v2/",
+            "destination_prefix": f"{tantivy_prefix}/",
             "kind": "evidence",
         },
     ]
@@ -279,8 +353,8 @@ def base_spec(source: dict[str, object], documents: dict[str, bytes]) -> dict[st
                 )
                 break
     expected_items.sort(key=lambda item: item["path"])
-    whole = json.loads(documents["embeddings/qwen3-embedding-8b/whole/manifest.json"])
-    temporal = json.loads(documents["indexes/tantivy-bm25-temporal-v1/manifest.json"])
+    whole = json.loads(documents[f"{whole_prefix}/manifest.json"])
+    temporal = json.loads(documents[f"{tantivy_prefix}/manifest.json"])
     return {
         "schema_version": 1,
         "source_manifest": {
@@ -306,10 +380,8 @@ def base_spec(source: dict[str, object], documents: dict[str, bytes]) -> dict[st
             },
             "incumbents": {
                 "whole_embedding": {
-                    "manifest_path": "embeddings/qwen3-embedding-8b/whole/manifest.json",
-                    "manifest_sha256": digest(
-                        documents["embeddings/qwen3-embedding-8b/whole/manifest.json"]
-                    ),
+                    "manifest_path": f"{whole_prefix}/manifest.json",
+                    "manifest_sha256": digest(documents[f"{whole_prefix}/manifest.json"]),
                     "complete": True,
                     "model": whole["model"],
                     "revision": whole["revision"],
@@ -326,10 +398,8 @@ def base_spec(source: dict[str, object], documents: dict[str, bytes]) -> dict[st
                     "document_template_sha256": whole["document_template_sha256"],
                 },
                 "temporal_tantivy": {
-                    "manifest_path": "indexes/tantivy-bm25-temporal-v1/manifest.json",
-                    "manifest_sha256": digest(
-                        documents["indexes/tantivy-bm25-temporal-v1/manifest.json"]
-                    ),
+                    "manifest_path": f"{tantivy_prefix}/manifest.json",
+                    "manifest_sha256": digest(documents[f"{tantivy_prefix}/manifest.json"]),
                     "complete": True,
                     "index_sha256": temporal["index_sha256"],
                     "engine": temporal["engine"],
@@ -582,7 +652,7 @@ def test_schema_accepts_publishable_multiview_while_graph_stays_disabled(
             "model_contract_sha256": HEX["e"],
             "tokenizer_sha256": HEX["f"],
             "view_policy_sha256": HEX["a"],
-            "dataset_sha256": HEX["e"],
+            "dataset_sha256": promotion.APPROVED_JOBS_DATASET_SHA256,
             "output_dimension": 1024,
             "dtype": "float16",
             "normalized": True,
@@ -669,7 +739,7 @@ def test_schema_accepts_publishable_multiview_while_graph_stays_disabled(
         "model_contract_sha256": HEX["e"],
         "tokenizer_sha256": HEX["f"],
         "view_policy_sha256": HEX["a"],
-        "dataset_sha256": HEX["e"],
+        "dataset_sha256": promotion.APPROVED_JOBS_DATASET_SHA256,
         "output_dimension": 1024,
         "dtype": "float16",
         "normalized": True,
@@ -935,7 +1005,7 @@ def test_component_inventory_must_reach_every_runtime_object(release_fixture: ob
     manifest, _ = promotion.build_manifest(source, spec, documents, HEX["e"])
     whole_path = manifest["incumbents"]["whole_embedding"]["manifest_path"]
     whole = json.loads(documents[whole_path])
-    whole["job_ids_path"] = "embeddings/qwen3-embedding-8b/whole/missing.json"
+    whole["job_ids_path"] = f"{promotion.WHOLE_RUNTIME_PREFIX}/missing.json"
     payload = encoded(whole)
     documents[whole_path] = payload
     manifest["artifacts"][whole_path]["sha256"] = digest(payload)
@@ -1028,26 +1098,37 @@ def test_selected_inventory_drift_fails_closed(release_fixture: object) -> None:
         promotion.build_manifest(source, spec, documents, HEX["e"])
 
 
-def test_source_inventory_must_pin_eva_build_provenance(release_fixture: object) -> None:
+@pytest.mark.parametrize(
+    ("path", "label"),
+    [
+        (
+            promotion.WHOLE_SOURCE_MANIFEST_SOURCE_PATH,
+            "approved sealed whole source manifest",
+        ),
+        (
+            promotion.WHOLE_SOURCE_INVENTORY_SOURCE_PATH,
+            "approved sealed whole source inventory",
+        ),
+    ],
+)
+def test_source_inventory_must_pin_sealed_whole_provenance(
+    release_fixture: object, path: str, label: str
+) -> None:
     source, spec, _ = release_fixture
-    provenance = next(
-        item
-        for item in source["files"]
-        if item["path"] == promotion.WHOLE_BUILD_PROVENANCE_SOURCE_PATH
-    )
+    provenance = next(item for item in source["files"] if item["path"] == path)
     provenance["sha256"] = HEX["f"]
 
-    with pytest.raises(RuntimeError, match="approved EVA whole build manifest"):
+    with pytest.raises(RuntimeError, match=label):
         promotion.select_artifacts(source, spec)
 
 
-def test_promotion_fails_closed_until_new_full_jd_lineage_is_configured(
+def test_promotion_fails_closed_until_temporal_v2_lineage_is_configured(
     release_fixture: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source, spec, _ = release_fixture
-    monkeypatch.setattr(promotion, "APPROVED_WHOLE_BUILD_MANIFEST_SHA256", None)
+    monkeypatch.setattr(promotion, "APPROVED_TANTIVY_BUILD_MANIFEST_SHA256", None)
 
-    with pytest.raises(RuntimeError, match="lineage is not configured"):
+    with pytest.raises(RuntimeError, match="temporal-v2 Tantivy build lineage"):
         promotion.select_artifacts(source, spec)
 
 
@@ -1066,14 +1147,14 @@ def test_source_inventory_must_pin_tantivy_build_provenance(
         promotion.select_artifacts(source, spec)
 
 
-def test_materialization_report_taxonomy_lineage_is_verified(
+def test_materialization_report_projection_lineage_is_verified(
     release_fixture: object,
 ) -> None:
     source, spec, documents = release_fixture
     documents = dict(documents)
     manifest, _ = promotion.build_manifest(source, spec, documents, HEX["e"])
     report = json.loads(documents[promotion.MATERIALIZATION_REPORT_PATH])
-    report["city_taxonomy_sha256"] = HEX["f"]
+    report["projection"] = "unapproved_projection"
     payload = encoded(report)
     documents[promotion.MATERIALIZATION_REPORT_PATH] = payload
     manifest["artifacts"][promotion.MATERIALIZATION_REPORT_PATH]["sha256"] = digest(payload)
@@ -1265,6 +1346,18 @@ def test_offline_dry_run_never_calls_aws(
     result = json.loads(capsys.readouterr().out)
     assert result["executed"] is False
     assert result["schema_version"] == 2
+
+
+def test_cli_requires_tantivy_approvals_as_a_pair() -> None:
+    with pytest.raises(RuntimeError, match="must be supplied together"):
+        promotion.main(
+            [
+                "--release-spec",
+                "does-not-matter.json",
+                "--approved-tantivy-build-sha256",
+                HEX["a"],
+            ]
+        )
 
 
 def test_aws_cli_retries_only_transient_network_errors(monkeypatch: pytest.MonkeyPatch) -> None:

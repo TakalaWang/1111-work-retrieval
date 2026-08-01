@@ -19,9 +19,9 @@ from work_retrieval_core import (
     SearchQuery,
     SearchUnavailableError,
 )
-from work_retrieval_core.serialization import (
-    DOCUMENT_POLICY_VERSION,
-    document_template_sha256,
+from work_retrieval_core.manifest import (
+    WHOLE_DOCUMENT_POLICY_VERSION,
+    WHOLE_DOCUMENT_TEMPLATE_SHA256,
 )
 
 DEMO_AS_OF = datetime(2026, 6, 8, tzinfo=UTC)
@@ -98,8 +98,8 @@ def _manifest(*, multiview: bool = False) -> dict[str, object]:
                 "dataset_sha256": HEX,
                 "jobs_sha256": HEX,
                 "job_row_order_sha256": HEX,
-                "document_policy_version": DOCUMENT_POLICY_VERSION,
-                "document_template_sha256": document_template_sha256(),
+                "document_policy_version": WHOLE_DOCUMENT_POLICY_VERSION,
+                "document_template_sha256": WHOLE_DOCUMENT_TEMPLATE_SHA256,
             },
             "temporal_tantivy": {
                 "manifest_path": tantivy_path,

@@ -46,9 +46,9 @@ class StubMetadata:
 
 
 def _manifest() -> dict[str, object]:
-    from work_retrieval_core.serialization import (
-        DOCUMENT_POLICY_VERSION,
-        document_template_sha256,
+    from work_retrieval_core.manifest import (
+        WHOLE_DOCUMENT_POLICY_VERSION,
+        WHOLE_DOCUMENT_TEMPLATE_SHA256,
     )
 
     whole = "embeddings/qwen3-embedding-8b/whole/manifest.json"
@@ -100,8 +100,8 @@ def _manifest() -> dict[str, object]:
                 "dataset_sha256": "a" * 64,
                 "jobs_sha256": "a" * 64,
                 "job_row_order_sha256": "a" * 64,
-                "document_policy_version": DOCUMENT_POLICY_VERSION,
-                "document_template_sha256": document_template_sha256(),
+                "document_policy_version": WHOLE_DOCUMENT_POLICY_VERSION,
+                "document_template_sha256": WHOLE_DOCUMENT_TEMPLATE_SHA256,
             },
             "temporal_tantivy": {
                 "manifest_path": lexical,

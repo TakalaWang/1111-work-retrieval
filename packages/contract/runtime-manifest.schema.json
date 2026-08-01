@@ -170,9 +170,9 @@
         "dataset_sha256": { "$ref": "#/$defs/sha256" },
         "jobs_sha256": { "$ref": "#/$defs/sha256" },
         "job_row_order_sha256": { "$ref": "#/$defs/sha256" },
-        "document_policy_version": { "const": "2026-08-01-full-jd-v2" },
+        "document_policy_version": { "const": "2026-07-24-clean-v1" },
         "document_template_sha256": {
-          "const": "8300647bfc45ac387f53d92aacbaa3924647a9575c9faf5b37da1b923758d234"
+          "const": "3275f93ade6c4f043084e36303d38b33443858546a80104840f0e2b9468d2abb"
         }
       }
     },

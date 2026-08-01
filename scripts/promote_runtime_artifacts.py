@@ -26,26 +26,37 @@ AWS_REGION = "us-west-2"
 SOURCE_BUCKET = "jobbank-data-bucket"
 DESTINATION_BUCKET = "workretrievaldata-runtimebucket404c5ee4-hkvrjx5fbkij"
 
-# Intentionally unset until a full-JD-v2 build is independently verified. Promotion must fail
-# closed instead of relabeling the legacy 15-field EVA vectors as the serving corpus.
-APPROVED_WHOLE_BUILD_MANIFEST_SHA256: str | None = None
-APPROVED_WHOLE_BUILD_PROVENANCE_PATH = "embeddings/qwen3-embedding-8b/whole/build-manifest.json"
-WHOLE_BUILD_PROVENANCE_SOURCE_PATH = "provenance/qwen3-embedding-8b/build-manifest.json"
+# Sealed, independently verified EVA whole-job cache. Production derives MRL1024 shards from
+# these immutable 4096d bytes and never rebuilds or overwrites the source cache.
+APPROVED_WHOLE_SOURCE_MANIFEST_SHA256 = (
+    "a02a23655fe8e5cc6b08afde35e93898ff94c62b88bbf7522e09f2c15378715c"
+)
+APPROVED_WHOLE_SOURCE_INVENTORY_SHA256 = (
+    "f762cc4d676e16aa04789e1573713ef30d66e72f3a7f96c5bcd7e7e6133a2adb"
+)
+APPROVED_WHOLE_SOURCE_FILE_COUNT = 367
+APPROVED_WHOLE_SOURCE_BYTES = 10_001_032_323
+APPROVED_WHOLE_SOURCE_ROWS = 1_218_635
+APPROVED_WHOLE_SOURCE_SHARDS = 122
+APPROVED_JOBS_DATASET_SHA256 = "53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089"
+WHOLE_RUNTIME_PREFIX = "embeddings/qwen3-embedding-8b-clean-v1-mrl1024"
+APPROVED_WHOLE_SOURCE_MANIFEST_PATH = f"{WHOLE_RUNTIME_PREFIX}/source-manifest.json"
+APPROVED_WHOLE_SOURCE_INVENTORY_PATH = f"{WHOLE_RUNTIME_PREFIX}/source-inventory.json"
+WHOLE_SOURCE_MANIFEST_SOURCE_PATH = "provenance/qwen3-embedding-8b-clean-v1/source-manifest.json"
+WHOLE_SOURCE_INVENTORY_SOURCE_PATH = "provenance/qwen3-embedding-8b-clean-v1/source-inventory.json"
 APPROVED_TANTIVY_BUILD_MANIFEST_SHA256: str | None = None
 APPROVED_TANTIVY_INDEX_SHA256: str | None = None
-APPROVED_CITY_TAXONOMY_SHA256 = "6fb964a02a5700df3e31235b1d9adf72f353a0c4885e52ab200e9bf0cf2bab4a"
-APPROVED_DUTY_TAXONOMY_SHA256 = "51654e460e17a49bde42a3a4e867a21656158799173a68330b7dcc8295a41619"
-APPROVED_TANTIVY_BUILD_PROVENANCE_PATH = "indexes/tantivy-bm25-temporal-v1/build-manifest.json"
-TANTIVY_BUILD_PROVENANCE_SOURCE_PATH = "provenance/tantivy-bm25-temporal-v1/build-manifest.json"
+TANTIVY_RUNTIME_PREFIX = "indexes/tantivy-bm25-temporal-v2"
+APPROVED_TANTIVY_BUILD_PROVENANCE_PATH = f"{TANTIVY_RUNTIME_PREFIX}/build-manifest.json"
+TANTIVY_BUILD_PROVENANCE_SOURCE_PATH = "provenance/tantivy-bm25-temporal-v2/build-manifest.json"
 MATERIALIZATION_REPORT_PATH = "evidence/provenance/materialization-report.json"
-TANTIVY_JOB_IDS_RUNTIME_PATH = "indexes/tantivy-bm25-temporal-v1/job-ids.json"
-QUERY_CORRECTIONS_RUNTIME_PATH = "indexes/tantivy-bm25-temporal-v1/query-corrections.json"
+TANTIVY_JOB_IDS_RUNTIME_PATH = f"{TANTIVY_RUNTIME_PREFIX}/job-ids.json"
 APPROVED_MODEL = "Qwen/Qwen3-Embedding-8B"
 APPROVED_MODEL_REVISION = "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"
 APPROVED_SOURCE_EMBEDDING_DIMENSION = 4096
 APPROVED_WHOLE_DIMENSION = 1024
 APPROVED_WHOLE_PROJECTION = "mrl_prefix_then_l2_normalize"
-APPROVED_DOCUMENT_POLICY_VERSION = "2026-08-01-full-jd-v2"
+APPROVED_DOCUMENT_POLICY_VERSION = "2026-07-24-clean-v1"
 APPROVED_MULTIVIEW_DIMENSION = 1024
 APPROVED_MULTIVIEW_REFERENCE_DIMENSION = 4096
 APPROVED_MULTIVIEW_KINDS = ["occupation", "skill", "requirement", "content"]
@@ -54,30 +65,11 @@ APPROVED_DOCUMENT_FIELDS = [
     "職務小類",
     "職務中類",
     "職務大類",
-    "薪資",
-    "職缺屬性",
-    "工時",
-    "工時說明",
     "電腦技能資料",
     "工作技能",
     "專業證照",
     "工作經驗需求",
     "學歷需求",
-    "科系需求1",
-    "科系需求2",
-    "科系需求3",
-    "語言能力一",
-    "語言能力一聽",
-    "語言能力一說",
-    "語言能力一讀",
-    "語言能力一寫",
-    "語言能力二",
-    "語言能力二聽",
-    "語言能力二說",
-    "語言能力二讀",
-    "語言能力二寫",
-    "管理人數",
-    "是否需外派",
     "工作城市",
     "產業小類",
     "產業中類",
@@ -86,7 +78,7 @@ APPROVED_DOCUMENT_FIELDS = [
     "職務內容",
 ]
 APPROVED_DOCUMENT_TEMPLATE_SHA256 = (
-    "8300647bfc45ac387f53d92aacbaa3924647a9575c9faf5b37da1b923758d234"
+    "3275f93ade6c4f043084e36303d38b33443858546a80104840f0e2b9468d2abb"
 )
 APPROVED_QUERY_PROMPT = (
     "Instruct: Given a job search query, retrieve relevant job postings matching "
@@ -397,16 +389,16 @@ def select_artifacts(
     source: Mapping[str, object], spec: Mapping[str, object]
 ) -> list[dict[str, object]]:
     inventory = _parse_source_manifest(source)
-    if (
-        APPROVED_WHOLE_BUILD_MANIFEST_SHA256 is None
-        or APPROVED_TANTIVY_BUILD_MANIFEST_SHA256 is None
-        or APPROVED_TANTIVY_INDEX_SHA256 is None
-    ):
-        raise RuntimeError("approved full-JD-v2 whole/Tantivy build lineage is not configured")
+    if APPROVED_TANTIVY_BUILD_MANIFEST_SHA256 is None or APPROVED_TANTIVY_INDEX_SHA256 is None:
+        raise RuntimeError("approved temporal-v2 Tantivy build lineage is not configured")
     required_provenance = {
-        WHOLE_BUILD_PROVENANCE_SOURCE_PATH: (
-            APPROVED_WHOLE_BUILD_MANIFEST_SHA256,
-            "approved EVA whole build manifest",
+        WHOLE_SOURCE_MANIFEST_SOURCE_PATH: (
+            APPROVED_WHOLE_SOURCE_MANIFEST_SHA256,
+            "approved sealed whole source manifest",
+        ),
+        WHOLE_SOURCE_INVENTORY_SOURCE_PATH: (
+            APPROVED_WHOLE_SOURCE_INVENTORY_SHA256,
+            "approved sealed whole source inventory",
         ),
         TANTIVY_BUILD_PROVENANCE_SOURCE_PATH: (
             APPROVED_TANTIVY_BUILD_MANIFEST_SHA256,
@@ -571,6 +563,8 @@ def _validate_whole_shards(
     for shard in shards:
         if not isinstance(shard, dict) or set(shard) != {
             "vectors_path",
+            "vectors_sha256",
+            "source_vectors_sha256",
             "row_start",
             "row_end",
             "rows",
@@ -597,6 +591,10 @@ def _validate_whole_shards(
             kind="embedding",
             prefix=prefix,
         )
+        artifact = artifacts[path]
+        if not isinstance(artifact, dict) or artifact.get("sha256") != shard.get("vectors_sha256"):
+            raise RuntimeError("whole embedding derived shard SHA-256 differs")
+        _require_sha256("whole source vector SHA-256", shard.get("source_vectors_sha256"))
         if path in shard_paths:
             raise RuntimeError("whole embedding shard file is repeated")
         shard_paths.add(path)
@@ -606,30 +604,51 @@ def _validate_whole_shards(
     return shard_paths
 
 
-def _validate_query_corrections_document(document: Mapping[str, object]) -> None:
+def _validate_query_corrections_documents(
+    document: Mapping[str, object],
+    attestation: Mapping[str, object],
+    candidate_sha256: str,
+) -> None:
     _require_exact_keys(
         "query corrections",
         document,
         {
             "schema_version",
+            "complete",
+            "publication_allowed",
             "source_policy",
+            "test_jd_used",
+            "uses_ground_truth",
+            "uses_behavior_logs",
             "train_cutoff_exclusive",
             "max_source_timestamp",
+            "source_manifest_sha256",
+            "evidence_sha256",
+            "minimum_support",
             "corrections",
         },
     )
     if (
         document.get("schema_version") != 1
+        or document.get("complete") is not True
+        or document.get("publication_allowed") is not False
         or document.get("source_policy") != "train_jd_only"
-        or document.get("train_cutoff_exclusive") != APPROVED_GRAPH_TRAIN_CUTOFF
+        or document.get("test_jd_used") is not False
+        or document.get("uses_ground_truth") is not False
+        or document.get("uses_behavior_logs") is not False
     ):
         raise RuntimeError("query corrections are not pinned to the train-JD corpus")
     cutoff = _timestamp(document.get("train_cutoff_exclusive"), "query correction cutoff")
     maximum = _timestamp(document.get("max_source_timestamp"), "query correction maximum")
     if maximum >= cutoff:
         raise RuntimeError("query corrections include post-cutoff source data")
+    for name in ("source_manifest_sha256", "evidence_sha256"):
+        _require_sha256(f"query correction {name}", document.get(name))
+    minimum_support = document.get("minimum_support")
+    if type(minimum_support) is not int or minimum_support < 1:
+        raise RuntimeError("query correction minimum support must be positive")
     corrections = document.get("corrections")
-    if not isinstance(corrections, dict):
+    if not isinstance(corrections, dict) or not corrections:
         raise RuntimeError("query corrections mapping differs")
     for source, target in corrections.items():
         normalized_source = (
@@ -650,6 +669,48 @@ def _validate_query_corrections_document(document: Mapping[str, object]) -> None
             or source == target
         ):
             raise RuntimeError("query corrections contain a non-canonical rule")
+    _require_exact_keys(
+        "query correction promotion attestation",
+        attestation,
+        {
+            "schema_version",
+            "complete",
+            "attestation_kind",
+            "candidate_sha256",
+            "promotion_report_sha256",
+            "publication_allowed",
+            "evaluator_kind",
+            "significant",
+            "primary_metric",
+            "absolute_delta",
+            "evaluation_split_sha256",
+            "baseline_run_sha256",
+            "candidate_run_sha256",
+        },
+    )
+    delta = attestation.get("absolute_delta")
+    if (
+        attestation.get("schema_version") != 1
+        or attestation.get("complete") is not True
+        or attestation.get("attestation_kind") != "fixed-input-query-correction-promotion"
+        or attestation.get("candidate_sha256") != candidate_sha256
+        or attestation.get("publication_allowed") is not True
+        or attestation.get("evaluator_kind") != "organizer"
+        or attestation.get("significant") is not True
+        or attestation.get("primary_metric") != "ndcg_at_10"
+        or isinstance(delta, bool)
+        or not isinstance(delta, (int, float))
+        or not math.isfinite(delta)
+        or delta <= 0
+    ):
+        raise RuntimeError("query correction promotion attestation did not pass")
+    for name in (
+        "promotion_report_sha256",
+        "evaluation_split_sha256",
+        "baseline_run_sha256",
+        "candidate_run_sha256",
+    ):
+        _require_sha256(f"query correction attestation {name}", attestation.get(name))
 
 
 def _validate_component_manifests(
@@ -699,8 +760,10 @@ def _validate_component_manifests(
             "document_template_sha256",
             "document_fields",
             "query_prompt",
-            "build_manifest_path",
-            "build_manifest_sha256",
+            "source_manifest_path",
+            "source_manifest_sha256",
+            "source_inventory_path",
+            "source_inventory_sha256",
             "job_ids_path",
             "shards",
         },
@@ -728,17 +791,80 @@ def _validate_component_manifests(
         },
         whole_document,
     )
-    build_manifest_path = _artifact_reference(
+    source_manifest_path = _artifact_reference(
         artifacts,
         {
-            "manifest_path": whole_document.get("build_manifest_path"),
-            "manifest_sha256": whole_document.get("build_manifest_sha256"),
+            "manifest_path": whole_document.get("source_manifest_path"),
+            "manifest_sha256": whole_document.get("source_manifest_sha256"),
         },
         "evidence",
     )
-    if build_manifest_path != APPROVED_WHOLE_BUILD_PROVENANCE_PATH:
-        raise RuntimeError("whole embedding build manifest path differs")
-    reachable.add(build_manifest_path)
+    source_inventory_path = _artifact_reference(
+        artifacts,
+        {
+            "manifest_path": whole_document.get("source_inventory_path"),
+            "manifest_sha256": whole_document.get("source_inventory_sha256"),
+        },
+        "evidence",
+    )
+    if (
+        source_manifest_path != APPROVED_WHOLE_SOURCE_MANIFEST_PATH
+        or source_inventory_path != APPROVED_WHOLE_SOURCE_INVENTORY_PATH
+    ):
+        raise RuntimeError("whole embedding sealed source provenance path differs")
+    source_manifest = _json_document(source_manifest_path, artifacts, documents)
+    _require_equal(
+        "sealed whole source manifest",
+        {
+            "complete": True,
+            "model": APPROVED_MODEL,
+            "revision": APPROVED_MODEL_REVISION,
+            "dataset_sha256": APPROVED_JOBS_DATASET_SHA256,
+            "rows": APPROVED_WHOLE_SOURCE_ROWS,
+            "dtype": "float16",
+            "normalized": True,
+            "document_policy_version": APPROVED_DOCUMENT_POLICY_VERSION,
+            "document_template_sha256": APPROVED_DOCUMENT_TEMPLATE_SHA256,
+            "document_fields": APPROVED_DOCUMENT_FIELDS,
+            "job_row_order_sha256": whole.get("job_row_order_sha256"),
+        },
+        source_manifest,
+    )
+    source_shards = source_manifest.get("shards")
+    if (
+        not isinstance(source_shards, list)
+        or len(source_shards) != APPROVED_WHOLE_SOURCE_SHARDS
+        or any(
+            not isinstance(shard, dict)
+            or shard.get("index") != index
+            or shard.get("dimension") != APPROVED_SOURCE_EMBEDDING_DIMENSION
+            for index, shard in enumerate(source_shards)
+        )
+    ):
+        raise RuntimeError("sealed whole source shard contract differs")
+    source_inventory = _json_document(source_inventory_path, artifacts, documents)
+    source_files = source_inventory.get("files")
+    if source_inventory.get("schema_version") != 3 or not isinstance(source_files, list):
+        raise RuntimeError("sealed whole source inventory schema differs")
+    cache_files = [
+        item
+        for item in source_files
+        if isinstance(item, dict)
+        and isinstance(item.get("path"), str)
+        and cast(str, item["path"]).startswith("artifacts/experiments/qwen3-8b/full/")
+    ]
+    if (
+        len(cache_files) != APPROVED_WHOLE_SOURCE_FILE_COUNT
+        or sum(cast(int, item.get("size", -1)) for item in cache_files)
+        != APPROVED_WHOLE_SOURCE_BYTES
+        or not any(
+            item.get("path") == "artifacts/experiments/qwen3-8b/full/manifest.json"
+            and item.get("sha256") == APPROVED_WHOLE_SOURCE_MANIFEST_SHA256
+            for item in cache_files
+        )
+    ):
+        raise RuntimeError("sealed whole source inventory lineage differs")
+    reachable.update({source_manifest_path, source_inventory_path})
     whole_prefix = str(PurePosixPath(whole_path).parent) + "/"
     reachable.add(
         _component_file(
@@ -785,7 +911,7 @@ def _validate_component_manifests(
             "index_files",
             "taxonomy_path",
             "job_ids_path",
-            "query_corrections_path",
+            "query_corrections",
             "build_manifest_path",
             "build_manifest_sha256",
             "schema_fields",
@@ -860,18 +986,8 @@ def _validate_component_manifests(
     ).get("sha256"):
         raise RuntimeError("Tantivy job IDs differ from whole embedding row order")
     reachable.add(job_ids_path)
-    corrections_path = _component_file(
-        "temporal Tantivy",
-        temporal_document.get("query_corrections_path"),
-        artifacts,
-        kind="index",
-        prefix=temporal_prefix,
-    )
-    if (
-        job_ids_path != TANTIVY_JOB_IDS_RUNTIME_PATH
-        or corrections_path != QUERY_CORRECTIONS_RUNTIME_PATH
-    ):
-        raise RuntimeError("Tantivy auxiliary runtime path differs")
+    if job_ids_path != TANTIVY_JOB_IDS_RUNTIME_PATH:
+        raise RuntimeError("Tantivy job ID runtime path differs")
     tantivy_build_manifest_path = _artifact_reference(
         artifacts,
         {
@@ -883,8 +999,114 @@ def _validate_component_manifests(
     if tantivy_build_manifest_path != APPROVED_TANTIVY_BUILD_PROVENANCE_PATH:
         raise RuntimeError("Tantivy build manifest path differs")
     reachable.add(tantivy_build_manifest_path)
-    _validate_query_corrections_document(_json_document(corrections_path, artifacts, documents))
-    reachable.add(corrections_path)
+    tantivy_build = _json_document(tantivy_build_manifest_path, artifacts, documents)
+    _require_exact_keys(
+        "Tantivy build manifest",
+        tantivy_build,
+        {
+            "schema_version",
+            "complete",
+            "builder",
+            "engine",
+            "dataset_sha256",
+            "jobs_sha256",
+            "job_row_order_sha256",
+            "rows",
+            "index_sha256",
+            "index_tree",
+            "taxonomy_sha256",
+            "query_corrections",
+            "lexical_policy_version",
+            "lexical_policy_sha256",
+            "tokenizers",
+            "source_fields",
+            "source_csv_fields",
+        },
+    )
+    _require_equal(
+        "Tantivy build manifest",
+        {
+            "schema_version": 1,
+            "complete": True,
+            "builder": "tantivy_index_pipeline.py",
+            "engine": APPROVED_TANTIVY_ENGINE,
+            "dataset_sha256": whole.get("dataset_sha256"),
+            "jobs_sha256": whole.get("jobs_sha256"),
+            "job_row_order_sha256": whole.get("job_row_order_sha256"),
+            "rows": whole.get("rows"),
+            "index_sha256": temporal.get("index_sha256"),
+            "query_corrections": temporal_document.get("query_corrections"),
+            "lexical_policy_version": APPROVED_LEXICAL_POLICY_VERSION,
+            "lexical_policy_sha256": APPROVED_LEXICAL_POLICY_SHA256,
+            "tokenizers": APPROVED_TANTIVY_TOKENIZERS,
+            "source_fields": APPROVED_TANTIVY_SOURCE_FIELDS,
+        },
+        tantivy_build,
+    )
+    index_tree = tantivy_build.get("index_tree")
+    if not isinstance(index_tree, list) or not index_tree:
+        raise RuntimeError("Tantivy build index tree is missing")
+    expected_tree = []
+    for path in sorted(index_files):
+        artifact = cast(Mapping[str, object], artifacts[path])
+        expected_tree.append(
+            {
+                "path": path.removeprefix(f"{expected_directory}/"),
+                "sha256": artifact.get("sha256"),
+                "size_bytes": artifact.get("size_bytes"),
+            }
+        )
+    if index_tree != expected_tree or _canonical_sha256(index_tree) != temporal.get("index_sha256"):
+        raise RuntimeError("Tantivy build index tree differs from runtime inventory")
+    taxonomy_path = cast(str, temporal_document["taxonomy_path"])
+    taxonomy_artifact = cast(Mapping[str, object], artifacts[taxonomy_path])
+    if taxonomy_artifact.get("sha256") != tantivy_build.get("taxonomy_sha256"):
+        raise RuntimeError("Tantivy taxonomy differs from build manifest")
+    correction = temporal_document.get("query_corrections")
+    if correction == {"enabled": False}:
+        pass
+    elif isinstance(correction, dict):
+        _require_exact_keys(
+            "enabled Tantivy query corrections",
+            correction,
+            {
+                "enabled",
+                "artifact_path",
+                "artifact_sha256",
+                "promotion_attestation_path",
+                "promotion_attestation_sha256",
+            },
+        )
+        if correction.get("enabled") is not True:
+            raise RuntimeError("query correction enabled flag must be boolean")
+        corrections_path = _component_file(
+            "temporal Tantivy",
+            correction.get("artifact_path"),
+            artifacts,
+            kind="index",
+            prefix=temporal_prefix,
+        )
+        attestation_path = _component_file(
+            "temporal Tantivy",
+            correction.get("promotion_attestation_path"),
+            artifacts,
+            kind="evidence",
+            prefix=temporal_prefix,
+        )
+        corrections_artifact = cast(Mapping[str, object], artifacts[corrections_path])
+        attestation_artifact = cast(Mapping[str, object], artifacts[attestation_path])
+        if corrections_artifact.get("sha256") != correction.get(
+            "artifact_sha256"
+        ) or attestation_artifact.get("sha256") != correction.get("promotion_attestation_sha256"):
+            raise RuntimeError("query correction component SHA-256 differs")
+        _validate_query_corrections_documents(
+            _json_document(corrections_path, artifacts, documents),
+            _json_document(attestation_path, artifacts, documents),
+            cast(str, correction["artifact_sha256"]),
+        )
+        reachable.update({corrections_path, attestation_path})
+    else:
+        raise RuntimeError("Tantivy query corrections must be disabled or attested")
 
     challengers = cast(Mapping[str, Mapping[str, object]], manifest["challengers"])
     multiview = challengers["multiview_embedding"]
@@ -1072,19 +1294,20 @@ def _timestamp(value: object, name: str) -> datetime:
 def _validate_materialization_lineage(
     manifest: Mapping[str, object], documents: Mapping[str, bytes]
 ) -> set[str]:
-    if (
-        APPROVED_WHOLE_BUILD_MANIFEST_SHA256 is None
-        or APPROVED_TANTIVY_BUILD_MANIFEST_SHA256 is None
-        or APPROVED_TANTIVY_INDEX_SHA256 is None
-    ):
-        raise RuntimeError("approved full-JD-v2 whole/Tantivy build lineage is not configured")
+    if APPROVED_TANTIVY_BUILD_MANIFEST_SHA256 is None or APPROVED_TANTIVY_INDEX_SHA256 is None:
+        raise RuntimeError("approved temporal-v2 Tantivy build lineage is not configured")
     artifacts = cast(Mapping[str, object], manifest["artifacts"])
     incumbents = cast(Mapping[str, Mapping[str, object]], manifest["incumbents"])
     for path, expected_sha256, label in (
         (
-            APPROVED_WHOLE_BUILD_PROVENANCE_PATH,
-            APPROVED_WHOLE_BUILD_MANIFEST_SHA256,
-            "whole build provenance",
+            APPROVED_WHOLE_SOURCE_MANIFEST_PATH,
+            APPROVED_WHOLE_SOURCE_MANIFEST_SHA256,
+            "whole source manifest provenance",
+        ),
+        (
+            APPROVED_WHOLE_SOURCE_INVENTORY_PATH,
+            APPROVED_WHOLE_SOURCE_INVENTORY_SHA256,
+            "whole source inventory provenance",
         ),
         (
             APPROVED_TANTIVY_BUILD_PROVENANCE_PATH,
@@ -1105,8 +1328,10 @@ def _validate_materialization_lineage(
         report,
         {
             "schema_version",
-            "whole_build_manifest_sha256",
+            "whole_source_manifest_sha256",
+            "whole_source_inventory_sha256",
             "whole_runtime_manifest_sha256",
+            "projection",
             "tantivy_build_manifest_sha256",
             "tantivy_runtime_manifest_sha256",
             "tantivy_index_sha256",
@@ -1115,24 +1340,18 @@ def _validate_materialization_lineage(
             "job_row_order_sha256",
             "rows",
             "placement",
-            "city_taxonomy_sha256",
-            "duty_taxonomy_sha256",
-            "query_corrections_sha256",
+            "query_corrections",
         },
     )
     whole = incumbents["whole_embedding"]
     temporal = incumbents["temporal_tantivy"]
     temporal_document = _json_document(cast(str, temporal["manifest_path"]), artifacts, documents)
-    corrections_path = temporal_document.get("query_corrections_path")
-    corrections_artifact = (
-        artifacts.get(corrections_path) if isinstance(corrections_path, str) else None
-    )
-    if not isinstance(corrections_artifact, dict):
-        raise RuntimeError("query corrections are absent from materialization lineage")
     expected = {
         "schema_version": 1,
-        "whole_build_manifest_sha256": APPROVED_WHOLE_BUILD_MANIFEST_SHA256,
+        "whole_source_manifest_sha256": APPROVED_WHOLE_SOURCE_MANIFEST_SHA256,
+        "whole_source_inventory_sha256": APPROVED_WHOLE_SOURCE_INVENTORY_SHA256,
         "whole_runtime_manifest_sha256": whole.get("manifest_sha256"),
+        "projection": APPROVED_WHOLE_PROJECTION,
         "tantivy_build_manifest_sha256": APPROVED_TANTIVY_BUILD_MANIFEST_SHA256,
         "tantivy_runtime_manifest_sha256": temporal.get("manifest_sha256"),
         "tantivy_index_sha256": APPROVED_TANTIVY_INDEX_SHA256,
@@ -1141,14 +1360,13 @@ def _validate_materialization_lineage(
         "job_row_order_sha256": whole.get("job_row_order_sha256"),
         "rows": whole.get("rows"),
         "placement": "copy_sha256_verified",
-        "city_taxonomy_sha256": APPROVED_CITY_TAXONOMY_SHA256,
-        "duty_taxonomy_sha256": APPROVED_DUTY_TAXONOMY_SHA256,
-        "query_corrections_sha256": corrections_artifact.get("sha256"),
+        "query_corrections": temporal_document.get("query_corrections"),
     }
     if report != expected or temporal.get("index_sha256") != APPROVED_TANTIVY_INDEX_SHA256:
         raise RuntimeError("materialization lineage differs from approved source artifacts")
     return {
-        APPROVED_WHOLE_BUILD_PROVENANCE_PATH,
+        APPROVED_WHOLE_SOURCE_MANIFEST_PATH,
+        APPROVED_WHOLE_SOURCE_INVENTORY_PATH,
         APPROVED_TANTIVY_BUILD_PROVENANCE_PATH,
         MATERIALIZATION_REPORT_PATH,
     }
@@ -1462,7 +1680,9 @@ def _document_paths(runtime: Mapping[str, object]) -> set[str]:
     paths = {
         *(cast(str, value["manifest_path"]) for value in incumbents.values()),
         MATERIALIZATION_REPORT_PATH,
-        QUERY_CORRECTIONS_RUNTIME_PATH,
+        APPROVED_WHOLE_SOURCE_MANIFEST_PATH,
+        APPROVED_WHOLE_SOURCE_INVENTORY_PATH,
+        APPROVED_TANTIVY_BUILD_PROVENANCE_PATH,
     }
     paths.update(
         cast(str, value["manifest_path"])
@@ -1494,7 +1714,10 @@ def load_component_documents(
     source_key, _ = _source_manifest_contract(spec)
     source_root = source_key.removesuffix("manifest.json")
     documents: dict[str, bytes] = {}
-    for path in paths:
+
+    def load(path: str) -> None:
+        if path in documents:
+            return
         item = by_destination.get(path)
         if item is None:
             raise RuntimeError(f"component manifest is not selected: {path}")
@@ -1518,6 +1741,31 @@ def load_component_documents(
         ):
             raise RuntimeError(f"component source object differs: {source_path}")
         documents[path] = payload
+
+    for path in paths:
+        load(path)
+    incumbents = cast(Mapping[str, Mapping[str, object]], runtime["incumbents"])
+    temporal_path = cast(str, incumbents["temporal_tantivy"]["manifest_path"])
+    try:
+        temporal = json.loads(documents[temporal_path])
+    except (KeyError, UnicodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("Tantivy component manifest cannot be read") from error
+    if not isinstance(temporal, dict):
+        raise RuntimeError("Tantivy component manifest must be an object")
+    for name in ("build_manifest_path",):
+        value = temporal.get(name)
+        if not isinstance(value, str):
+            raise RuntimeError(f"Tantivy component {name} is missing")
+        load(value)
+    correction = temporal.get("query_corrections")
+    if correction != {"enabled": False}:
+        if not isinstance(correction, dict):
+            raise RuntimeError("Tantivy query correction mode must be an object")
+        for name in ("artifact_path", "promotion_attestation_path"):
+            value = correction.get(name)
+            if not isinstance(value, str):
+                raise RuntimeError(f"enabled query correction {name} is missing")
+            load(value)
     return documents
 
 
@@ -1771,12 +2019,31 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         type=Path,
         help="offline dry-run artifact root; forbidden with --execute",
     )
+    parser.add_argument(
+        "--approved-tantivy-build-sha256",
+        help="compiled temporal-v2 Tantivy build-manifest SHA-256",
+    )
+    parser.add_argument(
+        "--approved-tantivy-index-sha256",
+        help="compiled temporal-v2 Tantivy canonical index-tree SHA-256",
+    )
     parser.add_argument("--execute", action="store_true", help="perform server-side S3 copies")
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
+    global APPROVED_TANTIVY_BUILD_MANIFEST_SHA256, APPROVED_TANTIVY_INDEX_SHA256
+
     args = _parse_args(argv)
+    if (args.approved_tantivy_build_sha256 is None) != (args.approved_tantivy_index_sha256 is None):
+        raise RuntimeError("Tantivy build and index approvals must be supplied together")
+    if args.approved_tantivy_build_sha256 is not None:
+        APPROVED_TANTIVY_BUILD_MANIFEST_SHA256 = _require_sha256(
+            "approved Tantivy build SHA-256", args.approved_tantivy_build_sha256
+        )
+        APPROVED_TANTIVY_INDEX_SHA256 = _require_sha256(
+            "approved Tantivy index SHA-256", args.approved_tantivy_index_sha256
+        )
     if (args.source_manifest_file is None) != (args.source_root is None):
         raise RuntimeError("offline dry-run requires both --source-manifest-file and --source-root")
     if args.execute and args.source_manifest_file is not None:

@@ -1,9 +1,9 @@
 # Reproducible retrieval pipelines
 
-This document covers the production Tantivy/whole-Qwen artifact builders and the two offline
+This document covers the production Tantivy/whole-Qwen materialization path and the offline
 challenger pipelines. A challenger cannot enter serving without an immutable promotion report.
-Legacy `2026-07-24-clean-v1`, 15-field, 4096-dimensional or unpinned artifacts fail the current
-contracts and cannot be relabeled as the new baseline.
+Production reuses the independently sealed `2026-07-24-clean-v1` whole-job cache; it does not
+silently relabel or rebuild those source vectors.
 
 ## Shared publication contract
 
@@ -16,19 +16,20 @@ contracts and cannot be relabeled as the new baseline.
 - Keep experiment artifacts outside the production runtime prefix until an ablation passes its
   promotion gate. The serving process never discovers or enables challengers automatically.
 
-## Production whole-JD Qwen baseline
+## Production sealed whole-Qwen baseline
 
-`scripts/whole_embedding_pipeline.py` reads the source CSV directly through the core
-`2026-08-01-full-jd-v2` serializer. All 34 ordered JD fields, including the complete job content,
-are required. The build pins source bytes, job row order, document template, tokenizer, model and
-revision. Qwen emits the 4096-dimensional source representation; the builder selects its first
-1024 MRL dimensions and independently L2-normalizes before float16 storage. The component pins
-`source_dimension=4096`, `dimension=1024` and
-`projection=mrl_prefix_then_l2_normalize`.
+The authoritative input is the 1,218,635-row EVA cache: 122 contiguous 4096-dimensional float16
+shards, sealed source manifest SHA
+`a02a23655fe8e5cc6b08afde35e93898ff94c62b88bbf7522e09f2c15378715c` and source-inventory SHA
+`f762cc4d676e16aa04789e1573713ef30d66e72f3a7f96c5bcd7e7e6133a2adb`. Its ordered 15-field
+document includes the complete job content. `scripts/materialize_runtime_components.py` validates
+every source inventory byte, row boundary, job order and shard SHA, then derives serving shards by
+taking the first 1024 dimensions, normalizing in float32 and sealing as float16. The derived
+component records both source and derived per-shard SHA-256 values. Source bytes are never mutated.
 
-Each completed shard has a SHA/size/source-job-slice sidecar. A restarted build validates and
-reuses only sealed shards, deletes only an incomplete shard temporary file, and atomically writes
-the final build/component manifests last.
+`scripts/whole_embedding_pipeline.py` remains an optional, isolated full-JD-v2 rebuild experiment.
+It is not called by the production reproduction command and its output cannot replace the sealed
+incumbent without a separate approval and manifest-contract change.
 
 ```bash
 TOKENIZER_SHA256=$(sha256sum \

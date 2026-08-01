@@ -23,11 +23,15 @@ from work_retrieval_core.adapters import (
     lexical_tokens,
     load_job_ids,
 )
-from work_retrieval_core.manifest import TemporalTantivy, WholeEmbedding
+from work_retrieval_core.manifest import (
+    WHOLE_DOCUMENT_FIELDS,
+    WHOLE_DOCUMENT_POLICY_VERSION,
+    WHOLE_DOCUMENT_TEMPLATE_SHA256,
+    TemporalTantivy,
+    WholeEmbedding,
+)
 from work_retrieval_core.serialization import (
-    DOCUMENT_POLICY_VERSION,
     FULL_JOB_FIELDS,
-    document_template_sha256,
     serialize_full_job,
 )
 
@@ -357,15 +361,18 @@ def test_sagemaker_factory_reads_back_promoted_model_identity(
         )
 
 
-def test_whole_layout_requires_new_full_jd_build_lineage(tmp_path: Path) -> None:
-    component_path = "embeddings/qwen3-embedding-8b/whole/manifest.json"
-    build_path = "embeddings/qwen3-embedding-8b/whole/build-manifest.json"
-    job_ids_path = "embeddings/qwen3-embedding-8b/whole/job-ids.json"
-    vectors_path = "embeddings/qwen3-embedding-8b/whole/vectors.npy"
+def test_whole_layout_requires_sealed_source_lineage(tmp_path: Path) -> None:
+    prefix = "embeddings/qwen3-embedding-8b-clean-v1-mrl1024"
+    component_path = f"{prefix}/manifest.json"
+    source_manifest_path = f"{prefix}/source-manifest.json"
+    source_inventory_path = f"{prefix}/source-inventory.json"
+    job_ids_path = f"{prefix}/job-ids.json"
+    vectors_path = f"{prefix}/vectors.npy"
     manifest = RuntimeManifest(
         (
             (component_path, Artifact("embedding", "b" * 64, 1)),
-            (build_path, Artifact("evidence", "c" * 64, 1)),
+            (source_manifest_path, Artifact("evidence", "c" * 64, 1)),
+            (source_inventory_path, Artifact("evidence", "f" * 64, 1)),
             (job_ids_path, Artifact("embedding", "d" * 64, 1)),
             (vectors_path, Artifact("embedding", "e" * 64, 1)),
         ),
@@ -387,12 +394,14 @@ def test_whole_layout_requires_new_full_jd_build_lineage(tmp_path: Path) -> None
         "dataset_sha256": HEX,
         "jobs_sha256": HEX,
         "job_row_order_sha256": HEX,
-        "document_policy_version": DOCUMENT_POLICY_VERSION,
-        "document_template_sha256": document_template_sha256(),
-        "document_fields": [label for label, _field in FULL_JOB_FIELDS],
+        "document_policy_version": WHOLE_DOCUMENT_POLICY_VERSION,
+        "document_template_sha256": WHOLE_DOCUMENT_TEMPLATE_SHA256,
+        "document_fields": list(WHOLE_DOCUMENT_FIELDS),
         "query_prompt": adapters.QUERY_PROMPT,
-        "build_manifest_path": build_path,
-        "build_manifest_sha256": "c" * 64,
+        "source_manifest_path": source_manifest_path,
+        "source_manifest_sha256": "c" * 64,
+        "source_inventory_path": source_inventory_path,
+        "source_inventory_sha256": "f" * 64,
         "job_ids_path": job_ids_path,
         "shards": [
             {
@@ -401,6 +410,8 @@ def test_whole_layout_requires_new_full_jd_build_lineage(tmp_path: Path) -> None
                 "row_end": 3,
                 "rows": 3,
                 "dimension": 1024,
+                "vectors_sha256": "e" * 64,
+                "source_vectors_sha256": "1" * 64,
             }
         ],
     }
@@ -409,9 +420,9 @@ def test_whole_layout_requires_new_full_jd_build_lineage(tmp_path: Path) -> None
 
     assert WholeEmbeddingLayout.from_path(path, manifest).job_ids_path == job_ids_path
 
-    component["build_manifest_sha256"] = "f" * 64
+    component["source_manifest_sha256"] = "0" * 64
     path.write_text(json.dumps(component), encoding="utf-8")
-    with pytest.raises(RuntimeError, match="build manifest"):
+    with pytest.raises(RuntimeError, match="source manifest"):
         WholeEmbeddingLayout.from_path(path, manifest)
 
 

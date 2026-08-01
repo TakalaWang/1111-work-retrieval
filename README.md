@@ -13,8 +13,8 @@
   `work-retrieval-qwen3-reranker-8b` 均為 `InService`。
 - repository source 已包含 fail-closed search-core v2；目前 public deployment 是否仍為舊 deterministic
   runtime，必須以實際 ECS image digest 與 public audit header 重新確認，不能由 source 推論。
-- Embedding／reranker endpoint 已上線不代表它們已整合成正式 `SearchEngine`，也不代表任何 retrieval
-  品質指標已發布。
+- Embedding／reranker endpoint 已上線不代表對應 challenger 已通過 promotion，也不代表任何 retrieval
+  品質指標已發布；正式 runtime 仍依 manifest 開關與 live readback 判定。
 
 以上是 2026-08-01 的部署 readback。進行操作或宣稱目前線上狀態前，仍應重新讀取 AWS stack、endpoint、
 Git commit 與 public smoke 結果；各層狀態必須分別確認。
@@ -152,32 +152,35 @@ Runtime v2 promotion 只接受一份已固定 source manifest SHA、selected inv
 manifest SHA 與 challenger promotion evidence 的 release spec。Dry-run 會執行完整 contract 與 component
 manifest 驗證，但不寫入 AWS：
 
-先將 pinned EVA build artifacts 轉成 core 會直接解析的 runtime layout；這一步會合併 global
-`job-ids.json`、建立 taxonomy、保留原始 `a02a…` build manifest provenance，並產生 source manifest
-與 release spec。預設 hardlink，跨檔案系統時須明確指定 `--link-mode copy`：
+正式路徑重用 sealed EVA whole-job cache，不重新呼叫 embedding model。Materializer 驗證 source manifest、
+source inventory、122 個 4096d shards 與 global job order，然後只衍生 first-1024 + float32 L2 normalize +
+float16 serving shards；source bytes 永不覆寫。Tantivy 必須是已核准的 temporal-v2 build，query correction
+預設關閉，只有帶 organizer 正向 NDCG@10 attestation 才可啟用。
+
+一鍵、離線、無 AWS 寫入的 materialize + promotion dry-run：
 
 ```bash
-uv run python scripts/materialize_runtime_components.py \
-  --whole-build-root artifacts/experiments/qwen3-8b/full \
-  --tantivy-build-root artifacts/experiments/tantivy-bm25-temporal-v1 \
-  --city-taxonomy-csv dataset/城市對照表.csv \
-  --duty-taxonomy-csv dataset/職務對照表.csv \
-  --output-root artifacts/runtime-source \
-  --source-manifest-key one111-search/runtime-source/<immutable-build-id>/manifest.json
+scripts/reproduce_runtime_release.sh \
+  artifacts/experiments/qwen3-8b/full \
+  artifacts/evidence/sealed-whole-source-inventory.json \
+  artifacts/experiments/tantivy-bm25-temporal-v2 \
+  artifacts/runtime-source \
+  one111-search/runtime-source/<immutable-build-id>/manifest.json \
+  <approved-tantivy-component-sha256> \
+  <approved-tantivy-build-sha256> \
+  <approved-tantivy-index-sha256>
 ```
 
-```bash
-uv run python scripts/promote_runtime_artifacts.py \
-  --release-spec artifacts/runtime-source/runtime-release-spec.json
-```
-
-如要以本機 fixture／下載後的 immutable bundle 離線驗證，可額外指定：
+`output-root` 必須不存在，避免混入舊 artifact。Wrapper 只產生 immutable local bundle 並執行完整 dry-run；
+不會上傳 S3、切換 runtime 或重算 embedding。若只重跑 promotion validation：
 
 ```bash
 uv run python scripts/promote_runtime_artifacts.py \
   --release-spec artifacts/runtime-source/runtime-release-spec.json \
   --source-manifest-file artifacts/runtime-source/manifest.json \
-  --source-root artifacts/runtime-source
+  --source-root artifacts/runtime-source \
+  --approved-tantivy-build-sha256 <approved-tantivy-build-sha256> \
+  --approved-tantivy-index-sha256 <approved-tantivy-index-sha256>
 ```
 
 只有 dry-run 完整通過後，才使用已登入的 `competition` profile 在 `us-west-2` 明確發布：
@@ -185,6 +188,8 @@ uv run python scripts/promote_runtime_artifacts.py \
 ```bash
 uv run python scripts/promote_runtime_artifacts.py \
   --release-spec artifacts/runtime-source/runtime-release-spec.json \
+  --approved-tantivy-build-sha256 <approved-tantivy-build-sha256> \
+  --approved-tantivy-index-sha256 <approved-tantivy-index-sha256> \
   --execute
 ```
 
@@ -215,8 +220,8 @@ Importer 與 promotion script 都固定 account、region、來源 identity 與�
 
 ## Benchmark 重現
 
-目前沒有可發布的 retrieval benchmark，因為正式 `SearchEngine`、versioned evaluation queries／qrels 與
-單一 committed benchmark runner 尚未齊備。Repository tests、migration checks、contract checks、CDK
+目前沒有可發布的 retrieval benchmark，因為 versioned evaluation queries／qrels 與單一 committed
+benchmark runner 尚未齊備。Repository tests、migration checks、contract checks、CDK
 synth 與 endpoint smoke 都是 acceptance evidence，不是 Recall、MRR、nDCG 或 latency benchmark。
 
 可重現的 acceptance commands 與未來 benchmark 所需的 artifact、provenance、metrics 見

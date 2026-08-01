@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import ctypes
 import errno
 import hashlib
@@ -13,20 +12,64 @@ import os
 import shutil
 import sys
 import tempfile
-import unicodedata
 from collections.abc import Mapping, Sequence
-from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import cast
 
 import numpy as np
 import promote_runtime_artifacts as contract
+from work_retrieval_core.adapters import CorpusQueryCompiler
 
-WHOLE_DESTINATION = Path("runtime/embeddings/qwen3-embedding-8b/whole")
-TANTIVY_DESTINATION = Path("runtime/indexes/tantivy-bm25-temporal-v1")
-PROVENANCE_DESTINATION = Path(contract.WHOLE_BUILD_PROVENANCE_SOURCE_PATH)
+WHOLE_DESTINATION = Path("runtime") / contract.WHOLE_RUNTIME_PREFIX
+TANTIVY_DESTINATION = Path("runtime") / contract.TANTIVY_RUNTIME_PREFIX
+PROVENANCE_DESTINATION = Path(contract.WHOLE_SOURCE_MANIFEST_SOURCE_PATH)
+SOURCE_INVENTORY_DESTINATION = Path(contract.WHOLE_SOURCE_INVENTORY_SOURCE_PATH)
 TANTIVY_PROVENANCE_DESTINATION = Path(contract.TANTIVY_BUILD_PROVENANCE_SOURCE_PATH)
 REPORT_DESTINATION = Path("runtime") / contract.MATERIALIZATION_REPORT_PATH
+SOURCE_CACHE_INVENTORY_PREFIX = "artifacts/experiments/qwen3-8b/full/"
+TANTIVY_COMPONENT_KEYS = {
+    "schema_version",
+    "complete",
+    "engine",
+    "jobs_sha256",
+    "job_row_order_sha256",
+    "index_sha256",
+    "index_directory",
+    "index_files",
+    "taxonomy_path",
+    "job_ids_path",
+    "query_corrections",
+    "build_manifest_path",
+    "build_manifest_sha256",
+    "schema_fields",
+    "field_boosts",
+    "lexical_policy_version",
+    "lexical_policy_sha256",
+    "tokenizers",
+    "source_fields",
+    "filter_semantics",
+    "updated_at_field",
+    "temporal_filter_semantics",
+}
+TANTIVY_BUILD_KEYS = {
+    "schema_version",
+    "complete",
+    "builder",
+    "engine",
+    "dataset_sha256",
+    "jobs_sha256",
+    "job_row_order_sha256",
+    "rows",
+    "index_sha256",
+    "index_tree",
+    "taxonomy_sha256",
+    "query_corrections",
+    "lexical_policy_version",
+    "lexical_policy_sha256",
+    "tokenizers",
+    "source_fields",
+    "source_csv_fields",
+}
 
 
 def _sha256(path: Path) -> str:
@@ -37,17 +80,25 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _tree_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
+def _tree(path: Path) -> list[dict[str, object]]:
+    values: list[dict[str, object]] = []
     for child in sorted(candidate for candidate in path.rglob("*") if candidate.is_file()):
         if child.is_symlink():
             raise RuntimeError("Tantivy source index contains a symbolic link")
-        digest.update(child.relative_to(path).as_posix().encode())
-        digest.update(b"\0")
-        with child.open("rb") as source:
-            for chunk in iter(lambda: source.read(8 * 1024 * 1024), b""):
-                digest.update(chunk)
-    return digest.hexdigest()
+        values.append(
+            {
+                "path": child.relative_to(path).as_posix(),
+                "sha256": _sha256(child),
+                "size_bytes": child.stat().st_size,
+            }
+        )
+    if not values:
+        raise RuntimeError("Tantivy source index is empty")
+    return values
+
+
+def _tree_sha256(tree: object) -> str:
+    return contract._canonical_sha256(tree)
 
 
 def _read_object(path: Path, name: str) -> dict[str, object]:
@@ -77,6 +128,84 @@ def _copy_verified(source: Path, destination: Path, expected_sha256: str) -> Non
     if _sha256(destination) != expected_sha256:
         destination.unlink(missing_ok=True)
         raise RuntimeError(f"copied runtime artifact checksum differs: {destination}")
+
+
+def _component_source(root: Path, runtime_path: object, prefix: str, name: str) -> Path:
+    if not isinstance(runtime_path, str):
+        raise RuntimeError(f"{name} path must be a string")
+    marker = prefix.rstrip("/") + "/"
+    if not runtime_path.startswith(marker):
+        raise RuntimeError(f"{name} path differs from its component prefix")
+    suffix = PurePosixPath(runtime_path.removeprefix(marker))
+    if (
+        suffix.is_absolute()
+        or not suffix.parts
+        or any(part in {"", ".", ".."} for part in suffix.parts)
+    ):
+        raise RuntimeError(f"{name} path is unsafe")
+    candidate = root.joinpath(*suffix.parts)
+    if not candidate.resolve().is_relative_to(root.resolve()):
+        raise RuntimeError(f"{name} path escapes its component")
+    return candidate
+
+
+def _source_inventory(path: Path, whole_root: Path) -> dict[str, dict[str, object]]:
+    if _sha256(path) != contract.APPROVED_WHOLE_SOURCE_INVENTORY_SHA256:
+        raise RuntimeError("whole source inventory is not approved")
+    value = _read_object(path, "whole source inventory")
+    files = value.get("files")
+    if value.get("schema_version") != 3 or not isinstance(files, list):
+        raise RuntimeError("whole source inventory schema differs")
+    selected: dict[str, dict[str, object]] = {}
+    for raw in files:
+        if not isinstance(raw, dict) or set(raw) != {"path", "sha256", "size"}:
+            raise RuntimeError("whole source inventory entry differs")
+        source_path = raw.get("path")
+        sha256 = raw.get("sha256")
+        size = raw.get("size")
+        if not isinstance(source_path, str) or not source_path.startswith(
+            SOURCE_CACHE_INVENTORY_PREFIX
+        ):
+            continue
+        relative = source_path.removeprefix(SOURCE_CACHE_INVENTORY_PREFIX)
+        candidate = PurePosixPath(relative)
+        if (
+            not relative
+            or candidate.is_absolute()
+            or any(part in {"", ".", ".."} for part in candidate.parts)
+            or not isinstance(sha256, str)
+            or len(sha256) != 64
+            or type(size) is not int
+            or size < 0
+            or relative in selected
+        ):
+            raise RuntimeError("whole source inventory entry is unsafe")
+        local = whole_root.joinpath(*candidate.parts)
+        if (
+            not local.is_file()
+            or local.is_symlink()
+            or local.stat().st_size != size
+            or _sha256(local) != sha256
+        ):
+            raise RuntimeError(f"whole source cache file differs from inventory: {relative}")
+        selected[relative] = cast(dict[str, object], raw)
+    if (
+        len(selected) != contract.APPROVED_WHOLE_SOURCE_FILE_COUNT
+        or sum(cast(int, item["size"]) for item in selected.values())
+        != contract.APPROVED_WHOLE_SOURCE_BYTES
+    ):
+        raise RuntimeError("whole source cache inventory count or bytes differ")
+    local_files = {
+        candidate.relative_to(whole_root).as_posix()
+        for candidate in whole_root.rglob("*")
+        if candidate.is_file()
+    }
+    if local_files != set(selected):
+        raise RuntimeError("whole source cache files differ from the approved inventory")
+    manifest = selected.get("manifest.json")
+    if manifest is None or manifest.get("sha256") != contract.APPROVED_WHOLE_SOURCE_MANIFEST_SHA256:
+        raise RuntimeError("whole source cache inventory does not pin its manifest")
+    return selected
 
 
 def _project_mrl_prefix(
@@ -161,87 +290,6 @@ def _publish_exclusive(source: Path, destination: Path) -> None:
     raise OSError(error_number, os.strerror(error_number), destination)
 
 
-def _terms_csv(path: Path) -> dict[str, list[str]]:
-    result: dict[str, list[str]] = {}
-    with path.open(encoding="utf-8-sig", newline="") as source:
-        rows = csv.DictReader(source)
-        required = {"CodeNo", "CodeNameA", "CodeNameB", "CodeNameC"}
-        if rows.fieldnames is None or not required.issubset(rows.fieldnames):
-            raise RuntimeError(f"taxonomy CSV has incompatible columns: {path}")
-        for row in rows:
-            code = row["CodeNo"].strip()
-            if not code.isascii() or not code.isdecimal() or code in result:
-                raise RuntimeError(f"taxonomy CSV has invalid or repeated code: {code!r}")
-            terms = list(
-                dict.fromkeys(
-                    canonical
-                    for name in (row["CodeNameA"], row["CodeNameB"], row["CodeNameC"])
-                    if (
-                        canonical := " ".join(
-                            unicodedata.normalize("NFKC", name).casefold().split()
-                        )
-                    )
-                )
-            )
-            if not terms:
-                raise RuntimeError(f"taxonomy CSV code has no terms: {code}")
-            result[code] = terms
-    if not result:
-        raise RuntimeError(f"taxonomy CSV is empty: {path}")
-    return result
-
-
-def _validate_query_corrections(path: Path) -> None:
-    value = _read_object(path, "query corrections")
-    if set(value) != {
-        "schema_version",
-        "source_policy",
-        "train_cutoff_exclusive",
-        "max_source_timestamp",
-        "corrections",
-    }:
-        raise RuntimeError("query corrections schema differs")
-    if value["schema_version"] != 1 or value["source_policy"] != "train_jd_only":
-        raise RuntimeError("query corrections are not train-JD corpus safe")
-    cutoff = value.get("train_cutoff_exclusive")
-    maximum = value.get("max_source_timestamp")
-    if not isinstance(cutoff, str) or not isinstance(maximum, str):
-        raise RuntimeError("query corrections timestamps are missing")
-    try:
-        parsed_cutoff = datetime.fromisoformat(cutoff.replace("Z", "+00:00"))
-        parsed_maximum = datetime.fromisoformat(maximum.replace("Z", "+00:00"))
-    except ValueError as error:
-        raise RuntimeError("query corrections timestamps are invalid") from error
-    if (
-        parsed_cutoff.tzinfo is None
-        or parsed_maximum.tzinfo is None
-        or parsed_maximum >= parsed_cutoff
-    ):
-        raise RuntimeError("query corrections include post-cutoff source data")
-    corrections = value.get("corrections")
-    if not isinstance(corrections, dict):
-        raise RuntimeError("query corrections mapping differs")
-    for source, target in corrections.items():
-        normalized_source = (
-            " ".join(unicodedata.normalize("NFKC", source).casefold().split())
-            if isinstance(source, str)
-            else ""
-        )
-        normalized_target = (
-            " ".join(unicodedata.normalize("NFKC", target).casefold().split())
-            if isinstance(target, str)
-            else ""
-        )
-        if (
-            not normalized_source
-            or not normalized_target
-            or normalized_source != source
-            or normalized_target != target
-            or source == target
-        ):
-            raise RuntimeError("query corrections contain a non-canonical rule")
-
-
 def _artifact_inventory(root: Path, excluded: set[Path]) -> list[dict[str, object]]:
     files: list[dict[str, object]] = []
     for path in sorted(candidate for candidate in root.rglob("*") if candidate.is_file()):
@@ -284,38 +332,27 @@ def _selected_inventory(
 def materialize(
     *,
     whole_build_root: Path,
+    whole_source_inventory: Path,
     tantivy_build_root: Path,
-    city_taxonomy_csv: Path,
-    duty_taxonomy_csv: Path,
-    query_corrections_json: Path,
     output_root: Path,
     source_manifest_key: str,
-    approved_whole_build_sha256: str,
+    approved_tantivy_component_sha256: str,
     approved_tantivy_build_sha256: str,
     approved_tantivy_index_sha256: str,
-    approved_query_corrections_sha256: str,
-    approved_city_taxonomy_sha256: str = contract.APPROVED_CITY_TAXONOMY_SHA256,
-    approved_duty_taxonomy_sha256: str = contract.APPROVED_DUTY_TAXONOMY_SHA256,
 ) -> None:
     if output_root.exists():
         raise RuntimeError("materialization output already exists")
     if not source_manifest_key.endswith("/manifest.json"):
         raise RuntimeError("source manifest key must end with /manifest.json")
     contract._validate_source_path(source_manifest_key)
-    if _sha256(city_taxonomy_csv) != approved_city_taxonomy_sha256:
-        raise RuntimeError("city taxonomy is not the approved city taxonomy")
-    if _sha256(duty_taxonomy_csv) != approved_duty_taxonomy_sha256:
-        raise RuntimeError("duty taxonomy is not the approved duty taxonomy")
-    if _sha256(query_corrections_json) != approved_query_corrections_sha256:
-        raise RuntimeError("query corrections are not the approved train-JD corrections")
-    _validate_query_corrections(query_corrections_json)
+    _source_inventory(whole_source_inventory, whole_build_root)
     output_root.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{output_root.name}.", dir=output_root.parent))
     try:
         whole_source_manifest_path = whole_build_root / "manifest.json"
-        if _sha256(whole_source_manifest_path) != approved_whole_build_sha256:
-            raise RuntimeError("whole build manifest is not the approved EVA artifact")
-        whole = _read_object(whole_source_manifest_path, "whole build manifest")
+        if _sha256(whole_source_manifest_path) != contract.APPROVED_WHOLE_SOURCE_MANIFEST_SHA256:
+            raise RuntimeError("whole source manifest is not the approved sealed cache")
+        whole = _read_object(whole_source_manifest_path, "whole source manifest")
         expected_whole = {
             "complete": True,
             "model": contract.APPROVED_MODEL,
@@ -325,12 +362,19 @@ def materialize(
             "document_policy_version": contract.APPROVED_DOCUMENT_POLICY_VERSION,
             "document_template_sha256": contract.APPROVED_DOCUMENT_TEMPLATE_SHA256,
             "document_fields": contract.APPROVED_DOCUMENT_FIELDS,
+            "dataset_sha256": contract.APPROVED_JOBS_DATASET_SHA256,
+            "rows": contract.APPROVED_WHOLE_SOURCE_ROWS,
         }
-        contract._require_equal("whole build", expected_whole, whole)
+        contract._require_equal("whole source", expected_whole, whole)
         rows = whole.get("rows")
         shards = whole.get("shards")
-        if type(rows) is not int or rows < 1 or not isinstance(shards, list) or not shards:
-            raise RuntimeError("whole build row/shard contract differs")
+        if (
+            type(rows) is not int
+            or rows < 1
+            or not isinstance(shards, list)
+            or len(shards) != contract.APPROVED_WHOLE_SOURCE_SHARDS
+        ):
+            raise RuntimeError("whole source row/shard contract differs")
 
         whole_destination = temporary / WHOLE_DESTINATION
         job_ids: list[str] = []
@@ -340,16 +384,16 @@ def materialize(
         row_start = 0
         for expected_index, raw in enumerate(shards):
             if not isinstance(raw, dict) or raw.get("index") != expected_index:
-                raise RuntimeError("whole build shards are not contiguous")
+                raise RuntimeError("whole source shards are not contiguous")
             shard_rows = raw.get("rows")
             if type(shard_rows) is not int or shard_rows < 1 or raw.get("dimension") != 4096:
-                raise RuntimeError("whole build shard shape differs")
+                raise RuntimeError("whole source shard shape differs")
             ids_source = whole_build_root / f"job-ids-{expected_index:05d}.json"
             vectors_source = whole_build_root / f"embeddings-{expected_index:05d}.f16.npy"
             if _sha256(ids_source) != raw.get("job_ids_file_sha256") or _sha256(
                 vectors_source
             ) != raw.get("embedding_sha256"):
-                raise RuntimeError(f"whole build shard checksum differs: {expected_index}")
+                raise RuntimeError(f"whole source shard checksum differs: {expected_index}")
             raw_ids = json.loads(ids_source.read_text(encoding="utf-8"))
             if (
                 not isinstance(raw_ids, list)
@@ -361,10 +405,10 @@ def materialize(
                 or hashlib.sha256("\n".join(raw_ids).encode()).hexdigest()
                 != raw.get("job_ids_sha256")
             ):
-                raise RuntimeError(f"whole build shard job IDs differ: {expected_index}")
+                raise RuntimeError(f"whole source shard job IDs differ: {expected_index}")
             repeated = seen_ids.intersection(raw_ids)
             if repeated:
-                raise RuntimeError("whole build contains repeated job IDs")
+                raise RuntimeError("whole source contains repeated job IDs")
             seen_ids.update(raw_ids)
             job_ids.extend(raw_ids)
             for job_id in raw_ids:
@@ -377,9 +421,12 @@ def materialize(
                 cast(str, raw["embedding_sha256"]),
                 shard_rows,
             )
+            derived_sha256 = _sha256(temporary / vector_path)
             serving_shards.append(
                 {
                     "vectors_path": vector_path.removeprefix("runtime/"),
+                    "vectors_sha256": derived_sha256,
+                    "source_vectors_sha256": raw["embedding_sha256"],
                     "row_start": row_start,
                     "row_end": row_start + shard_rows,
                     "rows": shard_rows,
@@ -392,7 +439,7 @@ def materialize(
             or row_order.hexdigest() != whole.get("job_row_order_sha256")
             or len(job_ids) != len(seen_ids)
         ):
-            raise RuntimeError("whole build global job row order differs")
+            raise RuntimeError("whole source global job row order differs")
 
         job_ids_runtime_path = f"{WHOLE_DESTINATION.as_posix()}/job-ids.json".removeprefix(
             "runtime/"
@@ -401,6 +448,7 @@ def materialize(
             json.dumps(job_ids, ensure_ascii=True, separators=(",", ":")) + "\n",
             encoding="ascii",
         )
+        derived_jobs_sha256 = _sha256(whole_destination / "job-ids.json")
         whole_component = {
             "schema_version": 1,
             "complete": True,
@@ -413,127 +461,207 @@ def materialize(
             "normalized": True,
             "rows": rows,
             "dataset_sha256": whole["dataset_sha256"],
-            "jobs_sha256": whole["jobs_sha256"],
+            "jobs_sha256": derived_jobs_sha256,
             "job_row_order_sha256": whole["job_row_order_sha256"],
             "document_policy_version": contract.APPROVED_DOCUMENT_POLICY_VERSION,
             "document_template_sha256": contract.APPROVED_DOCUMENT_TEMPLATE_SHA256,
             "document_fields": contract.APPROVED_DOCUMENT_FIELDS,
             "query_prompt": contract.APPROVED_QUERY_PROMPT,
-            "build_manifest_path": contract.APPROVED_WHOLE_BUILD_PROVENANCE_PATH,
-            "build_manifest_sha256": approved_whole_build_sha256,
+            "source_manifest_path": contract.APPROVED_WHOLE_SOURCE_MANIFEST_PATH,
+            "source_manifest_sha256": contract.APPROVED_WHOLE_SOURCE_MANIFEST_SHA256,
+            "source_inventory_path": contract.APPROVED_WHOLE_SOURCE_INVENTORY_PATH,
+            "source_inventory_sha256": contract.APPROVED_WHOLE_SOURCE_INVENTORY_SHA256,
             "job_ids_path": job_ids_runtime_path,
             "shards": serving_shards,
         }
         whole_payload = _write_json(whole_destination / "manifest.json", whole_component)
 
         tantivy_source_manifest_path = tantivy_build_root / "manifest.json"
-        if _sha256(tantivy_source_manifest_path) != approved_tantivy_build_sha256:
-            raise RuntimeError("Tantivy build manifest is not the approved Tantivy build manifest")
-        tantivy_source_manifest = _read_object(
-            tantivy_source_manifest_path, "Tantivy build manifest"
-        )
+        if _sha256(tantivy_source_manifest_path) != approved_tantivy_component_sha256:
+            raise RuntimeError("Tantivy component manifest is not approved")
+        tantivy_component = _read_object(tantivy_source_manifest_path, "Tantivy component manifest")
+        if set(tantivy_component) != TANTIVY_COMPONENT_KEYS:
+            raise RuntimeError("Tantivy component manifest schema differs")
         contract._require_equal(
-            "Tantivy build",
+            "Tantivy component",
             {
+                "schema_version": 1,
                 "complete": True,
                 "engine": contract.APPROVED_TANTIVY_ENGINE,
-                "jobs_sha256": whole["jobs_sha256"],
+                "jobs_sha256": derived_jobs_sha256,
                 "job_row_order_sha256": whole["job_row_order_sha256"],
                 "updated_at_field": "updated_at_epoch_ms",
                 "filter_semantics": contract.TANTIVY_FILTER_SEMANTICS,
-                "fields": contract.APPROVED_TANTIVY_FIELD_BOOSTS,
-                "document_policy_version": contract.APPROVED_DOCUMENT_POLICY_VERSION,
+                "schema_fields": contract.APPROVED_TANTIVY_SCHEMA_FIELDS,
+                "field_boosts": contract.APPROVED_TANTIVY_FIELD_BOOSTS,
+                "lexical_policy_version": contract.APPROVED_LEXICAL_POLICY_VERSION,
+                "lexical_policy_sha256": contract.APPROVED_LEXICAL_POLICY_SHA256,
+                "tokenizers": contract.APPROVED_TANTIVY_TOKENIZERS,
+                "source_fields": contract.APPROVED_TANTIVY_SOURCE_FIELDS,
+                "temporal_filter_semantics": contract.TEMPORAL_FILTER_SEMANTICS,
+            },
+            tantivy_component,
+        )
+        tantivy_build_manifest_path = _component_source(
+            tantivy_build_root,
+            tantivy_component["build_manifest_path"],
+            contract.TANTIVY_RUNTIME_PREFIX,
+            "Tantivy build manifest",
+        )
+        if (
+            _sha256(tantivy_build_manifest_path) != approved_tantivy_build_sha256
+            or tantivy_component["build_manifest_sha256"] != approved_tantivy_build_sha256
+        ):
+            raise RuntimeError("Tantivy build manifest is not approved")
+        tantivy_build = _read_object(tantivy_build_manifest_path, "Tantivy build manifest")
+        if set(tantivy_build) != TANTIVY_BUILD_KEYS:
+            raise RuntimeError("Tantivy build manifest schema differs")
+        contract._require_equal(
+            "Tantivy build",
+            {
+                "schema_version": 1,
+                "complete": True,
+                "builder": "tantivy_index_pipeline.py",
+                "engine": contract.APPROVED_TANTIVY_ENGINE,
+                "dataset_sha256": whole["dataset_sha256"],
+                "jobs_sha256": derived_jobs_sha256,
+                "job_row_order_sha256": whole["job_row_order_sha256"],
+                "rows": rows,
+                "index_sha256": approved_tantivy_index_sha256,
+                "query_corrections": tantivy_component["query_corrections"],
                 "lexical_policy_version": contract.APPROVED_LEXICAL_POLICY_VERSION,
                 "lexical_policy_sha256": contract.APPROVED_LEXICAL_POLICY_SHA256,
                 "tokenizers": contract.APPROVED_TANTIVY_TOKENIZERS,
                 "source_fields": contract.APPROVED_TANTIVY_SOURCE_FIELDS,
             },
-            tantivy_source_manifest,
+            tantivy_build,
         )
-        source_index = tantivy_build_root / "index"
+        source_index = _component_source(
+            tantivy_build_root,
+            tantivy_component["index_directory"],
+            contract.TANTIVY_RUNTIME_PREFIX,
+            "Tantivy index",
+        )
+        source_tree = _tree(source_index)
+        expected_index_files = [
+            f"{contract.TANTIVY_RUNTIME_PREFIX}/index/{item['path']}" for item in source_tree
+        ]
         if (
-            tantivy_source_manifest.get("index_sha256") != approved_tantivy_index_sha256
-            or _tree_sha256(source_index) != approved_tantivy_index_sha256
+            tantivy_component.get("index_sha256") != approved_tantivy_index_sha256
+            or _tree_sha256(source_tree) != approved_tantivy_index_sha256
+            or tantivy_component.get("index_files") != expected_index_files
+            or tantivy_build.get("index_tree") != source_tree
         ):
             raise RuntimeError("Tantivy build index checksum differs")
         tantivy_destination = temporary / TANTIVY_DESTINATION
-        index_files: list[str] = []
-        for source in sorted(
-            candidate for candidate in source_index.rglob("*") if candidate.is_file()
-        ):
-            relative = source.relative_to(source_index)
-            destination = tantivy_destination / "index" / relative
-            _copy_verified(source, destination, _sha256(source))
-            index_files.append(
-                f"{TANTIVY_DESTINATION.as_posix()}/index/{relative.as_posix()}".removeprefix(
-                    "runtime/"
-                )
+        for item in source_tree:
+            relative = cast(str, item["path"])
+            _copy_verified(
+                source_index / relative,
+                tantivy_destination / "index" / relative,
+                cast(str, item["sha256"]),
             )
-        if not index_files:
-            raise RuntimeError("Tantivy build index is empty")
-        if _tree_sha256(tantivy_destination / "index") != approved_tantivy_index_sha256:
+        if _tree_sha256(_tree(tantivy_destination / "index")) != approved_tantivy_index_sha256:
             raise RuntimeError("copied Tantivy index checksum differs")
-        taxonomy_runtime_path = (
-            f"{TANTIVY_DESTINATION.as_posix()}/filter-taxonomy.json".removeprefix("runtime/")
+        taxonomy_source = _component_source(
+            tantivy_build_root,
+            tantivy_component["taxonomy_path"],
+            contract.TANTIVY_RUNTIME_PREFIX,
+            "Tantivy taxonomy",
         )
-        tantivy_job_ids_runtime_path = (
-            f"{TANTIVY_DESTINATION.as_posix()}/job-ids.json".removeprefix("runtime/")
-        )
-        query_corrections_runtime_path = (
-            f"{TANTIVY_DESTINATION.as_posix()}/query-corrections.json".removeprefix("runtime/")
+        if _sha256(taxonomy_source) != tantivy_build.get("taxonomy_sha256"):
+            raise RuntimeError("Tantivy taxonomy differs from build lineage")
+        job_ids_source = _component_source(
+            tantivy_build_root,
+            tantivy_component["job_ids_path"],
+            contract.TANTIVY_RUNTIME_PREFIX,
+            "Tantivy job IDs",
         )
         whole_job_ids_path = whole_destination / "job-ids.json"
+        if (
+            _sha256(job_ids_source) != derived_jobs_sha256
+            or job_ids_source.read_bytes() != whole_job_ids_path.read_bytes()
+        ):
+            raise RuntimeError("Tantivy job IDs differ from sealed whole row order")
         _copy_verified(
-            whole_job_ids_path,
-            temporary / "runtime" / tantivy_job_ids_runtime_path,
-            _sha256(whole_job_ids_path),
+            taxonomy_source,
+            temporary / "runtime" / cast(str, tantivy_component["taxonomy_path"]),
+            _sha256(taxonomy_source),
         )
         _copy_verified(
-            query_corrections_json,
-            temporary / "runtime" / query_corrections_runtime_path,
-            approved_query_corrections_sha256,
+            job_ids_source,
+            temporary / "runtime" / cast(str, tantivy_component["job_ids_path"]),
+            derived_jobs_sha256,
         )
-        _write_json(
-            tantivy_destination / "filter-taxonomy.json",
-            {
-                "schema_version": 1,
-                "location_code_to_terms": _terms_csv(city_taxonomy_csv),
-                "duty_code_to_terms": _terms_csv(duty_taxonomy_csv),
-            },
+        corrections = tantivy_component["query_corrections"]
+        if corrections == {"enabled": False}:
+            pass
+        elif isinstance(corrections, dict):
+            expected_correction_keys = {
+                "enabled",
+                "artifact_path",
+                "artifact_sha256",
+                "promotion_attestation_path",
+                "promotion_attestation_sha256",
+            }
+            if (
+                set(corrections) != expected_correction_keys
+                or corrections.get("enabled") is not True
+            ):
+                raise RuntimeError("enabled Tantivy query correction contract differs")
+            correction_source = _component_source(
+                tantivy_build_root,
+                corrections["artifact_path"],
+                contract.TANTIVY_RUNTIME_PREFIX,
+                "query correction candidate",
+            )
+            attestation_source = _component_source(
+                tantivy_build_root,
+                corrections["promotion_attestation_path"],
+                contract.TANTIVY_RUNTIME_PREFIX,
+                "query correction attestation",
+            )
+            if (
+                _sha256(correction_source) != corrections["artifact_sha256"]
+                or _sha256(attestation_source) != corrections["promotion_attestation_sha256"]
+            ):
+                raise RuntimeError("enabled Tantivy query correction bytes differ")
+            CorpusQueryCompiler.from_promoted_paths(correction_source, attestation_source)
+            _copy_verified(
+                correction_source,
+                temporary / "runtime" / cast(str, corrections["artifact_path"]),
+                cast(str, corrections["artifact_sha256"]),
+            )
+            attestation_destination = (
+                Path(contract.TANTIVY_BUILD_PROVENANCE_SOURCE_PATH).parent
+                / PurePosixPath(cast(str, corrections["promotion_attestation_path"])).name
+            )
+            _copy_verified(
+                attestation_source,
+                temporary / attestation_destination,
+                cast(str, corrections["promotion_attestation_sha256"]),
+            )
+        else:
+            raise RuntimeError("Tantivy query corrections must be disabled or attested")
+        _copy_verified(
+            tantivy_source_manifest_path,
+            tantivy_destination / "manifest.json",
+            approved_tantivy_component_sha256,
         )
-        tantivy_component = {
-            "schema_version": 1,
-            "complete": True,
-            "engine": contract.APPROVED_TANTIVY_ENGINE,
-            "jobs_sha256": whole["jobs_sha256"],
-            "job_row_order_sha256": whole["job_row_order_sha256"],
-            "index_sha256": tantivy_source_manifest["index_sha256"],
-            "index_directory": f"{TANTIVY_DESTINATION.as_posix()}/index".removeprefix("runtime/"),
-            "index_files": index_files,
-            "taxonomy_path": taxonomy_runtime_path,
-            "job_ids_path": tantivy_job_ids_runtime_path,
-            "query_corrections_path": query_corrections_runtime_path,
-            "build_manifest_path": contract.APPROVED_TANTIVY_BUILD_PROVENANCE_PATH,
-            "build_manifest_sha256": approved_tantivy_build_sha256,
-            "schema_fields": contract.APPROVED_TANTIVY_SCHEMA_FIELDS,
-            "field_boosts": contract.APPROVED_TANTIVY_FIELD_BOOSTS,
-            "lexical_policy_version": contract.APPROVED_LEXICAL_POLICY_VERSION,
-            "lexical_policy_sha256": contract.APPROVED_LEXICAL_POLICY_SHA256,
-            "tokenizers": contract.APPROVED_TANTIVY_TOKENIZERS,
-            "source_fields": contract.APPROVED_TANTIVY_SOURCE_FIELDS,
-            "filter_semantics": contract.TANTIVY_FILTER_SEMANTICS,
-            "updated_at_field": "updated_at_epoch_ms",
-            "temporal_filter_semantics": contract.TEMPORAL_FILTER_SEMANTICS,
-        }
-        tantivy_payload = _write_json(tantivy_destination / "manifest.json", tantivy_component)
+        tantivy_payload = tantivy_source_manifest_path.read_bytes()
 
         _copy_verified(
             whole_source_manifest_path,
             temporary / PROVENANCE_DESTINATION,
-            approved_whole_build_sha256,
+            contract.APPROVED_WHOLE_SOURCE_MANIFEST_SHA256,
         )
         _copy_verified(
-            tantivy_source_manifest_path,
+            whole_source_inventory,
+            temporary / SOURCE_INVENTORY_DESTINATION,
+            contract.APPROVED_WHOLE_SOURCE_INVENTORY_SHA256,
+        )
+        _copy_verified(
+            tantivy_build_manifest_path,
             temporary / TANTIVY_PROVENANCE_DESTINATION,
             approved_tantivy_build_sha256,
         )
@@ -541,19 +669,19 @@ def materialize(
             temporary / REPORT_DESTINATION,
             {
                 "schema_version": 1,
-                "whole_build_manifest_sha256": approved_whole_build_sha256,
+                "whole_source_manifest_sha256": contract.APPROVED_WHOLE_SOURCE_MANIFEST_SHA256,
+                "whole_source_inventory_sha256": (contract.APPROVED_WHOLE_SOURCE_INVENTORY_SHA256),
                 "whole_runtime_manifest_sha256": hashlib.sha256(whole_payload).hexdigest(),
+                "projection": contract.APPROVED_WHOLE_PROJECTION,
                 "tantivy_build_manifest_sha256": approved_tantivy_build_sha256,
                 "tantivy_runtime_manifest_sha256": hashlib.sha256(tantivy_payload).hexdigest(),
                 "tantivy_index_sha256": approved_tantivy_index_sha256,
                 "dataset_sha256": whole["dataset_sha256"],
-                "jobs_sha256": whole["jobs_sha256"],
+                "jobs_sha256": derived_jobs_sha256,
                 "job_row_order_sha256": whole["job_row_order_sha256"],
                 "rows": rows,
                 "placement": "copy_sha256_verified",
-                "city_taxonomy_sha256": approved_city_taxonomy_sha256,
-                "duty_taxonomy_sha256": approved_duty_taxonomy_sha256,
-                "query_corrections_sha256": approved_query_corrections_sha256,
+                "query_corrections": corrections,
             },
         )
 
@@ -567,12 +695,12 @@ def materialize(
         selections = [
             {
                 "source_prefix": f"{WHOLE_DESTINATION.as_posix()}/",
-                "destination_prefix": "embeddings/qwen3-embedding-8b/whole/",
+                "destination_prefix": f"{contract.WHOLE_RUNTIME_PREFIX}/",
                 "kind": "embedding",
             },
             {
                 "source_prefix": f"{TANTIVY_DESTINATION.as_posix()}/",
-                "destination_prefix": "indexes/tantivy-bm25-temporal-v1/",
+                "destination_prefix": f"{contract.TANTIVY_RUNTIME_PREFIX}/",
                 "kind": "index",
             },
             {
@@ -581,13 +709,13 @@ def materialize(
                 "kind": "evidence",
             },
             {
-                "source_prefix": "provenance/qwen3-embedding-8b/",
-                "destination_prefix": "embeddings/qwen3-embedding-8b/whole/",
+                "source_prefix": f"{PROVENANCE_DESTINATION.parent.as_posix()}/",
+                "destination_prefix": f"{contract.WHOLE_RUNTIME_PREFIX}/",
                 "kind": "evidence",
             },
             {
-                "source_prefix": "provenance/tantivy-bm25-temporal-v1/",
-                "destination_prefix": "indexes/tantivy-bm25-temporal-v1/",
+                "source_prefix": f"{TANTIVY_PROVENANCE_DESTINATION.parent.as_posix()}/",
+                "destination_prefix": f"{contract.TANTIVY_RUNTIME_PREFIX}/",
                 "kind": "evidence",
             },
         ]
@@ -615,7 +743,7 @@ def materialize(
                 },
                 "incumbents": {
                     "whole_embedding": {
-                        "manifest_path": "embeddings/qwen3-embedding-8b/whole/manifest.json",
+                        "manifest_path": f"{contract.WHOLE_RUNTIME_PREFIX}/manifest.json",
                         "manifest_sha256": hashlib.sha256(whole_payload).hexdigest(),
                         "complete": True,
                         "model": contract.APPROVED_MODEL,
@@ -627,18 +755,18 @@ def materialize(
                         "normalized": True,
                         "rows": rows,
                         "dataset_sha256": whole["dataset_sha256"],
-                        "jobs_sha256": whole["jobs_sha256"],
+                        "jobs_sha256": derived_jobs_sha256,
                         "job_row_order_sha256": whole["job_row_order_sha256"],
                         "document_policy_version": contract.APPROVED_DOCUMENT_POLICY_VERSION,
                         "document_template_sha256": contract.APPROVED_DOCUMENT_TEMPLATE_SHA256,
                     },
                     "temporal_tantivy": {
-                        "manifest_path": "indexes/tantivy-bm25-temporal-v1/manifest.json",
+                        "manifest_path": f"{contract.TANTIVY_RUNTIME_PREFIX}/manifest.json",
                         "manifest_sha256": hashlib.sha256(tantivy_payload).hexdigest(),
                         "complete": True,
-                        "index_sha256": tantivy_source_manifest["index_sha256"],
+                        "index_sha256": tantivy_component["index_sha256"],
                         "engine": contract.APPROVED_TANTIVY_ENGINE,
-                        "jobs_sha256": whole["jobs_sha256"],
+                        "jobs_sha256": derived_jobs_sha256,
                         "job_row_order_sha256": whole["job_row_order_sha256"],
                         "updated_at_field": "updated_at_epoch_ms",
                         "hard_filters": True,
@@ -658,16 +786,13 @@ def materialize(
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--whole-build-root", type=Path, required=True)
+    parser.add_argument("--whole-source-inventory", type=Path, required=True)
     parser.add_argument("--tantivy-build-root", type=Path, required=True)
-    parser.add_argument("--city-taxonomy-csv", type=Path, required=True)
-    parser.add_argument("--duty-taxonomy-csv", type=Path, required=True)
-    parser.add_argument("--query-corrections-json", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--source-manifest-key", required=True)
-    parser.add_argument("--approved-whole-build-sha256", required=True)
+    parser.add_argument("--approved-tantivy-component-sha256", required=True)
     parser.add_argument("--approved-tantivy-build-sha256", required=True)
     parser.add_argument("--approved-tantivy-index-sha256", required=True)
-    parser.add_argument("--approved-query-corrections-sha256", required=True)
     return parser.parse_args(argv)
 
 
@@ -675,16 +800,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = _parse_args(argv)
     materialize(
         whole_build_root=args.whole_build_root,
+        whole_source_inventory=args.whole_source_inventory,
         tantivy_build_root=args.tantivy_build_root,
-        city_taxonomy_csv=args.city_taxonomy_csv,
-        duty_taxonomy_csv=args.duty_taxonomy_csv,
-        query_corrections_json=args.query_corrections_json,
         output_root=args.output_root,
         source_manifest_key=args.source_manifest_key,
-        approved_whole_build_sha256=args.approved_whole_build_sha256,
+        approved_tantivy_component_sha256=args.approved_tantivy_component_sha256,
         approved_tantivy_build_sha256=args.approved_tantivy_build_sha256,
         approved_tantivy_index_sha256=args.approved_tantivy_index_sha256,
-        approved_query_corrections_sha256=args.approved_query_corrections_sha256,
     )
     print(json.dumps({"complete": True, "output_root": str(args.output_root)}, sort_keys=True))
 

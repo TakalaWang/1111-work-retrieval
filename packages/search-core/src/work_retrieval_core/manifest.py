@@ -8,11 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from work_retrieval_core.serialization import (
-    DOCUMENT_POLICY_VERSION,
-    document_template_sha256,
-)
-
 ARTIFACT_KEY = re.compile(
     r"^(embeddings|models|indexes|graphs|rankers|evidence)/"
     r"(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+$"
@@ -24,6 +19,25 @@ MODEL_REVISION = "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"
 WHOLE_DIMENSION = 1024
 SOURCE_EMBEDDING_DIMENSION = 4096
 WHOLE_PROJECTION = "mrl_prefix_then_l2_normalize"
+WHOLE_DOCUMENT_POLICY_VERSION = "2026-07-24-clean-v1"
+WHOLE_DOCUMENT_TEMPLATE_SHA256 = "3275f93ade6c4f043084e36303d38b33443858546a80104840f0e2b9468d2abb"
+WHOLE_DOCUMENT_FIELDS = (
+    "職務名稱",
+    "職務小類",
+    "職務中類",
+    "職務大類",
+    "電腦技能資料",
+    "工作技能",
+    "專業證照",
+    "工作經驗需求",
+    "學歷需求",
+    "工作城市",
+    "產業小類",
+    "產業中類",
+    "產業大類",
+    "附加條件",
+    "職務內容",
+)
 CHALLENGERS = {
     "multiview_embedding",
     "skill_graph",
@@ -171,8 +185,8 @@ def _whole_embedding(value: object, artifacts: Mapping[str, Artifact]) -> WholeE
         "projection": WHOLE_PROJECTION,
         "dtype": "float16",
         "normalized": True,
-        "document_policy_version": DOCUMENT_POLICY_VERSION,
-        "document_template_sha256": document_template_sha256(),
+        "document_policy_version": WHOLE_DOCUMENT_POLICY_VERSION,
+        "document_template_sha256": WHOLE_DOCUMENT_TEMPLATE_SHA256,
     }
     _equal(raw, expected, "whole-Qwen incumbent")
     path, sha256 = _component_reference(raw, artifacts, "embedding")

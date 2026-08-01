@@ -26,7 +26,19 @@ flowchart TD
     M --> N["Top 10 + audit trace"]
 ```
 
-Tantivy BM25 是唯一已升版的 production Top-10 incumbent。BM25 component 預設明確關閉 query correction，
+Tantivy BM25 是唯一已升版的 production Top-10 incumbent。A0--A6 是 promotion 狀態，不是功能願望清單：
+
+| Stage | Production 狀態 | 依據與邊界 |
+| --- | --- | --- |
+| A0 | promoted | contract validation、180 天 eligible universe、location/duty hard filters |
+| A1 | promoted | full-JD BM25F；exact/all-term evidence；query correction 預設關閉 |
+| A2 | incumbent + shadow | sealed whole-Qwen cache 衍生 MRL1024 可用；multi-view 尚待消融 |
+| A3 | off | LTR 尚無足夠且可信的 labeled groups／IPS-DR 證據 |
+| A4 | shadow | reranker 尚未證明 Top-10 正向提升 |
+| A5 | off | Graph 目前消融負向且延遲較高；保留可重現 challenger |
+| A6 | partial | 只啟用 180 天 hard cutoff；freshness/rank guardrail 重排關閉 |
+
+BM25 component 預設明確關閉 query correction，
 因此可在沒有 LLM/Graph artifact 的情況下獨立建置、評估與服務；只有 train-only candidate 通過 organizer
 fixed-input NDCG@10 正向顯著性驗證並提供 SHA-pinned attestation 時才允許重建成 enabled component。Dense
 預設關閉；顯式開啟時只提供 shadow/tail
@@ -69,15 +81,17 @@ Tantivy 0.26 index 使用固定欄位與權重：
 
 ### Whole-JD Qwen
 
-每筆職缺以固定順序序列化 34 個可用 JD 欄位，除了名稱、職務分類、技能、證照、經驗、學歷、城市、產業
-分類、附加條件與完整職務內容，也包含薪資、職缺屬性、工時、科系、語言能力、管理人數與外派條件。
-HTML、URL、zero-width 與重複值依 `2026-08-01-full-jd-v2` policy 正規化。Artifact 必須 pin：
+Production 不重算 1.2M 筆 whole embedding，而是重用已獨立驗證、不可變的
+`2026-07-24-clean-v1` EVA cache。該 cache 固定序列化 15 個欄位，包含職務名稱、職務分類、技能、證照、
+經驗、學歷、城市、產業分類、附加條件及完整職務內容；因此 body 並未從 dense evidence 消失。Serving
+materializer 只做 deterministic projection：讀取既有 4096 維 shard、取前 1024 維、以 float32 L2
+renormalize，再封存為 float16 新 shard，絕不覆寫 source cache。Artifact 必須 pin：
 
 - model `Qwen/Qwen3-Embedding-8B`
 - revision `1d8ad4ca9b3dd8059ad90a75d4983776a23d44af`
 - TEI source dimension `4096`，取 MRL prefix `1024` 後獨立 L2 normalize，以 `float16` 儲存
-- projection、document policy/template SHA、新 full-JD build manifest SHA/path、job row-order SHA、每個
-  shard SHA/size
+- projection、document policy/template SHA、source manifest/inventory SHA、job row-order SHA
+- 每個 derived shard SHA/size 及其對應的 source shard SHA
 - query prompt
   `Instruct: Given a job search query, retrieve relevant job postings matching the user's intent\nQuery: `
 
@@ -100,7 +114,8 @@ Production container 啟動順序：
    `.partial`，驗證 size 與 SHA 後 atomic rename。
 6. 既有檔案也重新驗證；不覆寫 corrupted local artifact，不載入 mutable/latest path。
 7. Component manifest 再驗證 vector build lineage、job IDs、Tantivy files、實際 `meta.json` schema/tokenizers、
-   lexical source mapping、taxonomy，以及 query correction 的 exact disabled branch 或 candidate + positive
+   lexical source mapping、taxonomy、sealed whole source manifest/inventory、每個 derived/source shard SHA，
+   以及 query correction 的 exact disabled branch 或 candidate + positive
    promotion attestation；不允許缺件後降級。
 8. 建立必要 adapters；若 dense shadow 開啟，還要先完成 SageMaker model identity readback；全部成功後
    `/readyz` 才 ready。

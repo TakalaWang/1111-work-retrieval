@@ -31,14 +31,15 @@ from work_retrieval_core.manifest import (
     MODEL_REVISION,
     SOURCE_EMBEDDING_DIMENSION,
     WHOLE_DIMENSION,
+    WHOLE_DOCUMENT_FIELDS,
+    WHOLE_DOCUMENT_POLICY_VERSION,
+    WHOLE_DOCUMENT_TEMPLATE_SHA256,
     WHOLE_PROJECTION,
     RuntimeManifest,
 )
 from work_retrieval_core.serialization import (
-    DOCUMENT_POLICY_VERSION,
     FULL_JOB_FIELDS,
     canonical_code,
-    document_template_sha256,
 )
 
 QUERY_PROMPT = (
@@ -355,8 +356,10 @@ class WholeEmbeddingLayout:
             "document_template_sha256",
             "document_fields",
             "query_prompt",
-            "build_manifest_path",
-            "build_manifest_sha256",
+            "source_manifest_path",
+            "source_manifest_sha256",
+            "source_inventory_path",
+            "source_inventory_sha256",
             "job_ids_path",
             "shards",
         }
@@ -376,26 +379,38 @@ class WholeEmbeddingLayout:
             "dataset_sha256": whole.dataset_sha256,
             "jobs_sha256": whole.jobs_sha256,
             "job_row_order_sha256": whole.job_row_order_sha256,
-            "document_policy_version": DOCUMENT_POLICY_VERSION,
-            "document_template_sha256": document_template_sha256(),
-            "document_fields": [label for label, _ in FULL_JOB_FIELDS],
+            "document_policy_version": WHOLE_DOCUMENT_POLICY_VERSION,
+            "document_template_sha256": WHOLE_DOCUMENT_TEMPLATE_SHA256,
+            "document_fields": list(WHOLE_DOCUMENT_FIELDS),
             "query_prompt": QUERY_PROMPT,
         }
         _require_equal(raw, expected, "whole embedding component")
-        build_manifest_path = _artifact_path(
-            raw["build_manifest_path"], "whole embedding build manifest"
+        source_manifest_path = _artifact_path(
+            raw["source_manifest_path"], "whole embedding source manifest"
         )
-        build_manifest_sha256 = _sha(raw["build_manifest_sha256"], "whole embedding build manifest")
+        source_manifest_sha256 = _sha(
+            raw["source_manifest_sha256"], "whole embedding source manifest"
+        )
+        source_inventory_path = _artifact_path(
+            raw["source_inventory_path"], "whole embedding source inventory"
+        )
+        source_inventory_sha256 = _sha(
+            raw["source_inventory_sha256"], "whole embedding source inventory"
+        )
         whole_prefix = str(Path(whole.manifest_path).parent.as_posix()) + "/"
-        if not build_manifest_path.startswith(whole_prefix):
-            raise RuntimeError("whole embedding build manifest escapes its component")
-        build_artifact = manifest.artifact(build_manifest_path)
-        if (
-            build_artifact is None
-            or build_artifact.kind != "evidence"
-            or build_artifact.sha256 != build_manifest_sha256
+        for source_path, source_sha256, label in (
+            (source_manifest_path, source_manifest_sha256, "source manifest"),
+            (source_inventory_path, source_inventory_sha256, "source inventory"),
         ):
-            raise RuntimeError("whole embedding build manifest is absent or differs")
+            if not source_path.startswith(whole_prefix):
+                raise RuntimeError(f"whole embedding {label} escapes its component")
+            source_artifact = manifest.artifact(source_path)
+            if (
+                source_artifact is None
+                or source_artifact.kind != "evidence"
+                or source_artifact.sha256 != source_sha256
+            ):
+                raise RuntimeError(f"whole embedding {label} is absent or differs")
         job_ids_path = _artifact_path(raw["job_ids_path"], "whole embedding job IDs")
         if not job_ids_path.startswith(whole_prefix):
             raise RuntimeError("whole embedding job IDs escape its component")
@@ -409,7 +424,15 @@ class WholeEmbeddingLayout:
             shard = _object(value, f"whole embedding shard {position}")
             _exact_keys(
                 shard,
-                {"vectors_path", "row_start", "row_end", "rows", "dimension"},
+                {
+                    "vectors_path",
+                    "vectors_sha256",
+                    "source_vectors_sha256",
+                    "row_start",
+                    "row_end",
+                    "rows",
+                    "dimension",
+                },
                 f"whole embedding shard {position}",
             )
             start = _integer(shard["row_start"], f"shard {position} row_start")
@@ -426,6 +449,12 @@ class WholeEmbeddingLayout:
             if not vectors_path.startswith(whole_prefix):
                 raise RuntimeError("whole embedding vector shard escapes its component")
             _require_inventory_kind(manifest, vectors_path, "embedding")
+            vector_artifact = manifest.artifact(vectors_path)
+            if vector_artifact is None or vector_artifact.sha256 != _sha(
+                shard["vectors_sha256"], f"shard {position} vectors"
+            ):
+                raise RuntimeError("whole embedding derived shard SHA-256 differs")
+            _sha(shard["source_vectors_sha256"], f"shard {position} source vectors")
             parsed.append(EmbeddingShard(vectors_path, start, end))
             expected_start = end
         if expected_start != whole.rows:
