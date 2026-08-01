@@ -47,7 +47,7 @@ env:
 
 jobs:
   deploy:
-    if: ${{ github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true' && inputs.confirm == 'DEPLOY' }}
+    if: ${{ github.ref == 'refs/heads/main' && inputs.confirm == 'DEPLOY' }}
     runs-on: ubuntu-latest
     environment: production
     concurrency:
@@ -61,6 +61,7 @@ jobs:
           ARTIFACT_MANIFEST_SHA: ${{ inputs.artifact_manifest_sha }}
           AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           CPU_DESIRED_COUNT: ${{ inputs.cpu_desired_count }}
+          DEPLOY_ENABLED: ${{ vars.DEPLOY_ENABLED }}
           GPU_DESIRED_COUNT: ${{ inputs.gpu_desired_count }}
           GPU_INSTANCE_TYPE: ${{ inputs.gpu_instance_type }}
           GPU_MAX_CAPACITY: ${{ inputs.gpu_max_capacity }}
@@ -68,6 +69,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$AWS_DEPLOY_ROLE_ARN" =~ ^arn:aws:iam::378849533305:role/[A-Za-z0-9+=,.@_/-]+$ ]]
+          [[ "$DEPLOY_ENABLED" == "true" ]]
           [[ "$ARTIFACT_MANIFEST_SHA" =~ ^[0-9a-f]{64}$ ]]
           [[ "$GPU_INSTANCE_TYPE" =~ ^[a-z0-9][a-z0-9.-]*$ ]]
           [[ "$CPU_DESIRED_COUNT" =~ ^[0-9]+$ ]]
