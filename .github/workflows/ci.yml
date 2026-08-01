@@ -83,12 +83,15 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --frozen --all-packages
-      - name: Upgrade twice and reject domain tables
+      - name: Upgrade twice and verify the job schema
         run: |
           uv run alembic -c database/alembic.ini upgrade head
           uv run alembic -c database/alembic.ini upgrade head
           test "$(psql -h localhost -U postgres -d work_retrieval -Atc \
-            "SELECT count(*) FROM pg_tables WHERE schemaname = 'public' AND tablename <> 'alembic_version'")" = "0"
+            "SELECT string_agg(tablename, ',' ORDER BY tablename) FROM pg_tables WHERE schemaname = 'public'")" = "alembic_version,jobs"
+          test "$(psql -h localhost -U postgres -d work_retrieval -Atc \
+            "SELECT version_num FROM alembic_version")" = "0002_create_jobs"
+          uv run alembic -c database/alembic.ini check
 
   infrastructure:
     name: Infrastructure

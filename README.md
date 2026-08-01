@@ -1,7 +1,7 @@
 # 1111-work-retrieval
 
 Production platform scaffold for 1111 job retrieval. This repository defines the stable
-interfaces, HTTP contract, web shell, PostgreSQL migration baseline, and AWS infrastructure
+interfaces, HTTP contract, web shell, PostgreSQL job schema, and AWS infrastructure
 needed for teams to work in parallel.
 
 The repository does **not** contain a production search implementation and has not been
@@ -12,8 +12,9 @@ deployed. The API can only start when a `SearchEngine` factory is supplied expli
 - PostgreSQL/Aurora is the only relational database. SQLite is not supported.
 - SQLAlchemy owns PostgreSQL domain models, Alembic owns migrations, and Pydantic owns the HTTP
   contract. These layers do not share model classes.
-- The repository currently defines only the SQLAlchemy declarative base: there are no domain
-  tables or runtime engine/session factory.
+- SQLAlchemy defines the authoritative `Job` model, and Alembic revisions `0001_baseline` and
+  `0002_create_jobs` create its PostgreSQL `jobs` table. No runtime engine/session factory exists.
+- The schema does not mean the job snapshot has been imported or that a job-detail API exists.
 - Runtime models, embeddings, and indexes live in private S3 objects under
   `runtime/<manifest-sha256>/...`; they are not committed to Git.
 - There is no in-memory retriever, experimental ranking path, mock runtime, or automatic
@@ -28,9 +29,9 @@ deployed. The API can only start when a `SearchEngine` factory is supplied expli
 | `apps/api`             | FastAPI request validation, error envelopes, health endpoints, and OpenAPI          |
 | `apps/web`             | Thin SvelteKit search UI                                                            |
 | `packages/search-core` | Immutable search types and the `SearchEngine` protocol                              |
-| `packages/database`    | SQLAlchemy declarative base and future PostgreSQL domain models                     |
+| `packages/database`    | SQLAlchemy declarative base and authoritative `Job` model                           |
 | `packages/contract`    | Committed OpenAPI, generated TypeScript types, and artifact manifest schema         |
-| `database`             | Alembic configuration and an empty PostgreSQL baseline                              |
+| `database`             | Alembic configuration, baseline, and `jobs` table migration                         |
 | `infra`                | AWS CDK stack for Aurora, S3, ECR, GPU ECS, ALB, CloudFront, WAF, and observability |
 
 ## Prerequisites
@@ -59,7 +60,7 @@ pnpm --dir infra build
 pnpm --dir infra synth
 ```
 
-Run the migration baseline against an explicit PostgreSQL database:
+Run all migrations against an explicit PostgreSQL database:
 
 ```bash
 DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/work_retrieval \
