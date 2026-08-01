@@ -1,3 +1,3 @@
-from .models import Base
+from .models import Base, Job
 
-__all__ = ["Base"]
+__all__ = ["Base", "Job"]

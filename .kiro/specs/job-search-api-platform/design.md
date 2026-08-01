@@ -36,11 +36,16 @@ content-addressed runtime assets so a deployment resolves one immutable set rath
 ## Data and infrastructure
 
 Aurora stays in private subnets, uses encrypted storage and Secrets Manager credentials, and
-enables Data API for controlled administration. The baseline migration creates only
-`alembic_version`; domain tables wait for approved data ownership and lifecycle requirements.
-SQLAlchemy owns domain models and exposes their metadata to Alembic, while Alembic owns migration
-history and Pydantic separately owns HTTP validation. The scaffold defines only the declarative
-base, with no runtime engine/session factory.
+enables Data API for controlled administration. `0001_baseline` creates only `alembic_version`;
+`0002_create_jobs` adds the single authoritative job snapshot table. Its columns preserve the 39
+source fields, exact decimal salary bounds, the source timestamp, and a unique zero-based
+`source_row` for import lineage. `job_id` is the only primary key. No search indexes, normalized
+children, or unrelated tables are inferred from the snapshot.
+
+SQLAlchemy owns this database model and exposes its metadata to Alembic, while Alembic owns
+migration history and Pydantic separately owns HTTP validation. Snapshot persistence does not add
+a runtime session factory or the future job-detail endpoint; those wait for an approved consuming
+flow and API contract.
 
 The artifact bucket blocks all public access and enforces encryption. CloudFront is the public
 origin for UI and API traffic; the ALB requires both CloudFront's origin-facing managed prefix

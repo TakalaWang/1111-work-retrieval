@@ -7,8 +7,10 @@
 - [x] Commit the OpenAPI contract, generated TypeScript types, and runtime manifest schema.
 - [x] Add the thin SvelteKit request and result states without a mock runtime.
 - [x] Add a PostgreSQL-only Alembic baseline with no domain tables.
-- [x] Establish a SQLAlchemy declarative base for future PostgreSQL domain models and connect its
-      empty metadata to Alembic.
+- [x] Establish a SQLAlchemy declarative base for PostgreSQL domain models and connect its metadata
+      to Alembic.
+- [x] Define the authoritative 39-field `jobs` model and `0002_create_jobs` migration with exact
+      salary decimals and source-row lineage, without speculative indexes or child tables.
 - [x] Define the Aurora, S3, ECR, GPU ECS, ALB, CloudFront, WAF, logging, and OIDC CDK skeleton.
 - [x] Add parallel CI and guarded manual-only production delivery.
 
@@ -22,8 +24,9 @@ These are intentionally not part of the scaffold and require their own approved 
 
 - [ ] Implement and evaluate a production `SearchEngine`, including normalization, ranking,
       lineage, and final corpus audit.
-- [ ] Define the first domain tables and runtime session lifecycle, then add forward-only
-      PostgreSQL migrations.
+- [ ] Import and read back the verified complete job snapshot in Aurora PostgreSQL.
+- [ ] Define the runtime session lifecycle only when a consuming application path is approved.
+- [ ] Specify and implement the future job-detail-by-ID API as a separate contract change.
 - [ ] Build and publish the API/GPU image and immutable runtime manifest.
 - [ ] Establish latency, relevance, availability, and cost gates before setting GPU capacity above
       zero or Aurora minimum capacity above zero.
