@@ -242,7 +242,7 @@ jobs:
           "${CURL[@]}" "$WEB_URL/healthz" >/dev/null
           "${CURL[@]}" "$WEB_URL/readyz" >/dev/null
           WEB_HTML="$("${CURL[@]}" "$WEB_URL/")"
-          grep -F '搜尋服務展示' <<<"$WEB_HTML" >/dev/null
+          grep -F '職缺搜尋' <<<"$WEB_HTML" >/dev/null
           SEARCH="$("${CURL[@]}" \
             --header 'content-type: application/json' \
             --data '{"query":"deployment smoke test","location_code":[],"duty_code":[]}' \
