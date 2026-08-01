@@ -16,6 +16,8 @@ can only start when a `SearchEngine` factory is supplied explicitly.
 - SQLAlchemy defines the authoritative `Job` model, and Alembic revisions `0001_baseline` and
   `0002_create_jobs` create its PostgreSQL `jobs` table. No runtime engine/session factory exists.
 - The complete verified job snapshot is stored in Aurora. A job-detail API does not exist.
+- Search responses contain at most ten unique, consecutively ranked ASCII-decimal job IDs. The API
+  and browser both reject malformed engine or response data instead of degrading silently.
 - Runtime models, embeddings, and indexes live in private S3 objects under
   `runtime/<manifest-sha256>/...`; they are not committed to Git.
 - There is no in-memory retriever, experimental ranking path, mock runtime, or automatic
@@ -56,6 +58,7 @@ uv run pytest
 uv run python -m work_retrieval_api.export_openapi packages/contract/openapi.json --check
 
 pnpm install --frozen-lockfile
+pnpm format:check
 pnpm lint
 pnpm --dir packages/contract generate:check
 pnpm --dir apps/web check
@@ -66,11 +69,13 @@ pnpm --dir infra build
 pnpm --dir infra synth
 ```
 
-Run all migrations against an explicit PostgreSQL database:
+Run migrations twice and verify SQLAlchemy/Alembic drift against an explicit PostgreSQL database:
 
 ```bash
-DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/work_retrieval \
-  uv run alembic -c database/alembic.ini upgrade head
+export DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/work_retrieval
+uv run alembic -c database/alembic.ini upgrade head
+uv run alembic -c database/alembic.ini upgrade head
+uv run alembic -c database/alembic.ini check
 ```
 
 To intentionally update the committed API contract after changing the FastAPI schema:
@@ -114,8 +119,9 @@ Deployment is manual-only. The workflow requires the `production` GitHub environ
 artifact manifest identifier. Configure required reviewers on the `production` environment
 and restrict that environment to `main` before enabling it. An operator must bootstrap the AWS
 account's GitHub OIDC provider and the first application stack deployment; that stack then owns the
-repository's deploy role. Later workflow runs deploy the application stack, publish the static web build to its private S3
-bucket, and invalidate CloudFront. No push to `main` deploys this repository.
+repository's deploy role. Later workflow runs deploy the application stack, publish the static web
+build to its private S3 bucket, and invalidate CloudFront. No push to `main` deploys this
+repository.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and the authoritative platform specification in
 [`.kiro/specs/job-search-api-platform`](.kiro/specs/job-search-api-platform).

@@ -30,6 +30,8 @@ out of scope until it is promoted through a separate, evidence-backed change.
 - The repository commits deterministic OpenAPI JSON and generated TypeScript types.
 - The SvelteKit UI calls the relative `/api/v1/jobs/search` path and renders loading, results,
   empty results, and request-ID-bearing failures.
+- The browser rejects invalid JSON and any successful response that violates the numeric job-ID,
+  result-count, uniqueness, or consecutive-rank invariants.
 - CI rejects stale OpenAPI or generated TypeScript output. No mock server is a supported runtime.
 
 ## R4. PostgreSQL and artifacts
@@ -63,6 +65,9 @@ out of scope until it is promoted through a separate, evidence-backed change.
   security group from `WorkRetrievalData`; it never creates a second database or artifact bucket.
   It owns ECR, GPU ECS on EC2 capacity, interface endpoints, ALB, CloudFront `/api/*` routing, WAF,
   CloudWatch, the web bucket, and the least-privilege GitHub OIDC role.
+- The GitHub OIDC role may assume only the standard deploy, file-publishing, image-publishing, and
+  lookup roles for the default CDK bootstrap qualifier, account, and region; `cdk-*` is
+  forbidden.
 - ALB ingress accepts only the CloudFront origin-facing managed prefix list.
 - GPU desired capacity defaults to zero. Image URI, artifact manifest SHA-256, and GPU instance type
   are required deployment inputs.

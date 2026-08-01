@@ -19,6 +19,8 @@ standard library, platform, or an existing dependency already covers the require
 - Keep HTTP concerns in `apps/api` and retrieval contracts in `packages/search-core`.
 - Inject `SearchEngine` explicitly. Runtime fallback engines and production test doubles are
   forbidden.
+- Keep search results to at most ten unique, consecutively ranked ASCII-decimal job IDs. Preserve
+  fail-closed validation at both the API and browser boundaries.
 - Use PostgreSQL/Aurora only. Do not introduce SQLite code, files, migrations, or CI paths.
 - Define PostgreSQL domain models with SQLAlchemy in `packages/database`; manage schema changes
   with Alembic and HTTP contracts with Pydantic. Do not reuse one layer's classes in another.
@@ -38,6 +40,7 @@ uv run ruff format --check .
 uv run mypy
 uv run pytest
 uv run python -m work_retrieval_api.export_openapi packages/contract/openapi.json --check
+pnpm format:check
 pnpm lint
 pnpm --dir packages/contract generate:check
 pnpm --dir apps/web check
@@ -56,8 +59,8 @@ pnpm --dir packages/contract generate
 git diff -- packages/contract/openapi.json packages/contract/types.d.ts
 ```
 
-Schema changes require a new Alembic revision. Verify it on PostgreSQL 16 by upgrading from a
-fresh database; never edit an applied migration.
+Schema changes require a new Alembic revision. Verify it on PostgreSQL 16 by upgrading a fresh
+database twice and running `alembic check`; never edit an applied migration.
 
 Production job imports must use `scripts/import_jobs_to_aws.py` unchanged with the `competition`
 profile in account `378849533305` and `us-west-2`. The script rejects any other account, region,
