@@ -11,8 +11,8 @@
   同源存取。
 - Qwen3 Embedding endpoint `qwen3-embedding-8b-20260801-031826` 與 reranker endpoint
   `work-retrieval-qwen3-reranker-8b` 均為 `InService`。
-- 現行搜尋仍是明確標示的暫時實作：每個合法 query 固定回傳 Aurora 中前十個真實 job ID；這不是
-  production retrieval algorithm，也不是 retrieval benchmark。職缺詳情 API 尚未實作。
+- repository source 已包含 fail-closed search-core v2；目前 public deployment 是否仍為舊 deterministic
+  runtime，必須以實際 ECS image digest 與 public audit header 重新確認，不能由 source 推論。
 - Embedding／reranker endpoint 已上線不代表它們已整合成正式 `SearchEngine`，也不代表任何 retrieval
   品質指標已發布。
 
@@ -25,7 +25,7 @@ Git commit 與 public smoke 結果；各層狀態必須分別確認。
 | ---------------------------------------------- | ---------------------------------------------------- |
 | [`apps/api`](apps/api)                         | FastAPI request validation、lifecycle 與 OpenAPI     |
 | [`apps/web`](apps/web)                         | SvelteKit 搜尋介面                                   |
-| [`packages/search-core`](packages/search-core) | `SearchEngine` contract 與 search types              |
+| [`packages/search-core`](packages/search-core) | Tantivy、Qwen、artifact bootstrap、fusion 與 audit   |
 | [`packages/database`](packages/database)       | SQLAlchemy `Job` model 與 PostgreSQL read repository |
 | [`packages/contract`](packages/contract)       | OpenAPI、TypeScript types 與 runtime manifest schema |
 | [`database`](database)                         | PostgreSQL Alembic migrations                        |
@@ -109,31 +109,34 @@ git diff -- packages/contract/openapi.json packages/contract/types.d.ts
 
 ## Runtime contract
 
-Container entrypoint 是 `work_retrieval_api.main:app`。啟動時必須提供以下五個 database settings；
-PostgreSQL 無法連線或可用職缺少於十筆時會 fail closed：
+Container entrypoint 是 `work_retrieval_api.main:app`。啟動時必須提供 PostgreSQL、immutable S3 runtime 與
+SageMaker query encoder settings；任何 artifact、容量、database 或 endpoint 契約不成立都 fail closed：
 
 ```text
 DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
+ARTIFACT_BUCKET, ARTIFACT_MANIFEST_SHA256, AWS_REGION
+SEARCH_RUNTIME_ROOT, SEARCH_RUNTIME_MANIFEST_PATH, SEARCH_PORT_FACTORY
+SEARCH_ENABLE_MULTIVIEW_MAXSIM, EMBEDDING_ENDPOINT_NAME
 ```
 
 公開路徑：
 
-- `POST /api/v1/jobs/search`：暫時的 deterministic 十筆結果。
+- `POST /api/v1/jobs/search`：Tantivy full-JD BM25 + whole-Qwen dense + RRF Top 10。
 - `GET /healthz` 與 `GET /readyz`：process 與 initialized-runtime health。
 
 Aurora credentials 由 ECS 經 Secrets Manager 注入，不保存於 image、Git 或 workflow。
 
 ## 資料與 runtime artifacts
 
-| 項目                    | 已驗證版本                                                                                           |
-| ----------------------- | ---------------------------------------------------------------------------------------------------- |
-| Source code             | 每次交付以 Git commit SHA 固定                                                                       |
-| Job dataset             | 1,218,635 rows；SHA-256 `53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089`           |
-| Database schema         | Alembic `0002_create_jobs`；Aurora PostgreSQL 16                                                     |
-| Runtime manifest format | [`runtime-manifest.schema.json`](packages/contract/runtime-manifest.schema.json)，schema version `1` |
-| Embedding endpoint      | `qwen3-embedding-8b-20260801-031826`；`InService`                                                    |
-| Reranker endpoint       | `work-retrieval-qwen3-reranker-8b`；`InService`                                                      |
-| Production retrieval    | 尚未整合或發布                                                                                       |
+| 項目                    | 已驗證版本                                                                                 |
+| ----------------------- | ------------------------------------------------------------------------------------------ |
+| Source code             | 每次交付以 Git commit SHA 固定                                                             |
+| Job dataset             | 1,218,635 rows；SHA-256 `53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089` |
+| Database schema         | Alembic `0002_create_jobs`；Aurora PostgreSQL 16                                           |
+| Runtime manifest format | strict runtime schema version `2`；root SHA + per-object SHA/size                          |
+| Embedding endpoint      | `qwen3-embedding-8b-20260801-031826`；`InService`                                          |
+| Reranker endpoint       | `work-retrieval-qwen3-reranker-8b`；`InService`                                            |
+| Production retrieval    | source 已整合；artifact promotion、image rollout與live readback仍須各自驗證                |
 
 職缺 snapshot 的 authoritative S3 object：
 
@@ -177,8 +180,8 @@ environment 執行。它同時要求：
 - environment variable `AWS_DEPLOY_ROLE_ARN`
 - confirmation input 必須精確等於 `DEPLOY`
 - 64-character lowercase artifact manifest SHA-256
-- CPU desired count 至少為 `1`
-- GPU min／max／desired 目前必須全部為 `0`
+- CPU desired count 必須為 `0`
+- GPU min／max／desired 必須至少為 `1`，且 `min <= desired <= max`
 
 流程依序執行 frozen installs、static web build、OIDC authentication、DataStack deploy、runtime manifest
 驗證、`linux/amd64` API image build／push、ECR scan、digest-pinned PlatformStack deploy、web sync、等待

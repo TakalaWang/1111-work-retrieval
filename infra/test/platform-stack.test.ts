@@ -27,7 +27,7 @@ const template = Template.fromStack(
 const synthesized = template.toJSON();
 
 describe('platform stack', () => {
-  test('requires immutable deployment inputs and keeps GPU capacity off', () => {
+  test('requires immutable deployment inputs and defaults to one GPU host', () => {
     template.hasParameter('ApiImageUri', {
       Type: 'String',
       AllowedPattern:
@@ -39,7 +39,7 @@ describe('platform stack', () => {
     });
     template.hasParameter('CpuServiceDesiredCount', {
       Type: 'Number',
-      Default: 1,
+      Default: 0,
       MinValue: 0
     });
     template.hasParameter('GpuInstanceType', { Type: 'String' });
@@ -48,21 +48,34 @@ describe('platform stack', () => {
       'GpuMaxCapacity',
       'GpuServiceDesiredCount'
     ]) {
-      template.hasParameter(id, { Type: 'Number', Default: 0, MinValue: 0 });
+      template.hasParameter(id, { Type: 'Number', Default: 1, MinValue: 1 });
     }
     template.hasResourceProperties('AWS::AutoScaling::AutoScalingGroup', {
       MinSize: { Ref: 'GpuMinCapacity' },
       MaxSize: { Ref: 'GpuMaxCapacity' },
       DesiredCapacity: Match.absent()
     });
-    template.resourceCountIs('AWS::EC2::LaunchTemplate', 1);
+    template.hasResourceProperties('AWS::EC2::LaunchTemplate', {
+      LaunchTemplateData: Match.objectLike({
+        BlockDeviceMappings: Match.arrayWith([
+          {
+            DeviceName: '/dev/xvda',
+            Ebs: Match.objectLike({
+              Encrypted: true,
+              VolumeSize: 100,
+              VolumeType: 'gp3'
+            })
+          }
+        ])
+      })
+    });
     template.resourceCountIs('AWS::AutoScaling::LaunchConfiguration', 0);
     expect(JSON.stringify(synthesized.Parameters)).toContain(
       '/aws/service/ecs/optimized-ami/amazon-linux-2023/gpu/recommended/image_id'
     );
   });
 
-  test('routes CPU Fargate and keeps the zero-capacity GPU service isolated', () => {
+  test('routes the production ALB only to the GPU service', () => {
     template.resourceCountIs('AWS::ECS::Service', 2);
     template.resourceCountIs('AWS::ECS::TaskDefinition', 2);
     const taskDefinitionsById = template.findResources(
@@ -80,17 +93,17 @@ describe('platform stack', () => {
     );
     template.hasResourceProperties('AWS::ECS::Service', {
       DesiredCount: { Ref: 'CpuServiceDesiredCount' },
-      HealthCheckGracePeriodSeconds: 120,
+      HealthCheckGracePeriodSeconds: Match.absent(),
       LaunchType: 'FARGATE',
-      LoadBalancers: [
-        Match.objectLike({ ContainerName: 'Api', ContainerPort: 8000 })
-      ]
+      LoadBalancers: Match.absent()
     });
     template.hasResourceProperties('AWS::ECS::Service', {
       DesiredCount: { Ref: 'GpuServiceDesiredCount' },
       HealthCheckGracePeriodSeconds: 600,
       LaunchType: 'EC2',
-      LoadBalancers: Match.absent()
+      LoadBalancers: [
+        Match.objectLike({ ContainerName: 'Api', ContainerPort: 8000 })
+      ]
     });
     template.hasResourceProperties('AWS::ElasticLoadBalancingV2::TargetGroup', {
       HealthCheckPath: '/readyz',
@@ -116,9 +129,33 @@ describe('platform stack', () => {
       );
       expect(container.Environment).toEqual(
         expect.arrayContaining([
+          expect.objectContaining({
+            Name: 'ARTIFACT_BUCKET',
+            Value: expect.any(Object)
+          }),
+          expect.objectContaining({
+            Name: 'ARTIFACT_MANIFEST_SHA256',
+            Value: { Ref: 'ArtifactManifestSha256' }
+          }),
           expect.objectContaining({ Name: 'DB_HOST' }),
           expect.objectContaining({ Name: 'DB_PORT' }),
           expect.objectContaining({ Name: 'DB_NAME', Value: 'work_retrieval' }),
+          expect.objectContaining({
+            Name: 'SEARCH_RUNTIME_ROOT',
+            Value: '/tmp/work-retrieval-runtime'
+          }),
+          expect.objectContaining({
+            Name: 'SEARCH_RUNTIME_MANIFEST_PATH',
+            Value: '/tmp/work-retrieval-runtime/manifest.json'
+          }),
+          expect.objectContaining({
+            Name: 'SEARCH_PORT_FACTORY',
+            Value: 'work_retrieval_api.production:create_production_ports'
+          }),
+          expect.objectContaining({
+            Name: 'SEARCH_ENABLE_MULTIVIEW_MAXSIM',
+            Value: 'false'
+          }),
           expect.objectContaining({
             Name: 'EMBEDDING_ENDPOINT_NAME',
             Value: 'qwen3-embedding-8b-20260801-031826'
@@ -134,6 +171,7 @@ describe('platform stack', () => {
       (container) => container.ResourceRequirements?.[0]?.Type === 'GPU'
     );
     expect(gpuContainer).toMatchObject({
+      MemoryReservation: 12288,
       ResourceRequirements: [{ Type: 'GPU', Value: '1' }]
     });
     expect(gpuContainer?.Environment).toEqual(
@@ -165,20 +203,10 @@ describe('platform stack', () => {
     ]) {
       expect(endpointText).toContain(service);
     }
-    expect(synthesized.Conditions.GpuCapacityEnabled).toEqual({
-      'Fn::Not': [
-        {
-          'Fn::Equals': [{ Ref: 'GpuMaxCapacity' }, 0]
-        }
-      ]
-    });
-    const conditionalEndpoints = endpoints.filter(
-      (endpoint) => endpoint.Condition === 'GpuCapacityEnabled'
-    );
-    expect(conditionalEndpoints).toHaveLength(3);
-    expect(JSON.stringify(conditionalEndpoints)).toContain('.ecs');
-    expect(JSON.stringify(conditionalEndpoints)).toContain('.ecs-agent');
-    expect(JSON.stringify(conditionalEndpoints)).toContain('.ecs-telemetry');
+    expect(synthesized.Conditions).toEqual(undefined);
+    expect(
+      endpoints.every((endpoint) => endpoint.Condition === undefined)
+    ).toBe(true);
     template.hasResourceProperties('AWS::EC2::SecurityGroupIngress', {
       Description: 'API tasks only',
       FromPort: 5432,

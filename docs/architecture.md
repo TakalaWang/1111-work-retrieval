@@ -1,169 +1,140 @@
-# System Architecture and Data Flow
+# Search-core v2 architecture
 
-本文件分開描述 repository 的 search-core v2 source contract 與目前已部署 production flow；source
-完成不代表 image、GitOps rollout 或 live traffic 已更新。
+本文件描述目前 source code 的 production serving 契約。它不代表新版 image、runtime artifacts 或 public
+traffic 已完成 rollout；部署狀態仍須分別以 Git SHA、ECR digest、CloudFormation、ECS target health 與
+public smoke readback 證明。
 
-## Delivery status
-
-| Plane                    | 現況                                                                                                       |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------- |
-| Data plane               | `WorkRetrievalData` 已部署；Aurora 與完整職缺快照已完成 readback                                           |
-| Application plane        | `WorkRetrievalPlatform` 已部署；CloudFront、Web、ALB 與 CPU Fargate API 已通過 public smoke                |
-| Model plane              | Embedding 與 reranker SageMaker endpoints 均為 `InService`，runtime artifacts 已提升到 immutable S3 prefix |
-| Retrieval implementation | source 已提供 manifest-driven search-core v2；目前已部署 API 仍是舊 deterministic runtime，尚未 rollout 新 adapters |
-
-## Source modules
-
-| Module                          | 唯一責任                                                               | 不負責                                   |
-| ------------------------------- | ---------------------------------------------------------------------- | ---------------------------------------- |
-| `apps/api`                      | HTTP validation、runtime wiring、lifecycle、request ID、OpenAPI、audit header | ranking、database model、fallback engine |
-| `apps/web`                      | 呼叫相對 API path、顯示狀態、驗證不可信 response JSON                  | ranking 或 server-side data access       |
-| `packages/search-core`          | temporal eligibility、candidate ports、RRF fusion、freshness 與 audit trace | HTTP、artifact 下載、adapter 實作         |
-| `packages/database`             | authoritative SQLAlchemy `Job` model 與 PostgreSQL read repository     | HTTP schema                              |
-| `packages/contract`             | committed OpenAPI、generated TypeScript types、runtime manifest schema | runtime artifacts                        |
-| `database`                      | forward-only Alembic migration history                                 | application query logic                  |
-| `infra`                         | `WorkRetrievalData` 與 `WorkRetrievalPlatform` CDK stacks              | production image 或模型內容              |
-| `scripts/import_jobs_to_aws.py` | 固定資料快照的驗證、上傳、atomic import 與 readback                    | 一般用途 ETL                             |
-
-這些邊界讓 HTTP、retrieval、persistence 與 deployment 可以獨立演進；沒有共享一個「萬用 model」，也
-沒有在缺少 production implementation 時靜默改走 mock 或 fallback。
-
-## Deployed request flow
-
-```mermaid
-flowchart LR
-    Browser -->|HTTPS| CF[CloudFront]
-    CF -->|default| Web[S3 static web]
-    CF -->|/api/*, /healthz, /readyz| ALB[Application Load Balancer]
-    WAF[AWS WAF managed rules] --> ALB
-    ALB -->|origin header + CloudFront prefix list| ECS[CPU Fargate task]
-    ECS --> API[FastAPI]
-    API --> Temp[Temporary deterministic SearchEngine]
-    Temp --> DB[(Aurora PostgreSQL jobs)]
-    Artifacts[S3 runtime/manifest-sha256]
-    Embedding[SageMaker embedding]
-    Reranker[SageMaker reranker]
-```
-
-GPU ECS capacity provider 與 service 已建立，但 capacity 與 desired count 維持 `0`；public traffic 只進入
-CPU Fargate service。S3 artifacts、embedding 與 reranker 已可用，但暫時 engine 尚未呼叫它們。正式
-`SearchEngine` 必須顯式整合 normalization、retrieval、reranking 與 lineage，不得靜默 fallback。
-
-## Search-core v2 source flow
+## Request flow
 
 ```mermaid
 flowchart TD
-    Request["Validated search request"] --> Clock["Resolve request-time as_of"]
-    Clock --> Eligible["Compile eligible_from = as_of - 180 days"]
-    Eligible --> Filters["Location, duty, temporal filters before each lane Top-K"]
-    Filters --> BM25["Tantivy BM25 over title + full JD description"]
-    Filters --> Dense["Qwen whole-document dense retrieval"]
-    Filters --> Multi{"Multi-view MaxSim explicitly enabled?"}
-    Multi -->|"Yes, artifact and port both present"| MaxSim["Qwen multi-view MaxSim"]
-    Multi -->|"No"| Disabled["Trace disabled reason"]
-    BM25 --> Fusion["Bounded reciprocal-rank fusion"]
-    Dense --> Fusion
-    MaxSim --> Fusion
-    Fusion --> Freshness["Freshness tie-break; future rows retained with score 0"]
-    Freshness --> Validate["Fail-closed result and trace validation"]
-    Disabled --> Validate
-    Validate --> Response["Top 10 + X-Search-Audit JSON"]
+    A["POST /api/v1/jobs/search"] --> B["Validate query and filter codes"]
+    B --> C["Resolve request-time as_of"]
+    C --> D["Compile lower bound: as_of - 180 days"]
+    D --> E["Resolve location/duty taxonomy codes"]
+    E --> F["Tantivy full-JD BM25"]
+    E --> G["Tantivy eligible-row set"]
+    G --> H["SageMaker Qwen query embedding"]
+    H --> I["Whole-JD dense scan over eligible rows"]
+    F --> J["Batch PostgreSQL metadata readback"]
+    I --> J
+    J --> K["Revalidate time/location/duty for every candidate"]
+    K --> L["RRF fusion"]
+    L --> M["Freshness tie-break"]
+    M --> N["Top 10 + audit trace"]
 ```
 
-`as_of` 每次 request 才解析；production 未設定 override 時使用當下 UTC。Competition Demo 可明確設定
-`SEARCH_DEMO_AS_OF=2026-06-08`，date-only 值以 `Asia/Taipei` 當日 00:00 解讀。時間 eligibility 只設定
-下界，不設定上界，因此 `source_modified_at > as_of` 的資料仍可被召回，但 freshness 必須是 `0`。
+Tantivy 與 dense 是兩條必要 lane，會平行執行；任一失敗即回傳 503，不以另一條 lane 靜默降級。Graph、
+multi-view MaxSim、reranker、LTR 與 guardrail 預設關閉，audit trace 會記錄原因。尚未有正向、可重現的
+promotion evidence 前，不會把 challenger 混入 production ranking。
 
-每個 candidate adapter 都收到同一個 `CandidateRequest`，其中包含 `minimum_updated_at`、location 與 duty
-codes，且正式 ports 明確命名為 `lexical_full_jd` 與 `dense_whole_jd`。Adapter 必須在 Top-K 前套用三種
-filters；engine 在 fusion 前再拒絕任何早於時間下界的 evidence。BM25 view 必須包含 `title`、`description`
-與其餘可檢索 JD 欄位，dense view 則以完整 JD 建立單一 Qwen whole-document embedding。
+## Time and hard-filter contract
 
-Lexical 與 whole-document dense 是必要 lane，request-time 平行執行；任一 lane 失敗就回傳 503，不會只用
-另一 lane 產生看似成功的結果。融合只使用 bounded RRF，freshness 只在相同融合分數時決定順序，不覆蓋
-query relevance。
+- `as_of` 在每個 request 動態取得；production 不固定日期。
+- Demo 可設 `SEARCH_DEMO_AS_OF=2026-06-08`，代表台灣時間
+  `2026-06-08T23:59:59.999+08:00`。
+- eligibility 是 `source_modified_at >= as_of - 180 days`，而且在每條 lane 的 Top-K 前套用。
+- snapshot 中 `source_modified_at > as_of` 的資料保留，不設人為上界；其 freshness 固定為 `0`，並標記
+  `future_updated_snapshot=true`。
+- location 內為 OR、duty 內為 OR、location 與 duty 之間為 AND；未知 taxonomy code 是確定的 no-match。
+- Tantivy 雖已 pre-filter，engine 仍以 PostgreSQL authoritative metadata 逐筆重驗時間、location 與 duty；
+  缺資料或任一不一致都 fail closed。
 
-Multi-view MaxSim 必須同時滿足明確 environment feature flag、immutable manifest artifact entry 與 runtime
-port 三個條件；缺少任一項會在 startup fail closed。Graph、reranker、LTR 與 guardrail 尚未取得可發布
-calibration，正式 source 沒有啟用入口，實際 disabled reason 會保留在每次 audit trace。
+這個設計避免把 freshness 當成 relevance，也避免「adapter 宣稱套用 filter、實際卻在 Top-K 後過濾」的
+不可觀測錯誤。
 
-Runtime 啟動需要：
+## Text and embedding contracts
 
-- `SEARCH_RUNTIME_MANIFEST_PATH`：local immutable manifest path，沿用 committed schema version `1`。
-- `SEARCH_PORT_FACTORY=module:callable`：建立 Tantivy/Qwen ports 的 deployment-owned factory。
-- `SEARCH_ENABLE_MULTIVIEW_MAXSIM=true|false`：唯一的 MaxSim 開關，預設 `false`。
-- `SEARCH_MULTIVIEW_ARTIFACT_KEY`：只在 MaxSim 開啟時必填，且必須存在於 manifest。
-- `SEARCH_DEMO_AS_OF`：只供固定 Demo / fixture 使用；production 應省略。
+### BM25
 
-Repository 不攜帶 1.2M 職缺、embedding 或 model。Adapter 與 artifacts 由 deployment 提供；環境缺少
-manifest/factory、manifest 含未知欄位、artifact 不一致或 port output 違約，都會停止服務而非 fallback。
-API JSON body 維持既有 `request_id + result` contract，逐職缺的 lane rank、RRF contribution、freshness、
-source timestamp 與所有 lane 狀態放在 `X-Search-Audit` JSON header；header 超過 7 KiB 會 fail closed。
+Tantivy 0.26 index 使用固定欄位與權重：
 
-### API lifecycle
+| Field      | Contents                 | Weight |
+| ---------- | ------------------------ | -----: |
+| `title`    | 職務名稱                 |   15.0 |
+| `duty`     | 職務大／中／小類         |    8.0 |
+| `skills`   | 電腦技能、工作技能、證照 |    6.0 |
+| `industry` | 產業大／中／小類         |    1.0 |
+| `body`     | 職務內容與其餘需求條件   |    0.5 |
 
-1. Application startup 驗證 runtime manifest 並由指定 factory 建立 retrieval ports；任一失敗就中止。
-2. FastAPI 在 trust boundary 驗證 body 大小、media type、query 與 filters。
-3. Async route 透過 worker thread 呼叫同步 `SearchEngine.search(query, limit=10)`。
-4. API 驗證結果最多十筆、job ID 為 ASCII decimal、沒有重複、trace 對應相同排序且大小受限。
-5. Browser 對 response JSON 執行相同的不可信邊界驗證。
-6. Shutdown 只關閉該 engine 一次。
+所以職務內容不是只拿去 embedding；它同時可被 lexical retrieval 找到。索引另含 raw-tokenized
+`location_filter`、`duty_filter`、`visibility_filter`、unsigned `updated_at_epoch_ms` 與 fast
+`job_index`。
 
-`/healthz` 代表 process 存活；`/readyz` 只有 engine 成功初始化後才會 ready。Logs 記錄 request metadata
-與 latency，不記錄 query text。
+### Whole-JD Qwen
 
-## Job data import flow
+每筆職缺以固定順序序列化 15 個欄位：職務名稱、職務三級分類、技能、證照、經驗、學歷、城市、產業三級
+分類、附加條件與完整職務內容。HTML、URL、zero-width 與重複值依
+`2026-07-24-clean-v1` policy 正規化。Artifact 必須 pin：
 
-```mermaid
-flowchart LR
-    CSV[職缺 CSV] --> Validate[Validate bytes, SHA-256, header, rows, required fields]
-    Validate --> S3[S3 data/jobs/sha256/jobs.csv]
-    S3 --> Stage[(Aurora staging table)]
-    Stage --> Check[Validate count, distinct IDs, source_row bounds]
-    Check --> Swap[Atomic replace jobs]
-    Swap --> Readback[Final independent readback]
+- model `Qwen/Qwen3-Embedding-8B`
+- revision `1d8ad4ca9b3dd8059ad90a75d4983776a23d44af`
+- dimension `4096`、`float16`、normalized
+- document policy/template SHA、job row-order SHA、每個 shard SHA/size
+- query prompt
+  `Instruct: Given a job search query, retrieve relevant job postings matching the user's intent\nQuery: `
+
+Query embedding 由 AWS SageMaker endpoint 產生，response 必須是 finite `1 x 4096`，runtime 再明確
+L2 normalize。現有 whole-vector adapter 是 correctness-reference exact scan，且只掃 Tantivy 已判定 eligible
+的 rows；它可以啟動與驗證完整 serving contract，但不是已證明延遲可用的 ANN。未來 ANN 必須以相同 filter
+與 row-order contract 做 recall/latency promotion，不能成為未驗證 fallback。
+
+## Immutable artifact startup
+
+Production container 啟動順序：
+
+1. 從 `s3://$ARTIFACT_BUCKET/runtime/$ARTIFACT_MANIFEST_SHA256/manifest.json` 下載 root manifest。
+2. 驗證 root manifest 完整 bytes 的 SHA-256。
+3. 解析嚴格 schema v2，拒絕 unknown keys、不完整 release、錯誤 model revision、row-order drift、未套
+   pre-Top-K filter 或 `future_jobs=exclude`。
+4. 計算所需空間與最低 12 GiB runtime memory；容量不足即停止。
+5. 只下載 incumbent component prefix；每一物件先寫 `.partial`，驗證 size 與 SHA 後 atomic rename。
+6. 既有檔案也重新驗證；不覆寫 corrupted local artifact，不載入 mutable/latest path。
+7. Component manifest 再驗證 exact vector shards、job IDs、Tantivy files/schema/boosts 與 taxonomy。
+8. 建立 Tantivy、SageMaker、whole-vector、PostgreSQL adapters；全部成功後 `/readyz` 才 ready。
+
+必要環境設定：
+
+```text
+ARTIFACT_BUCKET
+ARTIFACT_MANIFEST_SHA256
+AWS_REGION
+SEARCH_RUNTIME_ROOT
+SEARCH_RUNTIME_MANIFEST_PATH
+SEARCH_PORT_FACTORY=work_retrieval_api.production:create_production_ports
+SEARCH_ENABLE_MULTIVIEW_MAXSIM=false
+EMBEDDING_ENDPOINT_NAME
+DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD
 ```
 
-Importer 固定並驗證以下 inputs：
+Repository、container image 與 Git 都不包含 1.2M 職缺、9.3 GiB embeddings 或 model weights。
 
-- AWS profile `competition`、account `378849533305`、region `us-west-2`
-- 39-column UTF-8 CSV header
-- SHA-256 `53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089`
-- 1,285,945,103 bytes 與 1,218,635 data rows
-- Alembic revision `0002_create_jobs`
+## Deployment topology
 
-任何一項不一致都會停止。Importer 使用 Aurora `aws_s3` extension 匯入 staging table，驗證完成後才在
-transaction 內替換 `jobs`；不提供 row-by-row Data API fallback。
+Source-defined production topology is CloudFront → ALB → GPU EC2 ECS service. CPU Fargate remains defined with
+desired count `0` and is not an ALB target, because its 1 GiB memory cannot serve the verified 9.3 GiB cache. GPU
+defaults are ASG/service `1`, encrypted 100 GiB gp3 root volume, and 12 GiB container memory reservation. SageMaker
+remains the query encoder; local GPU use or ANN is not inferred merely from GPU placement.
 
-## Contract flow
+Deployment workflow verifies the downloaded manifest body SHA and essential v2 policy before building the image.
+Runtime performs the stronger per-object verification again. This duplicates a security boundary intentionally: CI
+prevents a known-incompatible rollout, while the task protects every startup.
 
-```mermaid
-flowchart LR
-    Pydantic[FastAPI + Pydantic] --> Export[OpenAPI export]
-    Export --> OpenAPI[packages/contract/openapi.json]
-    OpenAPI --> Generate[openapi-typescript]
-    Generate --> Types[packages/contract/types.d.ts]
-    Types --> Web[SvelteKit client]
-```
+## Explainability and challenger promotion
 
-OpenAPI 與 TypeScript types 都提交到 Git。CI 重新生成並拒絕 drift；browser runtime validation 仍然保留，
-因為 TypeScript 型別不能驗證網路輸入。
+The audit trace records request `as_of`, lower bound, filter verification state, lane status, raw lane scores/ranks,
+RRF contribution, freshness, source timestamp and future-snapshot flag for every returned job. It does not expose
+invented skill explanations.
 
-## Infrastructure ownership
+Graph remains a challenger because competition evidence must demonstrate causality, not merely architecture. A graph
+artifact may only use train-period JDs, must pin cutoff and maximum source timestamp, and must ship traversal traces.
+Promotion requires a one-command time-split ablation in which graph-on materially improves the agreed primary metric;
+otherwise graph stays off while its experiment remains reproducible.
 
-| Stack                   | Owns                                                                                                                |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `WorkRetrievalData`     | VPC、S3 gateway endpoint、private/versioned runtime bucket、database security group、Aurora、Secrets Manager secret |
-| `WorkRetrievalPlatform` | ECR、GPU ECS、interface endpoints、ALB、CloudFront、WAF、static web bucket、logs、GitHub OIDC deploy role           |
+## Failure boundaries
 
-Data stack 可以單獨存在且沒有 application fixed cost。Platform stack reuse 同一個 VPC、bucket、cluster 與
-database security group，不會建立第二份資料來源。
-
-## Trust and failure boundaries
-
-- API 與 browser 都 fail closed；malformed engine output 或 response 不會降級成部分結果。
-- Runtime assets 必須由 manifest SHA-256 與每個 artifact SHA-256 固定，不使用 mutable `latest`。
-- PostgreSQL 是唯一 relational database；不提供 SQLite compatibility path。
-- ALB 只接受 CloudFront origin-facing prefix list，並驗證 generated origin header。
-- Deployment 使用 GitHub OIDC 與 protected environment，不保存 long-lived AWS credentials。
-- GPU desired capacity 預設 `0`；只有 image digest 與 runtime manifest 都批准後才能啟用。
+- No mock, history-answer, CPU, legacy-manifest or single-lane fallback exists.
+- Candidate lanes must return unique ASCII-decimal job IDs, explicit contiguous ranks and monotonic finite scores.
+- API output must be at most ten unique jobs, with trace order exactly matching the response.
+- Query text is not written to access logs; only lengths/counts, request ID, status and latency are logged.
+- `/healthz` is process health; `/readyz` requires a successfully initialized immutable runtime.

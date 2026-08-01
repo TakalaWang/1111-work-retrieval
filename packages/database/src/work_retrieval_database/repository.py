@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from sqlalchemy import URL, Engine, create_engine, select
 from sqlalchemy.exc import SQLAlchemyError
@@ -14,6 +15,16 @@ from .models import Job
 
 class JobStoreUnavailableError(RuntimeError):
     """PostgreSQL could not serve a job read without exposing internal details."""
+
+
+@dataclass(frozen=True, slots=True)
+class JobMetadataRecord:
+    job_id: str
+    work_city: str | None
+    duty_major: str | None
+    duty_middle: str | None
+    duty_minor: str | None
+    source_modified_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,15 +94,27 @@ class SqlAlchemyJobReader:
         )
         return cls(engine)
 
-    def first_job_ids(self, *, limit: int) -> tuple[str, ...]:
-        if isinstance(limit, bool) or limit < 1:
-            raise ValueError("limit must be a positive integer")
+    def metadata_for_job_ids(self, job_ids: tuple[str, ...]) -> tuple[JobMetadataRecord, ...]:
+        if len(set(job_ids)) != len(job_ids) or any(
+            not job_id.isascii() or not job_id.isdecimal() for job_id in job_ids
+        ):
+            raise ValueError("job_ids must contain unique ASCII decimal identifiers")
+        if not job_ids:
+            return ()
         try:
             with self._session_factory() as session:
-                statement = select(Job.job_id).order_by(Job.source_row).limit(limit)
-                return tuple(session.scalars(statement).all())
+                statement = select(
+                    Job.job_id,
+                    Job.work_city,
+                    Job.duty_major,
+                    Job.duty_middle,
+                    Job.duty_minor,
+                    Job.source_modified_at,
+                ).where(Job.job_id.in_(job_ids))
+                rows = session.execute(statement).all()
         except SQLAlchemyError as error:
-            raise JobStoreUnavailableError("PostgreSQL job lookup failed") from error
+            raise JobStoreUnavailableError("PostgreSQL job metadata lookup failed") from error
+        return tuple(JobMetadataRecord(*row) for row in rows)
 
     def close(self) -> None:
         self._engine.dispose()

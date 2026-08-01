@@ -12,29 +12,29 @@ on:
         required: true
         type: string
       gpu_instance_type:
-        description: EC2 GPU instance type reserved for the zero-capacity GPU service
+        description: EC2 GPU instance type for the production API service
         required: true
         default: g5.xlarge
         type: string
       cpu_desired_count:
-        description: Desired count for the Fargate API service
+        description: CPU Fargate desired count; production must remain GPU-only
+        required: true
+        default: 0
+        type: number
+      gpu_min_capacity:
+        description: GPU Auto Scaling group minimum capacity
         required: true
         default: 1
         type: number
-      gpu_min_capacity:
-        description: GPU Auto Scaling group minimum capacity; must remain zero for now
-        required: true
-        default: 0
-        type: number
       gpu_max_capacity:
-        description: GPU Auto Scaling group maximum capacity; must remain zero for now
+        description: GPU Auto Scaling group maximum capacity
         required: true
-        default: 0
+        default: 1
         type: number
       gpu_desired_count:
-        description: GPU ECS service desired count; must remain zero for now
+        description: GPU ECS service desired count
         required: true
-        default: 0
+        default: 1
         type: number
 
 permissions:
@@ -76,10 +76,12 @@ jobs:
           [[ "$GPU_MIN_CAPACITY" =~ ^[0-9]+$ ]]
           [[ "$GPU_MAX_CAPACITY" =~ ^[0-9]+$ ]]
           [[ "$GPU_DESIRED_COUNT" =~ ^[0-9]+$ ]]
-          (( CPU_DESIRED_COUNT >= 1 ))
+          (( CPU_DESIRED_COUNT == 0 ))
+          (( GPU_MIN_CAPACITY >= 1 ))
+          (( GPU_MAX_CAPACITY >= 1 ))
+          (( GPU_DESIRED_COUNT >= 1 ))
           (( GPU_MIN_CAPACITY <= GPU_DESIRED_COUNT ))
           (( GPU_DESIRED_COUNT <= GPU_MAX_CAPACITY ))
-          (( GPU_MIN_CAPACITY == 0 && GPU_MAX_CAPACITY == 0 && GPU_DESIRED_COUNT == 0 ))
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
@@ -130,27 +132,34 @@ jobs:
             --outputs-file "$GITHUB_WORKSPACE/data-outputs.json" \
             --parameters "WorkRetrievalData:S3PrefixListId=$S3_PREFIX_LIST_ID"
 
-      - name: Verify the runtime manifest exists
+      - name: Verify the immutable runtime manifest body
         env:
           ARTIFACT_MANIFEST_SHA: ${{ inputs.artifact_manifest_sha }}
         run: |
           set -euo pipefail
           RUNTIME_BUCKET="$(jq -er '.WorkRetrievalData.RuntimeBucketName' data-outputs.json)"
-          MANIFEST_HEAD="$(aws s3api head-object \
+          RUNTIME_MANIFEST="$RUNNER_TEMP/runtime-manifest.json"
+          aws s3api get-object \
             --bucket "$RUNTIME_BUCKET" \
             --key "runtime/${ARTIFACT_MANIFEST_SHA}/manifest.json" \
             --expected-bucket-owner "$AWS_ACCOUNT_ID" \
-            --checksum-mode ENABLED)"
-          EXPECTED_CHECKSUM="$(python - "$ARTIFACT_MANIFEST_SHA" <<'PY'
-          import base64
-          import sys
-
-          print(base64.b64encode(bytes.fromhex(sys.argv[1])).decode())
-          PY
-          )"
-          jq -e --arg checksum "$EXPECTED_CHECKSUM" \
-            '.ContentLength > 0 and .ChecksumSHA256 == $checksum' \
-            <<<"$MANIFEST_HEAD" >/dev/null
+            "$RUNTIME_MANIFEST" >/dev/null
+          test "$(sha256sum "$RUNTIME_MANIFEST" | cut -d' ' -f1)" = "$ARTIFACT_MANIFEST_SHA"
+          jq -e '
+            .schema_version == 2 and
+            .release.complete == true and
+            .release.publication_allowed == true and
+            .retrieval_policy.as_of.production_mode == "request_time" and
+            .retrieval_policy.eligibility == {
+              updated_within_days: 180,
+              future_jobs: "retained_with_zero_freshness",
+              stale_jobs: "exclude",
+              applied_before_retrieval: true
+            } and
+            (.incumbents | keys | sort) == ["temporal_tantivy", "whole_embedding"] and
+            .incumbents.whole_embedding.complete == true and
+            .incumbents.temporal_tantivy.complete == true
+          ' "$RUNTIME_MANIFEST" >/dev/null
 
       - name: Build, publish, and scan the API image
         env:

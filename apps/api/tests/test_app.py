@@ -22,7 +22,7 @@ AS_OF = datetime(2026, 6, 8, tzinfo=UTC)
 
 
 def _result(job_ids: tuple[str, ...]) -> SearchResult:
-    results = tuple(ResultTrace(job_id, 1.0, 1.0, AS_OF, ()) for job_id in job_ids)
+    results = tuple(ResultTrace(job_id, 1.0, 1.0, AS_OF, False, ()) for job_id in job_ids)
     return SearchResult(
         job_ids,
         SearchAuditTrace(
@@ -30,8 +30,8 @@ def _result(job_ids: tuple[str, ...]) -> SearchResult:
             eligible_from=AS_OF - timedelta(days=180),
             max_age_days=180,
             future_rows="retained_with_zero_freshness",
-            location_filter_applied=False,
-            duty_filter_applied=False,
+            location_filter="not_requested",
+            duty_filter="not_requested",
             lanes=(),
             results=results,
         ),

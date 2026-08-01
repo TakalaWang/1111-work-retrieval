@@ -1,11 +1,9 @@
 import {
   Aws,
-  CfnCondition,
   CfnOutput,
   CfnParameter,
   DefaultStackSynthesizer,
   Duration,
-  Fn,
   RemovalPolicy,
   Stack,
   type StackProps
@@ -72,7 +70,7 @@ export class PlatformStack extends Stack {
       'CpuServiceDesiredCount',
       {
         type: 'Number',
-        default: 1,
+        default: 0,
         minValue: 0
       }
     );
@@ -87,12 +85,6 @@ export class PlatformStack extends Stack {
       this,
       'GpuServiceDesiredCount'
     );
-    const gpuCapacityEnabled = new CfnCondition(this, 'GpuCapacityEnabled', {
-      expression: Fn.conditionNot(
-        Fn.conditionEquals(gpuMaxCapacity.valueAsNumber, 0)
-      )
-    });
-
     for (const [name, service] of [
       ['EcrApiEndpoint', ec2.InterfaceVpcEndpointAwsService.ECR],
       ['EcrDockerEndpoint', ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER],
@@ -114,13 +106,11 @@ export class PlatformStack extends Stack {
       ['EcsAgentEndpoint', ec2.InterfaceVpcEndpointAwsService.ECS_AGENT],
       ['EcsTelemetryEndpoint', ec2.InterfaceVpcEndpointAwsService.ECS_TELEMETRY]
     ] as const) {
-      const endpoint = new ec2.InterfaceVpcEndpoint(this, name, {
+      new ec2.InterfaceVpcEndpoint(this, name, {
         vpc,
         service,
         privateDnsEnabled: true
       });
-      const cfnEndpoint = endpoint.node.defaultChild as ec2.CfnVPCEndpoint;
-      cfnEndpoint.cfnOptions.condition = gpuCapacityEnabled;
     }
 
     const webBucket = new s3.Bucket(this, 'WebBucket', {
@@ -150,6 +140,15 @@ export class PlatformStack extends Stack {
       this,
       'GpuAutoScalingGroup',
       {
+        blockDevices: [
+          {
+            deviceName: '/dev/xvda',
+            volume: autoscaling.BlockDeviceVolume.ebs(100, {
+              encrypted: true,
+              volumeType: autoscaling.EbsDeviceVolumeType.GP3
+            })
+          }
+        ],
         vpc,
         vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
         instanceType: new ec2.InstanceType(gpuInstanceType.valueAsString),
@@ -182,7 +181,12 @@ export class PlatformStack extends Stack {
       DB_NAME: 'work_retrieval',
       DB_PORT: cluster.clusterEndpoint.port.toString(),
       EMBEDDING_ENDPOINT_NAME,
-      RERANKER_ENDPOINT_NAME
+      RERANKER_ENDPOINT_NAME,
+      SEARCH_ENABLE_MULTIVIEW_MAXSIM: 'false',
+      SEARCH_PORT_FACTORY:
+        'work_retrieval_api.production:create_production_ports',
+      SEARCH_RUNTIME_MANIFEST_PATH: '/tmp/work-retrieval-runtime/manifest.json',
+      SEARCH_RUNTIME_ROOT: '/tmp/work-retrieval-runtime'
     };
     const databaseSecrets = {
       DB_PASSWORD: ecs.Secret.fromSecretsManager(cluster.secret!, 'password'),
@@ -220,7 +224,6 @@ export class PlatformStack extends Stack {
       circuitBreaker: { rollback: true },
       cluster: ecsCluster,
       desiredCount: cpuServiceDesiredCount.valueAsNumber,
-      healthCheckGracePeriod: Duration.minutes(2),
       minHealthyPercent: 100,
       securityGroups: [ecsSecurityGroup],
       taskDefinition: cpuTaskDefinition,
@@ -249,7 +252,7 @@ export class PlatformStack extends Stack {
       },
       gpuCount: 1,
       logging: ecs.LogDrivers.awsLogs({ logGroup, streamPrefix: 'gpu-api' }),
-      memoryReservationMiB: 4096,
+      memoryReservationMiB: 12288,
       secrets: databaseSecrets
     });
     gpuContainer.addPortMappings({ containerPort: 8000 });
@@ -320,7 +323,7 @@ export class PlatformStack extends Stack {
       priority: 1,
       port: 8000,
       protocol: elbv2.ApplicationProtocol.HTTP,
-      targets: [cpuService],
+      targets: [gpuService],
       healthCheck: { path: '/readyz' }
     });
 
@@ -563,8 +566,8 @@ export class PlatformStack extends Stack {
 function capacityParameter(stack: Stack, id: string): CfnParameter {
   return new CfnParameter(stack, id, {
     type: 'Number',
-    default: 0,
-    minValue: 0
+    default: 1,
+    minValue: 1
   });
 }
 

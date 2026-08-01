@@ -4,6 +4,7 @@ import importlib
 import os
 from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime, time
+from pathlib import Path
 from typing import cast
 from zoneinfo import ZoneInfo
 
@@ -13,6 +14,7 @@ from work_retrieval_core import (
     RuntimeManifest,
     SearchEngine,
 )
+from work_retrieval_core.artifacts import S3RuntimeArtifacts, aws_s3_client
 
 MANIFEST_PATH_ENV = "SEARCH_RUNTIME_MANIFEST_PATH"
 PORT_FACTORY_ENV = "SEARCH_PORT_FACTORY"
@@ -22,7 +24,7 @@ MULTIVIEW_ARTIFACT_ENV = "SEARCH_MULTIVIEW_ARTIFACT_KEY"
 DEMO_TIMEZONE = ZoneInfo("Asia/Taipei")
 
 RuntimeFactory = Callable[[], SearchEngine]
-PortFactory = Callable[[RuntimeManifest, bool], RetrievalPorts]
+PortFactory = Callable[[RuntimeManifest, bool, Mapping[str, str]], RetrievalPorts]
 
 
 def runtime_from_environment(
@@ -32,6 +34,16 @@ def runtime_from_environment(
 ) -> SearchEngine:
     values = os.environ if environment is None else environment
     manifest_path = _required(values, MANIFEST_PATH_ENV)
+    factory = port_factory or _load_port_factory(_required(values, PORT_FACTORY_ENV))
+    artifacts: S3RuntimeArtifacts | None = None
+    if port_factory is None:
+        artifacts = S3RuntimeArtifacts(
+            bucket=_required(values, "ARTIFACT_BUCKET"),
+            manifest_sha256=_required(values, "ARTIFACT_MANIFEST_SHA256"),
+            runtime_root=Path(_required(values, "SEARCH_RUNTIME_ROOT")),
+            s3=aws_s3_client(region_name=_required(values, "AWS_REGION")),
+        )
+        artifacts.materialize_manifest(Path(manifest_path))
     manifest = RuntimeManifest.from_path(manifest_path)
     enable_multiview = _boolean(values.get(MULTIVIEW_ENABLED_ENV, "false"))
     raw_multiview_artifact = values.get(MULTIVIEW_ARTIFACT_ENV)
@@ -41,8 +53,9 @@ def runtime_from_environment(
         raise RuntimeError(f"{MULTIVIEW_ARTIFACT_ENV} requires MaxSim to be enabled")
     else:
         multiview_artifact = None
-    factory = port_factory or _load_port_factory(_required(values, PORT_FACTORY_ENV))
-    ports = factory(manifest, enable_multiview)
+    if artifacts is not None:
+        artifacts.materialize_required(manifest, include_multiview=enable_multiview)
+    ports = factory(manifest, enable_multiview, values)
     if not isinstance(ports, RetrievalPorts):
         raise TypeError("SEARCH_PORT_FACTORY must return RetrievalPorts")
 
@@ -81,7 +94,9 @@ def _parse_demo_as_of(value: str) -> datetime:
     if len(normalized) == 10:
         try:
             return datetime.combine(
-                date.fromisoformat(normalized), time(), DEMO_TIMEZONE
+                date.fromisoformat(normalized),
+                time(23, 59, 59, 999_000),
+                DEMO_TIMEZONE,
             ).astimezone(UTC)
         except ValueError as error:
             raise RuntimeError("SEARCH_DEMO_AS_OF must be an ISO-8601 date or datetime") from error
