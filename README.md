@@ -125,15 +125,45 @@ Aurora credentials 由 ECS 經 Secrets Manager 注入，不保存於 image、Git
 
 ## 資料與 runtime artifacts
 
-| 項目                    | 已驗證版本                                                                                           |
-| ----------------------- | ---------------------------------------------------------------------------------------------------- |
-| Source code             | 每次交付以 Git commit SHA 固定                                                                       |
-| Job dataset             | 1,218,635 rows；SHA-256 `53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089`           |
-| Database schema         | Alembic `0002_create_jobs`；Aurora PostgreSQL 16                                                     |
-| Runtime manifest format | [`runtime-manifest.schema.json`](packages/contract/runtime-manifest.schema.json)，schema version `1` |
-| Embedding endpoint      | `qwen3-embedding-8b-20260801-031826`；`InService`                                                    |
-| Reranker endpoint       | `work-retrieval-qwen3-reranker-8b`；`InService`                                                      |
-| Production retrieval    | 尚未整合或發布                                                                                       |
+| 項目                      | 已驗證版本                                                                                                                                                       |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Source code               | 每次交付以 Git commit SHA 固定                                                                                                                                   |
+| Job dataset               | 1,218,635 rows；SHA-256 `53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089`                                                                       |
+| Database schema           | Alembic `0002_create_jobs`；Aurora PostgreSQL 16                                                                                                                 |
+| Runtime manifest contract | [`runtime-manifest.schema.json`](packages/contract/runtime-manifest.schema.json)，repository schema version `2`；AWS v2 promotion 尚待完整 artifact release spec |
+| Embedding endpoint        | `qwen3-embedding-8b-20260801-031826`；`InService`                                                                                                                |
+| Reranker endpoint         | `work-retrieval-qwen3-reranker-8b`；`InService`                                                                                                                  |
+| Production retrieval      | 尚未整合或發布                                                                                                                                                   |
+
+Runtime v2 promotion 只接受一份已固定 source manifest SHA、selected inventory SHA、component
+manifest SHA 與 challenger promotion evidence 的 release spec。Dry-run 會執行完整 contract 與 component
+manifest 驗證，但不寫入 AWS：
+
+```bash
+uv run python scripts/promote_runtime_artifacts.py \
+  --release-spec artifacts/production/runtime-release-spec.json
+```
+
+如要以本機 fixture／下載後的 immutable bundle 離線驗證，可額外指定：
+
+```bash
+uv run python scripts/promote_runtime_artifacts.py \
+  --release-spec artifacts/production/runtime-release-spec.json \
+  --source-manifest-file artifacts/source/manifest.json \
+  --source-root artifacts/source/files
+```
+
+只有 dry-run 完整通過後，才使用已登入的 `competition` profile 在 `us-west-2` 明確發布：
+
+```bash
+uv run python scripts/promote_runtime_artifacts.py \
+  --release-spec artifacts/production/runtime-release-spec.json \
+  --execute
+```
+
+發布順序固定為逐物件 checksum copy/readback、`manifest.json` 最後寫入、manifest body 與完整 prefix
+再次 readback。任何 incomplete、`publication_allowed=false`、未通過 MRL/Graph/LTR evidence、非 temporal
+Tantivy、Graph cutoff 越界或 object inventory drift 都會 fail closed；不會自動發布部分 release。
 
 職缺 snapshot 的 authoritative S3 object：
 

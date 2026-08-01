@@ -2,7 +2,7 @@
 name = "work-retrieval-workspace"
 version = "0.0.0"
 requires-python = "==3.12.*"
-dependencies = []
+dependencies = ["jsonschema>=4.25,<5"]
 
 [dependency-groups]
 dev = [
