@@ -37,6 +37,25 @@ describe('search API boundary', () => {
     });
   });
 
+  it('forwards a caller-provided request timeout signal', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ request_id: 'req_1', result: [] }), {
+        status: 200
+      })
+    );
+    const signal = AbortSignal.timeout(1_000);
+    const request = { query: '工程師', location_code: [], duty_code: [] };
+
+    await searchJobs(request, fetcher, signal);
+
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/jobs/search', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(request),
+      signal
+    });
+  });
+
   it('preserves the request id from API errors', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(

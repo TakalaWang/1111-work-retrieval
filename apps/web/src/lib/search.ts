@@ -116,12 +116,14 @@ async function jsonPayload(
 
 export async function searchJobs(
   request: SearchRequest,
-  fetcher: typeof fetch = fetch
+  fetcher: typeof fetch = fetch,
+  signal?: AbortSignal
 ): Promise<SearchResponse> {
   const response = await fetcher('/api/v1/jobs/search', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(request)
+    body: JSON.stringify(request),
+    ...(signal ? { signal } : {})
   });
   const payload = await jsonPayload(
     response,

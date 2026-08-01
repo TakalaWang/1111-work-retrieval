@@ -4,6 +4,7 @@
   let query = $state('');
   let locationCodes = $state('');
   let dutyCodes = $state('');
+  let timeoutSeconds = $state(10);
   let loading = $state(false);
   let searched = $state(false);
   /** @type {import('$lib/search').SearchResult[]} */
@@ -22,16 +23,22 @@
 
     try {
       const response = await searchJobs(
-        serializeSearch({ query, locationCodes, dutyCodes })
+        serializeSearch({ query, locationCodes, dutyCodes }),
+        fetch,
+        AbortSignal.timeout(timeoutSeconds * 1_000)
       );
       results = response.result;
       requestId = response.request_id;
       searched = true;
     } catch (caught) {
       error =
-        caught instanceof ApiError
-          ? { message: caught.message, requestId: caught.requestId }
-          : { message: '目前無法連線到搜尋服務，請稍後再試。' };
+        caught instanceof DOMException && caught.name === 'TimeoutError'
+          ? {
+              message: `搜尋超過 ${timeoutSeconds} 秒，請調高最長等待時間後重試。`
+            }
+          : caught instanceof ApiError
+            ? { message: caught.message, requestId: caught.requestId }
+            : { message: '目前無法連線到搜尋服務，請稍後再試。' };
     } finally {
       loading = false;
     }
@@ -39,7 +46,7 @@
 </script>
 
 <svelte:head>
-  <title>職缺搜尋 · 1111 Work Retrieval</title>
+  <title>職缺搜尋</title>
   <meta
     name="description"
     content="以關鍵字、地區代碼與職務代碼搜尋 1111 人力銀行職缺。"
@@ -47,42 +54,32 @@
 </svelte:head>
 
 <main>
-  <header>
-    <div class="brand-mark" aria-hidden="true">11</div>
-    <div>
-      <p class="product-name">1111 Work Retrieval</p>
-      <p class="product-note">搜尋服務展示</p>
-    </div>
-  </header>
-
-  <section class="workspace" aria-labelledby="search-title">
-    <div class="intro">
-      <h1 id="search-title">搜尋合適的職缺</h1>
-      <p>輸入關鍵字；需要縮小範圍時，再加入地區或職務代碼。</p>
-      <aside class="demo-notice" role="note" aria-label="目前功能限制">
-        <strong>目前為假搜尋資料</strong>
-        <p>搜尋條件尚未參與排序，所有搜尋會固定回傳相同 10 筆職缺 ID。</p>
-      </aside>
-    </div>
-
+  <section class="search" aria-labelledby="search-title">
+    <h1 id="search-title">職缺搜尋</h1>
     <form
+      role="search"
       onsubmit={(event) => {
         event.preventDefault();
         void submit();
       }}
     >
-      <label>
-        <span>搜尋關鍵字</span>
+      <div class="primary-search">
+        <label class="sr-only" for="job-query">搜尋職缺</label>
         <input
+          id="job-query"
           bind:value={query}
           type="search"
           name="query"
           required
+          disabled={loading}
           maxlength="512"
           autocomplete="off"
-          placeholder="例如：後端工程師"
+          placeholder="輸入職務、技能或工作地點"
         />
-      </label>
+        <button type="submit" disabled={loading || !query.trim()}>
+          {loading ? '搜尋中…' : '搜尋'}
+        </button>
+      </div>
 
       <div class="filters">
         <label>
@@ -90,7 +87,8 @@
           <textarea
             bind:value={locationCodes}
             name="location_code"
-            rows="3"
+            rows="2"
+            disabled={loading}
             placeholder="100100, 100200"
           ></textarea>
           <small>以逗號、空白或換行分隔</small>
@@ -101,16 +99,28 @@
           <textarea
             bind:value={dutyCodes}
             name="duty_code"
-            rows="3"
+            rows="2"
+            disabled={loading}
             placeholder="140200, 140300"
           ></textarea>
           <small>重複代碼會自動合併</small>
         </label>
-      </div>
 
-      <button type="submit" disabled={loading || !query.trim()}>
-        {loading ? '搜尋中…' : '搜尋職缺'}
-      </button>
+        <label class="timeout-control">
+          <span>最長等待時間 <small>秒</small></span>
+          <input
+            bind:value={timeoutSeconds}
+            name="timeout_seconds"
+            type="number"
+            min="1"
+            max="60"
+            step="1"
+            required
+            disabled={loading}
+          />
+          <small>可調整 1–60 秒</small>
+        </label>
+      </div>
     </form>
   </section>
 
@@ -120,44 +130,46 @@
     aria-live="polite"
     aria-busy={loading}
   >
-    <div class="section-heading">
+    <div class="results-heading">
       <h2 id="results-title">搜尋結果</h2>
       {#if requestId}<span class="request-id">{requestId}</span>{/if}
     </div>
 
     {#if loading}
       <div class="skeleton" role="status">
-        <span class="sr-only">正在載入搜尋結果</span>
+        <span class="sr-only">正在搜尋職缺</span>
         <span></span><span></span><span></span>
       </div>
     {:else if error}
-      <div class="message error" role="alert">
-        <strong>搜尋失敗</strong>
+      <div class="status error" role="alert">
+        <strong>無法完成搜尋</strong>
         <p>{error.message}</p>
         {#if error.requestId}<code>{error.requestId}</code>{/if}
       </div>
     {:else if searched && results.length === 0}
-      <div class="message">
-        <strong>沒有可顯示的職缺</strong>
-        <p>目前的固定展示資料沒有回傳任何結果。</p>
+      <div class="status">
+        <strong>找不到符合條件的職缺</strong>
+        <p>試著改用其他關鍵字或減少篩選條件。</p>
       </div>
     {:else if results.length > 0}
+      <p class="result-summary">找到 {results.length} 筆職缺</p>
       <ol>
         {#each results as result (result.job_id)}
           <li>
-            <span class="rank" aria-hidden="true">{result.rank}</span>
-            <span>
-              <span class="result-label">職缺 ID</span>
-              <strong>{result.job_id}</strong>
-            </span>
+            <article>
+              <span class="rank" aria-label={`搜尋排名第 ${result.rank} 名`}>
+                {result.rank}
+              </span>
+              <div>
+                <span class="result-label">職缺編號</span>
+                <h3>{result.job_id}</h3>
+              </div>
+            </article>
           </li>
         {/each}
       </ol>
     {:else}
-      <div class="message">
-        <strong>準備載入展示資料</strong>
-        <p>送出任意有效關鍵字後，會顯示固定的 10 筆職缺 ID。</p>
-      </div>
+      <p class="empty">輸入關鍵字開始搜尋。</p>
     {/if}
   </section>
 </main>
@@ -177,13 +189,13 @@
       BlinkMacSystemFont,
       'Segoe UI',
       sans-serif;
-    background: oklch(1 0 0);
-    color: oklch(0.2 0.015 340);
+    background: #f7f7f8;
+    color: #202124;
   }
 
   :global(body) {
-    margin: 0;
     min-width: 320px;
+    margin: 0;
   }
 
   :global(button),
@@ -193,238 +205,243 @@
   }
 
   main {
-    width: min(100% - 2rem, 64rem);
+    width: min(100% - 2rem, 52rem);
     margin: 0 auto;
-    padding: 2rem 0 5rem;
-  }
-
-  header {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    padding-bottom: 3.5rem;
-  }
-
-  .brand-mark {
-    display: grid;
-    width: 2.5rem;
-    height: 2.5rem;
-    place-items: center;
-    border-radius: 0.65rem;
-    background: oklch(0.55 0.21 340);
-    color: white;
-    font-weight: 800;
-  }
-
-  .product-name,
-  .product-note,
-  .demo-notice p {
-    margin: 0;
-  }
-
-  .product-name {
-    font-weight: 700;
-  }
-
-  .product-note,
-  .intro > p,
-  small,
-  .result-label,
-  .message p {
-    color: oklch(0.46 0.02 340);
-  }
-
-  .product-note,
-  .result-label {
-    font-size: 0.8rem;
-  }
-
-  .workspace {
-    display: grid;
-    grid-template-columns: minmax(14rem, 0.7fr) minmax(20rem, 1.3fr);
-    gap: clamp(2rem, 6vw, 5rem);
-    padding-bottom: 4rem;
-    border-bottom: 1px solid oklch(0.91 0.008 340);
+    padding: 4rem 0 5rem;
   }
 
   h1 {
-    margin: 0;
-    max-width: 12ch;
-    font-size: 2.25rem;
-    line-height: 1.1;
-    letter-spacing: -0.035em;
+    margin: 0 0 1rem;
+    font-size: 2rem;
+    letter-spacing: -0.03em;
     text-wrap: balance;
   }
 
-  .intro > p {
-    margin: 1rem 0 0;
-    line-height: 1.65;
-  }
-
-  .demo-notice {
-    margin-top: 1.5rem;
-    padding: 1rem;
-    border: 1px solid oklch(0.83 0.08 80);
-    border-radius: 0.65rem;
-    background: oklch(0.97 0.03 80);
-    color: oklch(0.34 0.06 65);
-    font-size: 0.88rem;
-    line-height: 1.55;
-  }
-
-  .demo-notice p {
-    margin-top: 0.25rem;
-  }
-
-  form,
-  label {
-    display: flex;
-    flex-direction: column;
-  }
-
   form {
-    gap: 1.4rem;
+    display: grid;
+    gap: 1rem;
   }
 
-  label {
-    gap: 0.55rem;
-    font-size: 0.9rem;
-    font-weight: 650;
+  .primary-search {
+    display: flex;
+    padding: 0.35rem;
+    border: 1px solid #cfd1d5;
+    border-radius: 0.8rem;
+    background: #fff;
+    box-shadow: 0 6px 24px rgb(32 33 36 / 7%);
+    transition:
+      border-color 160ms ease,
+      box-shadow 160ms ease;
   }
 
-  input,
-  textarea {
-    width: 100%;
-    border: 1px solid oklch(0.83 0.015 340);
-    border-radius: 0.65rem;
-    padding: 0.8rem 0.9rem;
-    background: white;
+  .primary-search:focus-within {
+    border-color: #d7195f;
+    box-shadow:
+      0 0 0 3px rgb(215 25 95 / 12%),
+      0 8px 28px rgb(32 33 36 / 9%);
+  }
+
+  .primary-search input {
+    min-width: 0;
+    min-height: 3.25rem;
+    flex: 1;
+    border: 0;
+    outline: 0;
+    padding: 0.75rem 1rem;
+    background: transparent;
     color: inherit;
   }
 
-  input {
-    min-height: 3.2rem;
+  .primary-search input::placeholder,
+  textarea::placeholder {
+    color: #62656a;
   }
 
-  textarea {
-    min-height: 5.4rem;
-    resize: vertical;
+  button {
+    min-width: 5.5rem;
+    border: 0;
+    border-radius: 0.55rem;
+    padding: 0.75rem 1.25rem;
+    background: #d7195f;
+    color: #fff;
+    font-weight: 700;
+    cursor: pointer;
+    transition:
+      background 160ms ease,
+      transform 160ms ease;
   }
 
-  input:focus-visible,
-  textarea:focus-visible,
+  button:hover:not(:disabled) {
+    background: #b81250;
+  }
+
+  button:active:not(:disabled) {
+    transform: translateY(1px);
+  }
+
   button:focus-visible {
-    outline: 3px solid oklch(0.91 0.05 340);
-    outline-offset: 1px;
+    outline: 3px solid rgb(215 25 95 / 25%);
+    outline-offset: 2px;
+  }
+
+  button:disabled {
+    background: #c8c9cc;
+    color: #56595f;
+    cursor: not-allowed;
   }
 
   .filters {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 1rem;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) minmax(8rem, 0.45fr);
+    gap: 0.75rem;
   }
 
-  button {
-    min-height: 3rem;
-    align-self: flex-start;
-    border: 0;
+  label {
+    display: grid;
+    gap: 0.4rem;
+    color: #3f4248;
+    font-size: 0.82rem;
+    font-weight: 650;
+  }
+
+  label small {
+    color: #62656a;
+    font-weight: 400;
+  }
+
+  textarea {
+    width: 100%;
+    min-height: 4.5rem;
+    resize: vertical;
+    border: 1px solid #d8d9dc;
     border-radius: 0.65rem;
-    padding: 0.7rem 1.2rem;
-    background: oklch(0.55 0.21 340);
-    color: white;
-    font-weight: 750;
-    cursor: pointer;
+    padding: 0.7rem 0.8rem;
+    background: #fff;
+    color: inherit;
+    line-height: 1.45;
   }
 
-  button:disabled {
-    background: oklch(0.77 0.03 340);
-    color: oklch(0.42 0.015 340);
-    cursor: not-allowed;
+  .timeout-control input {
+    width: 100%;
+    min-height: 2.75rem;
+    border: 1px solid #d8d9dc;
+    border-radius: 0.65rem;
+    padding: 0.7rem 0.8rem;
+    background: #fff;
+    color: inherit;
+  }
+
+  textarea:focus-visible,
+  .timeout-control input:focus-visible {
+    outline: 3px solid rgb(215 25 95 / 12%);
+    border-color: #d7195f;
   }
 
   .results {
-    padding-top: 2.5rem;
+    margin-top: 2rem;
   }
 
-  .section-heading {
+  .results-heading {
     display: flex;
     align-items: baseline;
     justify-content: space-between;
     gap: 1rem;
-    margin-bottom: 1.25rem;
+    margin-bottom: 0.75rem;
   }
 
   h2 {
     margin: 0;
-    font-size: 1.2rem;
+    font-size: 1rem;
   }
 
   .request-id,
   code {
-    color: oklch(0.43 0.025 340);
+    color: #62656a;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.72rem;
     overflow-wrap: anywhere;
   }
 
-  .message {
-    padding: 2rem;
-    border: 1px solid oklch(0.9 0.01 340);
-    border-radius: 0.75rem;
-    background: oklch(0.98 0.004 340);
+  .result-summary,
+  .empty,
+  .result-label,
+  .status p {
+    color: #62656a;
   }
 
-  .message p {
-    margin: 0.5rem 0 0;
-    line-height: 1.55;
+  .result-summary,
+  .empty {
+    margin: 0 0 0.75rem;
+    font-size: 0.88rem;
   }
 
-  .message.error {
-    border-color: oklch(0.72 0.12 25);
-    background: oklch(0.97 0.025 25);
+  .empty {
+    text-align: center;
   }
 
-  .message code {
+  .status {
+    padding: 1.25rem;
+    border: 1px solid #dedfe2;
+    border-radius: 0.7rem;
+    background: #fff;
+  }
+
+  .status p {
+    margin: 0.4rem 0 0;
+  }
+
+  .status.error {
+    border-color: #e7a1b9;
+    background: #fff7fa;
+  }
+
+  .status code {
     display: inline-block;
-    margin-top: 1rem;
+    margin-top: 0.8rem;
   }
 
   ol {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 0.75rem;
     margin: 0;
     padding: 0;
     list-style: none;
   }
 
-  li {
-    display: grid;
-    grid-template-columns: 2rem minmax(0, 1fr);
-    align-items: center;
-    gap: 1rem;
-    min-height: 4.5rem;
-    padding: 0.75rem;
-    border: 1px solid oklch(0.9 0.01 340);
-    border-radius: 0.65rem;
+  article {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.85rem;
+    padding: 1.25rem;
+    border: 1px solid #dedfe2;
+    border-radius: 0.7rem;
+    background: #fff;
   }
 
   .rank {
     display: grid;
-    width: 2rem;
-    height: 2rem;
+    width: 1.8rem;
+    height: 1.8rem;
+    flex: 0 0 auto;
     place-items: center;
-    border-radius: 999px;
-    background: oklch(0.93 0.04 340);
-    color: oklch(0.38 0.14 340);
-    font-size: 0.8rem;
+    border-radius: 50%;
+    background: #fde8ef;
+    color: #b81250;
+    font-size: 0.78rem;
     font-weight: 800;
   }
 
-  .result-label,
-  li strong {
-    display: block;
-    overflow-wrap: anywhere;
+  h3 {
+    margin: 0;
+    font-size: 1.08rem;
+    line-height: 1.4;
+    text-wrap: balance;
+  }
+
+  .result-label {
+    display: inline-block;
+    margin-top: 0.25rem;
+    font-size: 0.74rem;
   }
 
   .skeleton {
@@ -433,49 +450,56 @@
   }
 
   .skeleton span {
-    height: 4rem;
-    border-radius: 0.65rem;
-    background: oklch(0.94 0.01 340);
-    animation: pulse 1.2s ease-in-out infinite alternate;
+    height: 4.5rem;
+    border-radius: 0.7rem;
+    background: #e9eaec;
+    animation: pulse 800ms ease-in-out infinite alternate;
   }
 
   .sr-only {
     position: absolute;
-    width: 1px !important;
-    height: 1px !important;
+    width: 1px;
+    height: 1px;
     overflow: hidden;
     clip: rect(0, 0, 0, 0);
     white-space: nowrap;
+    clip-path: inset(50%);
   }
 
   @keyframes pulse {
     to {
-      background: oklch(0.98 0.005 340);
+      background: #f2f2f3;
     }
   }
 
-  @media (max-width: 46rem) {
+  @media (max-width: 36rem) {
     main {
-      width: min(100% - 1.5rem, 64rem);
-      padding-top: 1.25rem;
+      width: min(100% - 1.25rem, 52rem);
+      padding-top: 2rem;
     }
 
-    header {
-      padding-bottom: 2.5rem;
-    }
-
-    .workspace,
-    ol,
+    .primary-search,
     .filters {
+      display: grid;
       grid-template-columns: 1fr;
     }
 
-    form > button {
-      width: 100%;
+    button {
+      min-height: 3rem;
+    }
+
+    .results-heading {
+      display: grid;
+      gap: 0.35rem;
     }
   }
 
   @media (prefers-reduced-motion: reduce) {
+    .primary-search,
+    button {
+      transition: none;
+    }
+
     .skeleton span {
       animation: none;
     }
