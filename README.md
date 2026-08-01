@@ -110,19 +110,22 @@ git diff -- packages/contract/openapi.json packages/contract/types.d.ts
 
 ## Runtime contract
 
-Container entrypoint 是 `work_retrieval_api.main:app`。啟動時必須提供 PostgreSQL、immutable S3 runtime 與
-SageMaker query encoder settings；任何 artifact、容量、database 或 endpoint 契約不成立都 fail closed：
+Container entrypoint 是 `work_retrieval_api.main:app`。啟動時必須提供 PostgreSQL 與 immutable S3 runtime；
+只有顯式啟用 dense shadow 時才要求 SageMaker query encoder settings。任何啟用中的 artifact、容量、
+database 或 endpoint 契約不成立都 fail closed：
 
 ```text
 DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
 ARTIFACT_BUCKET, ARTIFACT_MANIFEST_SHA256, AWS_REGION
 SEARCH_RUNTIME_ROOT, SEARCH_RUNTIME_MANIFEST_PATH, SEARCH_PORT_FACTORY
-SEARCH_ENABLE_MULTIVIEW_MAXSIM, EMBEDDING_ENDPOINT_NAME
+SEARCH_ENABLE_DENSE_SHADOW, SEARCH_ENABLE_MULTIVIEW_MAXSIM
+EMBEDDING_ENDPOINT_NAME, EMBEDDING_ENDPOINT_CONFIG_NAME, EMBEDDING_MODEL_NAME
 ```
 
 公開路徑：
 
-- `POST /api/v1/jobs/search`：Tantivy full-JD BM25 + whole-Qwen dense + RRF Top 10。
+- `POST /api/v1/jobs/search`：Tantivy full-JD BM25 incumbent Top 10；whole-Qwen dense 預設關閉，啟用時僅作
+  shadow/tail evidence，不得改排 incumbent Top 10。
 - `GET /healthz` 與 `GET /readyz`：process 與 initialized-runtime health。
 
 Aurora credentials 由 ECS 經 Secrets Manager 注入，不保存於 image、Git 或 workflow。

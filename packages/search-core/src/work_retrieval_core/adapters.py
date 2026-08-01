@@ -1,24 +1,36 @@
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import re
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from threading import BoundedSemaphore
+from time import monotonic
 from typing import Any, Protocol, cast, runtime_checkable
 
 import boto3  # type: ignore[import-untyped]
 import numpy as np
 import numpy.typing as npt
 import tantivy
+from botocore.config import Config  # type: ignore[import-untyped]
 
-from work_retrieval_core.engine import CandidateEvidence, CandidateRequest
+from work_retrieval_core.engine import (
+    CandidateEvidence,
+    CandidateRequest,
+    CompiledQuery,
+    QueryRewrite,
+)
 from work_retrieval_core.manifest import (
     MODEL,
     MODEL_REVISION,
+    SOURCE_EMBEDDING_DIMENSION,
     WHOLE_DIMENSION,
+    WHOLE_PROJECTION,
     RuntimeManifest,
 )
 from work_retrieval_core.serialization import (
@@ -48,10 +60,75 @@ HTML_TAG = re.compile(r"<[^>]*>")
 URL = re.compile(r"\b(?:https?://|www\.)\S+", re.IGNORECASE)
 ZERO_WIDTH = re.compile(r"[\u200b-\u200f\u2060\ufeff]")
 EXACT_DENSE_CHUNK_ROWS = 24_576
+EXACT_DENSE_MAX_ELIGIBLE_ROWS = 250_000
+EXACT_DENSE_TIMEOUT_SECONDS = 2.0
+LEXICAL_POLICY_VERSION = "2026-08-01-pretokenized-v2"
+ENDPOINT_NAME = "qwen3-embedding-8b-20260801-031826"
+ENDPOINT_CONFIG_NAME = ENDPOINT_NAME
+ENDPOINT_MODEL_NAME = ENDPOINT_NAME
+TEI_IMAGE_URI = (
+    "246618743249.dkr.ecr.us-west-2.amazonaws.com/tei@"
+    "sha256:45be982bc2eb434d1dccd7d05ca4e3ab63972f41d8030f1fe8bc809c2bcbf564"
+)
+TEI_ENVIRONMENT = {
+    "AUTO_TRUNCATE": "true",
+    "DTYPE": "float16",
+    "HF_MODEL_ID": MODEL,
+    "HF_MODEL_REVISION": MODEL_REVISION,
+    "MAX_BATCH_TOKENS": "4096",
+    "MAX_CLIENT_BATCH_SIZE": "32",
+    "MAX_INPUT_LENGTH": "512",
+}
+TEXT_FIELDS = ("title", "duty", "skills", "industry", "body")
+RAW_FILTER_FIELDS = ("location_filter", "duty_filter", "visibility_filter")
+TOKENIZERS = {**dict.fromkeys(TEXT_FIELDS, "default"), **dict.fromkeys(RAW_FILTER_FIELDS, "raw")}
+SOURCE_FIELDS = {
+    "title": ["title"],
+    "duty": ["duty_minor", "duty_middle", "duty_major"],
+    "skills": ["computer_skills", "work_skills", "professional_certifications"],
+    "industry": ["industry_minor", "industry_middle", "industry_major"],
+    "body": [
+        field
+        for _label, field in FULL_JOB_FIELDS
+        if field
+        not in {
+            "title",
+            "duty_minor",
+            "duty_middle",
+            "duty_major",
+            "computer_skills",
+            "work_skills",
+            "professional_certifications",
+            "industry_minor",
+            "industry_middle",
+            "industry_major",
+        }
+    ],
+}
+
+
+def lexical_policy_sha256() -> str:
+    policy = {
+        "version": LEXICAL_POLICY_VERSION,
+        "field_boosts": FIELD_BOOSTS,
+        "source_fields": SOURCE_FIELDS,
+        "tokenizers": TOKENIZERS,
+    }
+    return hashlib.sha256(
+        json.dumps(policy, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
 
 
 class SageMakerRuntime(Protocol):
     def invoke_endpoint(self, **kwargs: object) -> Mapping[str, object]: ...
+
+
+class SageMakerControlPlane(Protocol):
+    def describe_endpoint(self, **kwargs: object) -> Mapping[str, object]: ...
+
+    def describe_endpoint_config(self, **kwargs: object) -> Mapping[str, object]: ...
+
+    def describe_model(self, **kwargs: object) -> Mapping[str, object]: ...
 
 
 @runtime_checkable
@@ -60,7 +137,9 @@ class ReadableBody(Protocol):
 
 
 class EligibleRows(Protocol):
-    def eligible_indices(self, request: CandidateRequest) -> npt.NDArray[np.int64]: ...
+    def eligible_indices(
+        self, request: CandidateRequest, *, max_rows: int
+    ) -> npt.NDArray[np.int64]: ...
 
 
 class QueryEncoder(Protocol):
@@ -110,6 +189,62 @@ class FilterTaxonomy:
 
 
 @dataclass(frozen=True, slots=True)
+class CorpusQueryCompiler:
+    corrections: Mapping[str, str]
+
+    @classmethod
+    def from_path(cls, path: Path) -> CorpusQueryCompiler:
+        raw = _json_object(path, "query corrections")
+        _exact_keys(
+            raw,
+            {
+                "schema_version",
+                "source_policy",
+                "train_cutoff_exclusive",
+                "max_source_timestamp",
+                "corrections",
+            },
+            "query corrections",
+        )
+        if raw["schema_version"] != 1 or raw["source_policy"] != "train_jd_only":
+            raise RuntimeError("query corrections are not train-JD corpus safe")
+        cutoff = _aware_timestamp(raw["train_cutoff_exclusive"], "train cutoff")
+        maximum = _aware_timestamp(raw["max_source_timestamp"], "max source timestamp")
+        if maximum >= cutoff:
+            raise RuntimeError("query corrections include post-cutoff source data")
+        values = _object(raw["corrections"], "query corrections mapping")
+        corrections: dict[str, str] = {}
+        for source, target in values.items():
+            normalized_source = canonical_code(source if isinstance(source, str) else None)
+            normalized_target = canonical_code(target if isinstance(target, str) else None)
+            if (
+                not normalized_source
+                or not normalized_target
+                or normalized_source != source
+                or normalized_target != target
+                or normalized_source == normalized_target
+            ):
+                raise RuntimeError("query corrections contain a non-canonical rule")
+            corrections[normalized_source] = normalized_target
+        return cls(corrections)
+
+    def compile(self, text: str) -> CompiledQuery:
+        normalized = canonical_code(text)
+        corrected = self.corrections.get(normalized)
+        if corrected is None and normalized:
+            tokens = normalized.split()
+            replaced = [self.corrections.get(token, token) for token in tokens]
+            if replaced != tokens:
+                corrected = " ".join(replaced)
+        if corrected is None:
+            return CompiledQuery((text,))
+        return CompiledQuery(
+            (text, corrected),
+            (QueryRewrite(normalized, corrected, "train_jd_corpus_v1"),),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class EmbeddingShard:
     vectors_path: str
     row_start: int
@@ -129,7 +264,9 @@ class WholeEmbeddingLayout:
             "complete",
             "model",
             "revision",
+            "source_dimension",
             "dimension",
+            "projection",
             "dtype",
             "normalized",
             "rows",
@@ -140,6 +277,8 @@ class WholeEmbeddingLayout:
             "document_template_sha256",
             "document_fields",
             "query_prompt",
+            "build_manifest_path",
+            "build_manifest_sha256",
             "job_ids_path",
             "shards",
         }
@@ -150,7 +289,9 @@ class WholeEmbeddingLayout:
             "complete": True,
             "model": MODEL,
             "revision": MODEL_REVISION,
+            "source_dimension": SOURCE_EMBEDDING_DIMENSION,
             "dimension": WHOLE_DIMENSION,
+            "projection": WHOLE_PROJECTION,
             "dtype": "float16",
             "normalized": True,
             "rows": whole.rows,
@@ -163,7 +304,23 @@ class WholeEmbeddingLayout:
             "query_prompt": QUERY_PROMPT,
         }
         _require_equal(raw, expected, "whole embedding component")
+        build_manifest_path = _artifact_path(
+            raw["build_manifest_path"], "whole embedding build manifest"
+        )
+        build_manifest_sha256 = _sha(raw["build_manifest_sha256"], "whole embedding build manifest")
+        whole_prefix = str(Path(whole.manifest_path).parent.as_posix()) + "/"
+        if not build_manifest_path.startswith(whole_prefix):
+            raise RuntimeError("whole embedding build manifest escapes its component")
+        build_artifact = manifest.artifact(build_manifest_path)
+        if (
+            build_artifact is None
+            or build_artifact.kind != "evidence"
+            or build_artifact.sha256 != build_manifest_sha256
+        ):
+            raise RuntimeError("whole embedding build manifest is absent or differs")
         job_ids_path = _artifact_path(raw["job_ids_path"], "whole embedding job IDs")
+        if not job_ids_path.startswith(whole_prefix):
+            raise RuntimeError("whole embedding job IDs escape its component")
         _require_inventory_kind(manifest, job_ids_path, "embedding")
         raw_shards = raw["shards"]
         if not isinstance(raw_shards, list) or not raw_shards:
@@ -186,8 +343,10 @@ class WholeEmbeddingLayout:
                 or rows != end - start
                 or shard["dimension"] != WHOLE_DIMENSION
             ):
-                raise RuntimeError("whole embedding shards are not contiguous 4096d rows")
+                raise RuntimeError("whole embedding shards are not contiguous 1024d rows")
             vectors_path = _artifact_path(shard["vectors_path"], f"shard {position} vectors")
+            if not vectors_path.startswith(whole_prefix):
+                raise RuntimeError("whole embedding vector shard escapes its component")
             _require_inventory_kind(manifest, vectors_path, "embedding")
             parsed.append(EmbeddingShard(vectors_path, start, end))
             expected_start = end
@@ -200,6 +359,8 @@ class WholeEmbeddingLayout:
 class TantivyLayout:
     index_directory: str
     taxonomy_path: str
+    job_ids_path: str
+    query_corrections_path: str
 
     @classmethod
     def from_path(cls, path: Path, manifest: RuntimeManifest) -> TantivyLayout:
@@ -214,8 +375,16 @@ class TantivyLayout:
             "index_directory",
             "index_files",
             "taxonomy_path",
+            "job_ids_path",
+            "query_corrections_path",
+            "build_manifest_path",
+            "build_manifest_sha256",
             "schema_fields",
             "field_boosts",
+            "lexical_policy_version",
+            "lexical_policy_sha256",
+            "tokenizers",
+            "source_fields",
             "filter_semantics",
             "updated_at_field",
             "temporal_filter_semantics",
@@ -245,6 +414,10 @@ class TantivyLayout:
                     "job_index",
                 ],
                 "field_boosts": FIELD_BOOSTS,
+                "lexical_policy_version": LEXICAL_POLICY_VERSION,
+                "lexical_policy_sha256": lexical_policy_sha256(),
+                "tokenizers": TOKENIZERS,
+                "source_fields": SOURCE_FIELDS,
                 "filter_semantics": (
                     "visibility AND (location OR) AND (duty OR), applied before Top-K"
                 ),
@@ -258,6 +431,12 @@ class TantivyLayout:
             raise RuntimeError("Tantivy component must declare index_files")
         directory = _artifact_path(raw["index_directory"], "Tantivy index directory")
         taxonomy_path = _artifact_path(raw["taxonomy_path"], "Tantivy filter taxonomy")
+        job_ids_path = _artifact_path(raw["job_ids_path"], "Tantivy job IDs")
+        query_corrections_path = _artifact_path(
+            raw["query_corrections_path"], "Tantivy query corrections"
+        )
+        build_manifest_path = _artifact_path(raw["build_manifest_path"], "Tantivy build manifest")
+        build_manifest_sha256 = _sha(raw["build_manifest_sha256"], "Tantivy build manifest")
         prefix = directory + "/"
         for file in files:
             file_path = _artifact_path(file, "Tantivy index file")
@@ -265,7 +444,28 @@ class TantivyLayout:
                 raise RuntimeError("Tantivy index file escapes its declared directory")
             _require_inventory_kind(manifest, file_path, "index")
         _require_inventory_kind(manifest, taxonomy_path, "index")
-        return cls(directory, taxonomy_path)
+        _require_inventory_kind(manifest, job_ids_path, "index")
+        _require_inventory_kind(manifest, query_corrections_path, "index")
+        build_artifact = manifest.artifact(build_manifest_path)
+        if (
+            build_artifact is None
+            or build_artifact.kind != "evidence"
+            or build_artifact.sha256 != build_manifest_sha256
+        ):
+            raise RuntimeError("Tantivy build manifest is absent or differs")
+        component_prefix = str(Path(temporal.manifest_path).parent.as_posix()) + "/"
+        if any(
+            not path.startswith(component_prefix)
+            for path in (
+                directory,
+                taxonomy_path,
+                job_ids_path,
+                query_corrections_path,
+                build_manifest_path,
+            )
+        ):
+            raise RuntimeError("Tantivy component artifact escapes its component")
+        return cls(directory, taxonomy_path, job_ids_path, query_corrections_path)
 
 
 class TantivyBm25Retriever:
@@ -277,6 +477,7 @@ class TantivyBm25Retriever:
         job_ids: tuple[str, ...],
         taxonomy: FilterTaxonomy,
     ) -> None:
+        _validate_tantivy_schema(index_directory / "meta.json")
         self._index = tantivy.Index.open(str(index_directory))
         self._schema = self._index.schema
         self._searcher = self._index.searcher()
@@ -301,11 +502,15 @@ class TantivyBm25Retriever:
             for rank, (job_id, score) in enumerate(ranked, start=1)
         )
 
-    def eligible_indices(self, request: CandidateRequest) -> npt.NDArray[np.int64]:
+    def eligible_indices(
+        self, request: CandidateRequest, *, max_rows: int = EXACT_DENSE_MAX_ELIGIBLE_ROWS
+    ) -> npt.NDArray[np.int64]:
         self._ensure_open()
         query = self._build_query(request, lexical=False)
         count_result = self._searcher.search(query, limit=1, count=True)
         count = cast(int, cast(Any, count_result).count)
+        if count > max_rows:
+            raise RuntimeError("eligible universe exceeds its bounded materialization limit")
         if count == 0:
             return np.empty(0, dtype=np.int64)
         hits = self._searcher.search(query, limit=count, count=False).hits
@@ -325,7 +530,13 @@ class TantivyBm25Retriever:
             return tantivy.Query.empty_query()
         clauses: list[tuple[tantivy.Occur, tantivy.Query]] = []
         if lexical:
-            tokens = lexical_tokens(request.text)
+            tokens = list(
+                dict.fromkeys(
+                    token
+                    for text in request.lexical_texts or (request.text,)
+                    for token in lexical_tokens(text)
+                )
+            )
             han_bigrams = [
                 token
                 for token in tokens
@@ -412,8 +623,38 @@ class SageMakerQueryEncoder:
         self._runtime = runtime
 
     @classmethod
-    def from_aws(cls, *, endpoint_name: str, region_name: str) -> SageMakerQueryEncoder:
-        runtime = boto3.client("sagemaker-runtime", region_name=region_name)
+    def from_aws(
+        cls,
+        *,
+        endpoint_name: str,
+        endpoint_config_name: str,
+        model_name: str,
+        region_name: str,
+    ) -> SageMakerQueryEncoder:
+        if (
+            endpoint_name != ENDPOINT_NAME
+            or endpoint_config_name != ENDPOINT_CONFIG_NAME
+            or model_name != ENDPOINT_MODEL_NAME
+            or region_name != "us-west-2"
+        ):
+            raise RuntimeError("embedding endpoint settings differ from the promoted identity")
+        client_config = Config(
+            connect_timeout=1,
+            read_timeout=2,
+            retries={"max_attempts": 2, "mode": "standard"},
+        )
+        control = boto3.client("sagemaker", region_name=region_name, config=client_config)
+        _verify_endpoint_identity(
+            control,
+            endpoint_name=endpoint_name,
+            endpoint_config_name=endpoint_config_name,
+            model_name=model_name,
+        )
+        runtime = boto3.client(
+            "sagemaker-runtime",
+            region_name=region_name,
+            config=client_config,
+        )
         return cls(endpoint_name, runtime)
 
     def encode(self, query: str) -> npt.NDArray[np.float32]:
@@ -430,12 +671,13 @@ class SageMakerQueryEncoder:
             vector = np.asarray(json.loads(body.read()), dtype=np.float32)
         except (json.JSONDecodeError, TypeError, ValueError) as error:
             raise RuntimeError("SageMaker embedding response is invalid JSON") from error
-        if vector.shape != (1, WHOLE_DIMENSION) or not np.isfinite(vector).all():
+        if vector.shape != (1, SOURCE_EMBEDDING_DIMENSION) or not np.isfinite(vector).all():
             raise RuntimeError("SageMaker embedding response violates the 4096d contract")
-        norm = float(np.linalg.norm(vector[0]))
+        prefix = vector[0, :WHOLE_DIMENSION]
+        norm = float(np.linalg.norm(prefix))
         if not np.isfinite(norm) or norm == 0:
             raise RuntimeError("SageMaker embedding response has an invalid norm")
-        return np.asarray(vector[0] / norm, dtype=np.float32)
+        return np.asarray(prefix / norm, dtype=np.float32)
 
 
 class WholeQwenExactRetriever:
@@ -450,13 +692,22 @@ class WholeQwenExactRetriever:
         eligible_rows: EligibleRows,
         encoder: QueryEncoder,
         chunk_rows: int = EXACT_DENSE_CHUNK_ROWS,
+        max_eligible_rows: int = EXACT_DENSE_MAX_ELIGIBLE_ROWS,
+        timeout_seconds: float = EXACT_DENSE_TIMEOUT_SECONDS,
+        clock: Callable[[], float] = monotonic,
     ) -> None:
-        if chunk_rows < 1:
-            raise ValueError("dense chunk_rows must be positive")
+        if chunk_rows < 1 or max_eligible_rows < 1 or timeout_seconds <= 0:
+            raise ValueError("dense scan bounds must be positive")
+        if not layout.shards or layout.shards[-1].row_end != len(job_ids):
+            raise ValueError("dense shard coverage must equal the immutable job order")
         self._job_ids = job_ids
         self._eligible_rows = eligible_rows
         self._encoder = encoder
         self._chunk_rows = chunk_rows
+        self._max_eligible_rows = max_eligible_rows
+        self._timeout_seconds = timeout_seconds
+        self._clock = clock
+        self._inflight = BoundedSemaphore(1)
         self._shards: tuple[tuple[EmbeddingShard, npt.NDArray[np.float16]], ...] = tuple(
             (shard, self._open_shard(runtime_root / shard.vectors_path, shard))
             for shard in layout.shards
@@ -468,30 +719,63 @@ class WholeQwenExactRetriever:
             raise RuntimeError("whole-Qwen retriever is closed")
         if limit < 1:
             raise ValueError("dense limit must be positive")
-        query = self._encoder.encode(request.text)
-        eligible = self._eligible_rows.eligible_indices(request)
-        if not len(eligible):
-            return ()
-        best: list[tuple[float, int]] = []
-        for layout, vectors in self._shards:
-            start = int(np.searchsorted(eligible, layout.row_start, side="left"))
-            end = int(np.searchsorted(eligible, layout.row_end, side="left"))
-            selected = eligible[start:end]
-            for offset in range(0, len(selected), self._chunk_rows):
-                rows = selected[offset : offset + self._chunk_rows]
-                local_rows = rows - layout.row_start
-                matrix = np.asarray(vectors[local_rows], dtype=np.float32)
-                scores = matrix @ query
-                best.extend(
-                    (float(score), int(row)) for score, row in zip(scores, rows, strict=True)
-                )
-                if len(best) > limit * 8:
-                    best = sorted(best, key=lambda item: (-item[0], self._job_ids[item[1]]))[:limit]
-        ranked = sorted(best, key=lambda item: (-item[0], self._job_ids[item[1]]))[:limit]
-        return tuple(
-            CandidateEvidence(self._job_ids[row], score, rank)
-            for rank, (score, row) in enumerate(ranked, start=1)
-        )
+        if not self._inflight.acquire(blocking=False):
+            raise RuntimeError("exact dense scanner is busy")
+        try:
+            deadline = self._clock() + self._timeout_seconds
+            query = self._encoder.encode(request.text)
+            if (
+                query.shape != (WHOLE_DIMENSION,)
+                or query.dtype != np.float32
+                or not np.isfinite(query).all()
+            ):
+                raise RuntimeError("dense query embedding violates the 1024d contract")
+            if self._clock() >= deadline:
+                raise RuntimeError("exact dense scan exceeded its deadline")
+            eligible = self._eligible_rows.eligible_indices(
+                request,
+                max_rows=self._max_eligible_rows,
+            )
+            if len(eligible) > self._max_eligible_rows:
+                raise RuntimeError("exact dense eligible universe exceeds its production bound")
+            if (
+                eligible.ndim != 1
+                or eligible.dtype != np.int64
+                or (len(eligible) and (eligible[0] < 0 or eligible[-1] >= len(self._job_ids)))
+                or (len(eligible) > 1 and np.any(eligible[1:] <= eligible[:-1]))
+            ):
+                raise RuntimeError("exact dense eligible rows violate the immutable row order")
+            if self._clock() >= deadline:
+                raise RuntimeError("exact dense scan exceeded its deadline")
+            if not len(eligible):
+                return ()
+            best: list[tuple[float, int]] = []
+            for layout, vectors in self._shards:
+                start = int(np.searchsorted(eligible, layout.row_start, side="left"))
+                end = int(np.searchsorted(eligible, layout.row_end, side="left"))
+                selected = eligible[start:end]
+                for offset in range(0, len(selected), self._chunk_rows):
+                    if self._clock() >= deadline:
+                        raise RuntimeError("exact dense scan exceeded its deadline")
+                    rows = selected[offset : offset + self._chunk_rows]
+                    local_rows = rows - layout.row_start
+                    matrix = np.asarray(vectors[local_rows], dtype=np.float32)
+                    scores = matrix @ query
+                    local_limit = min(limit, len(scores))
+                    indices = np.argpartition(scores, -local_limit)[-local_limit:]
+                    best.extend((float(scores[index]), int(rows[index])) for index in indices)
+                    best = sorted(
+                        best,
+                        key=lambda item: (-item[0], self._job_ids[item[1]]),
+                    )[:limit]
+            if self._clock() >= deadline:
+                raise RuntimeError("exact dense scan exceeded its deadline")
+            return tuple(
+                CandidateEvidence(self._job_ids[row], score, rank)
+                for rank, (score, row) in enumerate(best, start=1)
+            )
+        finally:
+            self._inflight.release()
 
     def close(self) -> None:
         self._closed = True
@@ -525,6 +809,97 @@ def load_job_ids(path: Path, *, expected_rows: int) -> tuple[str, ...]:
     ):
         raise RuntimeError("whole-Qwen job IDs violate the serving contract")
     return tuple(raw)
+
+
+def _verify_endpoint_identity(
+    control: SageMakerControlPlane,
+    *,
+    endpoint_name: str,
+    endpoint_config_name: str,
+    model_name: str,
+) -> None:
+    endpoint = control.describe_endpoint(EndpointName=endpoint_name)
+    if (
+        endpoint.get("EndpointStatus") != "InService"
+        or endpoint.get("EndpointConfigName") != endpoint_config_name
+    ):
+        raise RuntimeError("embedding endpoint is not the promoted InService configuration")
+    configuration = control.describe_endpoint_config(EndpointConfigName=endpoint_config_name)
+    variants = configuration.get("ProductionVariants")
+    if (
+        not isinstance(variants, list)
+        or len(variants) != 1
+        or not isinstance(variants[0], dict)
+        or variants[0].get("ModelName") != model_name
+    ):
+        raise RuntimeError("embedding endpoint configuration has an unexpected model")
+    model = control.describe_model(ModelName=model_name)
+    container = model.get("PrimaryContainer")
+    if (
+        not isinstance(container, dict)
+        or container.get("Image") != TEI_IMAGE_URI
+        or container.get("Environment") != TEI_ENVIRONMENT
+    ):
+        raise RuntimeError("embedding endpoint model image or environment differs")
+
+
+def _validate_tantivy_schema(path: Path) -> None:
+    meta = _json_object(path, "Tantivy meta")
+    expected_schema: list[dict[str, object]] = []
+    for name in TEXT_FIELDS + RAW_FILTER_FIELDS:
+        expected_schema.append(
+            {
+                "name": name,
+                "type": "text",
+                "options": {
+                    "indexing": {
+                        "record": "position",
+                        "fieldnorms": True,
+                        "tokenizer": TOKENIZERS[name],
+                    },
+                    "stored": False,
+                    "fast": False,
+                },
+            }
+        )
+    expected_schema.extend(
+        [
+            {
+                "name": UPDATED_AT_FIELD,
+                "type": "u64",
+                "options": {
+                    "indexed": True,
+                    "fieldnorms": False,
+                    "fast": True,
+                    "stored": False,
+                },
+            },
+            {
+                "name": JOB_INDEX_FIELD,
+                "type": "u64",
+                "options": {
+                    "indexed": False,
+                    "fieldnorms": False,
+                    "fast": True,
+                    "stored": False,
+                },
+            },
+        ]
+    )
+    if meta.get("schema") != expected_schema:
+        raise RuntimeError("Tantivy meta schema or tokenizers differ from the promoted policy")
+
+
+def _aware_timestamp(value: object, field: str) -> datetime:
+    if not isinstance(value, str):
+        raise RuntimeError(f"{field} must be an ISO-8601 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise RuntimeError(f"{field} must be an ISO-8601 timestamp") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise RuntimeError(f"{field} must include a timezone")
+    return parsed
 
 
 def _constant(query: tantivy.Query) -> tantivy.Query:

@@ -21,6 +21,7 @@ PORT_FACTORY_ENV = "SEARCH_PORT_FACTORY"
 DEMO_AS_OF_ENV = "SEARCH_DEMO_AS_OF"
 MULTIVIEW_ENABLED_ENV = "SEARCH_ENABLE_MULTIVIEW_MAXSIM"
 MULTIVIEW_ARTIFACT_ENV = "SEARCH_MULTIVIEW_ARTIFACT_KEY"
+DENSE_SHADOW_ENABLED_ENV = "SEARCH_ENABLE_DENSE_SHADOW"
 DEMO_TIMEZONE = ZoneInfo("Asia/Taipei")
 
 RuntimeFactory = Callable[[], SearchEngine]
@@ -45,7 +46,14 @@ def runtime_from_environment(
         )
         artifacts.materialize_manifest(Path(manifest_path))
     manifest = RuntimeManifest.from_path(manifest_path)
-    enable_multiview = _boolean(values.get(MULTIVIEW_ENABLED_ENV, "false"))
+    enable_dense_shadow = _boolean(
+        values.get(DENSE_SHADOW_ENABLED_ENV, "false"),
+        name=DENSE_SHADOW_ENABLED_ENV,
+    )
+    enable_multiview = _boolean(
+        values.get(MULTIVIEW_ENABLED_ENV, "false"),
+        name=MULTIVIEW_ENABLED_ENV,
+    )
     raw_multiview_artifact = values.get(MULTIVIEW_ARTIFACT_ENV)
     if enable_multiview:
         multiview_artifact = _required(values, MULTIVIEW_ARTIFACT_ENV)
@@ -54,7 +62,11 @@ def runtime_from_environment(
     else:
         multiview_artifact = None
     if artifacts is not None:
-        artifacts.materialize_required(manifest, include_multiview=enable_multiview)
+        artifacts.materialize_required(
+            manifest,
+            include_dense=enable_dense_shadow,
+            include_multiview=enable_multiview,
+        )
     ports = factory(manifest, enable_multiview, values)
     if not isinstance(ports, RetrievalPorts):
         raise TypeError("SEARCH_PORT_FACTORY must return RetrievalPorts")
@@ -70,6 +82,7 @@ def runtime_from_environment(
     return ProductionSearchEngine(
         manifest,
         ports,
+        enable_dense_shadow=enable_dense_shadow,
         enable_multiview_maxsim=enable_multiview,
         multiview_artifact_key=multiview_artifact,
         clock=clock,
@@ -116,9 +129,9 @@ def _required(values: Mapping[str, str], name: str) -> str:
     return value.strip()
 
 
-def _boolean(value: str) -> bool:
+def _boolean(value: str, *, name: str) -> bool:
     if value == "true":
         return True
     if value == "false":
         return False
-    raise RuntimeError(f"{MULTIVIEW_ENABLED_ENV} must be true or false")
+    raise RuntimeError(f"{name} must be true or false")

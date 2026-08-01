@@ -43,13 +43,14 @@ describe('platform stack', () => {
       MinValue: 0
     });
     template.hasParameter('GpuInstanceType', { Type: 'String' });
-    for (const id of [
-      'GpuMinCapacity',
-      'GpuMaxCapacity',
-      'GpuServiceDesiredCount'
-    ]) {
+    for (const id of ['GpuMinCapacity', 'GpuServiceDesiredCount']) {
       template.hasParameter(id, { Type: 'Number', Default: 1, MinValue: 1 });
     }
+    template.hasParameter('GpuMaxCapacity', {
+      Type: 'Number',
+      Default: 2,
+      MinValue: 1
+    });
     template.hasResourceProperties('AWS::AutoScaling::AutoScalingGroup', {
       MinSize: { Ref: 'GpuMinCapacity' },
       MaxSize: { Ref: 'GpuMaxCapacity' },
@@ -161,6 +162,18 @@ describe('platform stack', () => {
             Value: 'qwen3-embedding-8b-20260801-031826'
           }),
           expect.objectContaining({
+            Name: 'EMBEDDING_ENDPOINT_CONFIG_NAME',
+            Value: 'qwen3-embedding-8b-20260801-031826'
+          }),
+          expect.objectContaining({
+            Name: 'EMBEDDING_MODEL_NAME',
+            Value: 'qwen3-embedding-8b-20260801-031826'
+          }),
+          expect.objectContaining({
+            Name: 'SEARCH_ENABLE_DENSE_SHADOW',
+            Value: 'false'
+          }),
+          expect.objectContaining({
             Name: 'RERANKER_ENDPOINT_NAME',
             Value: 'work-retrieval-qwen3-reranker-8b'
           })
@@ -189,7 +202,7 @@ describe('platform stack', () => {
     const endpoints = Object.values(
       template.findResources('AWS::EC2::VPCEndpoint')
     );
-    expect(endpoints).toHaveLength(8);
+    expect(endpoints).toHaveLength(9);
     const endpointText = JSON.stringify(endpoints);
     for (const service of [
       '.ecr.api',
@@ -197,6 +210,7 @@ describe('platform stack', () => {
       '.logs',
       '.secretsmanager',
       '.sagemaker.runtime',
+      '.api.sagemaker',
       '.ecs',
       '.ecs-agent',
       '.ecs-telemetry'
@@ -233,6 +247,13 @@ describe('platform stack', () => {
       expect(text).toContain('ArtifactManifestSha256');
       expect(text).toContain('endpoint/qwen3-embedding-8b-20260801-031826');
       expect(text).toContain('endpoint/work-retrieval-qwen3-reranker-8b');
+      expect(text).toContain('sagemaker:DescribeEndpoint');
+      expect(text).toContain('sagemaker:DescribeEndpointConfig');
+      expect(text).toContain('sagemaker:DescribeModel');
+      expect(text).toContain(
+        'endpoint-config/qwen3-embedding-8b-20260801-031826'
+      );
+      expect(text).toContain('model/qwen3-embedding-8b-20260801-031826');
       expect(text).not.toContain(':endpoint/*');
     }
   });

@@ -5,7 +5,6 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -22,7 +21,9 @@ SHA256 = re.compile(r"^[a-f0-9]{64}$")
 DEMO_REFERENCE = "2026-06-08T23:59:59.999+08:00"
 MODEL = "Qwen/Qwen3-Embedding-8B"
 MODEL_REVISION = "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"
-WHOLE_DIMENSION = 4096
+WHOLE_DIMENSION = 1024
+SOURCE_EMBEDDING_DIMENSION = 4096
+WHOLE_PROJECTION = "mrl_prefix_then_l2_normalize"
 CHALLENGERS = {
     "multiview_embedding",
     "skill_graph",
@@ -111,14 +112,22 @@ class RuntimeManifest:
         challengers = _mapping(root["challengers"], "challengers")
         _exact_keys(challengers, CHALLENGERS, "challengers")
         multiview = _optional_component(challengers["multiview_embedding"], artifacts, "embedding")
-        _validate_graph(challengers["skill_graph"])
+        for name in ("skill_graph", "semantic_reranker", "learning_to_rank", "guardrails"):
+            _disabled_challenger(challengers[name], name)
         return cls(tuple(artifacts.items()), whole, temporal, multiview)
 
     def artifact(self, key: str) -> Artifact | None:
         return next((artifact for name, artifact in self.artifacts if name == key), None)
 
-    def required_artifacts(self, *, include_multiview: bool) -> tuple[tuple[str, Artifact], ...]:
-        components: list[Component] = [self.whole_embedding, self.temporal_tantivy]
+    def required_artifacts(
+        self,
+        *,
+        include_dense: bool,
+        include_multiview: bool,
+    ) -> tuple[tuple[str, Artifact], ...]:
+        components: list[Component] = [self.temporal_tantivy]
+        if include_dense:
+            components.append(self.whole_embedding)
         if include_multiview:
             if self.multiview_embedding is None:
                 raise RuntimeError("multi-view flag requires an enabled manifest challenger")
@@ -141,6 +150,8 @@ def _whole_embedding(value: object, artifacts: Mapping[str, Artifact]) -> WholeE
         "model",
         "revision",
         "dimension",
+        "source_dimension",
+        "projection",
         "dtype",
         "normalized",
         "rows",
@@ -156,6 +167,8 @@ def _whole_embedding(value: object, artifacts: Mapping[str, Artifact]) -> WholeE
         "model": MODEL,
         "revision": MODEL_REVISION,
         "dimension": WHOLE_DIMENSION,
+        "source_dimension": SOURCE_EMBEDDING_DIMENSION,
+        "projection": WHOLE_PROJECTION,
         "dtype": "float16",
         "normalized": True,
         "document_policy_version": DOCUMENT_POLICY_VERSION,
@@ -311,20 +324,10 @@ def _optional_component(
     return Component(path, sha256)
 
 
-def _validate_graph(value: object) -> None:
-    raw = _mapping(value, "challengers.skill_graph")
-    if raw.get("enabled") is False:
-        if set(raw) != {"enabled"}:
-            raise RuntimeError("disabled Graph carries unverified metadata")
-        return
-    if raw.get("enabled") is not True:
-        raise RuntimeError("Graph enabled flag must be boolean")
-    if raw.get("source_policy") != "train_jd_only" or raw.get("test_jd_used") is not False:
-        raise RuntimeError("Graph artifact is not proven train-only")
-    cutoff = _timestamp(raw.get("train_cutoff_exclusive"), "Graph train cutoff")
-    maximum = _timestamp(raw.get("max_source_timestamp"), "Graph maximum source timestamp")
-    if maximum >= cutoff:
-        raise RuntimeError("Graph artifact contains post-cutoff source data")
+def _disabled_challenger(value: object, name: str) -> None:
+    raw = _mapping(value, f"challengers.{name}")
+    if raw != {"enabled": False}:
+        raise RuntimeError(f"{name} has no production adapter and must be disabled")
 
 
 def _component_reference(
@@ -373,15 +376,3 @@ def _nonnegative_integer(value: object, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise RuntimeError(f"{field} must be a non-negative integer")
     return value
-
-
-def _timestamp(value: object, field: str) -> datetime:
-    if not isinstance(value, str):
-        raise RuntimeError(f"{field} must be an ISO-8601 timestamp")
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as error:
-        raise RuntimeError(f"{field} must be an ISO-8601 timestamp") from error
-    if parsed.tzinfo is None:
-        raise RuntimeError(f"{field} must include a timezone")
-    return parsed

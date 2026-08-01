@@ -32,6 +32,7 @@ def _result(job_ids: tuple[str, ...]) -> SearchResult:
             future_rows="retained_with_zero_freshness",
             location_filter="not_requested",
             duty_filter="not_requested",
+            query_rewrites=(),
             lanes=(),
             results=results,
         ),

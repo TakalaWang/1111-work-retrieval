@@ -24,8 +24,10 @@ class FakeManifest:
     def __init__(self, artifacts: tuple[tuple[str, Artifact], ...]) -> None:
         self.artifacts = artifacts
 
-    def required_artifacts(self, *, include_multiview: bool) -> tuple[tuple[str, Artifact], ...]:
-        assert not include_multiview
+    def required_artifacts(
+        self, *, include_dense: bool, include_multiview: bool
+    ) -> tuple[tuple[str, Artifact], ...]:
+        assert include_dense and not include_multiview
         return self.artifacts
 
 
@@ -59,6 +61,7 @@ def test_s3_bootstrap_verifies_root_and_each_required_object(tmp_path: Path) -> 
         FakeManifest(
             (("embeddings/whole/vectors.npy", Artifact("embedding", payload_sha, len(payload))),)
         ),
+        include_dense=True,
         include_multiview=False,
     )
 

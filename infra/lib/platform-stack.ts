@@ -26,6 +26,8 @@ import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import type { Construct } from 'constructs';
 
 const EMBEDDING_ENDPOINT_NAME = 'qwen3-embedding-8b-20260801-031826';
+const EMBEDDING_ENDPOINT_CONFIG_NAME = EMBEDDING_ENDPOINT_NAME;
+const EMBEDDING_MODEL_NAME = EMBEDDING_ENDPOINT_NAME;
 const RERANKER_ENDPOINT_NAME = 'work-retrieval-qwen3-reranker-8b';
 const GITHUB_PRODUCTION_SUBJECT =
   'repo:TakalaWang@50894789/1111-work-retrieval@1318865130:environment:production';
@@ -80,7 +82,7 @@ export class PlatformStack extends Stack {
       description: 'EC2 GPU instance type, for example g5.xlarge.'
     });
     const gpuMinCapacity = capacityParameter(this, 'GpuMinCapacity');
-    const gpuMaxCapacity = capacityParameter(this, 'GpuMaxCapacity');
+    const gpuMaxCapacity = capacityParameter(this, 'GpuMaxCapacity', 2);
     const gpuServiceDesiredCount = capacityParameter(
       this,
       'GpuServiceDesiredCount'
@@ -101,6 +103,14 @@ export class PlatformStack extends Stack {
         privateDnsEnabled: true
       });
     }
+    new ec2.InterfaceVpcEndpoint(this, 'SageMakerApiEndpoint', {
+      vpc,
+      service: new ec2.InterfaceVpcEndpointService(
+        `com.amazonaws.${Aws.REGION}.api.sagemaker`,
+        443
+      ),
+      privateDnsEnabled: true
+    });
     for (const [name, service] of [
       ['EcsEndpoint', ec2.InterfaceVpcEndpointAwsService.ECS],
       ['EcsAgentEndpoint', ec2.InterfaceVpcEndpointAwsService.ECS_AGENT],
@@ -181,7 +191,10 @@ export class PlatformStack extends Stack {
       DB_NAME: 'work_retrieval',
       DB_PORT: cluster.clusterEndpoint.port.toString(),
       EMBEDDING_ENDPOINT_NAME,
+      EMBEDDING_ENDPOINT_CONFIG_NAME,
+      EMBEDDING_MODEL_NAME,
       RERANKER_ENDPOINT_NAME,
+      SEARCH_ENABLE_DENSE_SHADOW: 'false',
       SEARCH_ENABLE_MULTIVIEW_MAXSIM: 'false',
       SEARCH_PORT_FACTORY:
         'work_retrieval_api.production:create_production_ports',
@@ -563,10 +576,14 @@ export class PlatformStack extends Stack {
   }
 }
 
-function capacityParameter(stack: Stack, id: string): CfnParameter {
+function capacityParameter(
+  stack: Stack,
+  id: string,
+  defaultValue = 1
+): CfnParameter {
   return new CfnParameter(stack, id, {
     type: 'Number',
-    default: 1,
+    default: defaultValue,
     minValue: 1
   });
 }
@@ -599,6 +616,36 @@ function grantApiRuntimeAccess(
       resources: [
         sagemakerEndpointArn(stack, EMBEDDING_ENDPOINT_NAME),
         sagemakerEndpointArn(stack, RERANKER_ENDPOINT_NAME)
+      ]
+    })
+  );
+  taskDefinition.addToTaskRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['sagemaker:DescribeEndpoint'],
+      resources: [sagemakerEndpointArn(stack, EMBEDDING_ENDPOINT_NAME)]
+    })
+  );
+  taskDefinition.addToTaskRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['sagemaker:DescribeEndpointConfig'],
+      resources: [
+        stack.formatArn({
+          service: 'sagemaker',
+          resource: 'endpoint-config',
+          resourceName: EMBEDDING_ENDPOINT_CONFIG_NAME
+        })
+      ]
+    })
+  );
+  taskDefinition.addToTaskRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['sagemaker:DescribeModel'],
+      resources: [
+        stack.formatArn({
+          service: 'sagemaker',
+          resource: 'model',
+          resourceName: EMBEDDING_MODEL_NAME
+        })
       ]
     })
   );

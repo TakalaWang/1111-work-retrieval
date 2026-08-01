@@ -10,8 +10,10 @@ import pytest
 from work_retrieval_core import (
     CandidateEvidence,
     CandidateRequest,
+    CompiledQuery,
     JobMetadata,
     ProductionSearchEngine,
+    QueryRewrite,
     RetrievalPorts,
     RuntimeManifest,
     SearchQuery,
@@ -87,7 +89,9 @@ def _manifest(*, multiview: bool = False) -> dict[str, object]:
                 "complete": True,
                 "model": "Qwen/Qwen3-Embedding-8B",
                 "revision": "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af",
-                "dimension": 4096,
+                "source_dimension": 4096,
+                "dimension": 1024,
+                "projection": "mrl_prefix_then_l2_normalize",
                 "dtype": "float16",
                 "normalized": True,
                 "rows": 3,
@@ -148,6 +152,14 @@ class StubMetadata:
         self.closed = True
 
 
+class StubQueryCompiler:
+    def compile(self, text: str) -> CompiledQuery:
+        return CompiledQuery(
+            (text, "kubernetes"),
+            (QueryRewrite("kuberntes", "kubernetes", "train_jd_corpus_v1"),),
+        )
+
+
 def _candidate(job_id: str, score: float, rank: int) -> CandidateEvidence:
     return CandidateEvidence(job_id, score, rank)
 
@@ -181,7 +193,20 @@ def test_manifest_rejects_unknown_keys_and_incompatible_future_policy() -> None:
 
 def test_manifest_requires_both_incumbents_and_selects_only_their_prefixes() -> None:
     parsed = RuntimeManifest.from_dict(_manifest(multiview=True))
-    assert [path for path, _artifact in parsed.required_artifacts(include_multiview=False)] == [
+    assert [
+        path
+        for path, _artifact in parsed.required_artifacts(
+            include_dense=False, include_multiview=False
+        )
+    ] == [
+        "indexes/tantivy-bm25-temporal-v1/manifest.json",
+    ]
+    assert [
+        path
+        for path, _artifact in parsed.required_artifacts(
+            include_dense=True, include_multiview=False
+        )
+    ] == [
         "embeddings/qwen3-embedding-8b/whole/manifest.json",
         "indexes/tantivy-bm25-temporal-v1/manifest.json",
     ]
@@ -221,6 +246,7 @@ def test_dynamic_as_of_filters_before_top_k_and_retains_future_rows() -> None:
     engine = ProductionSearchEngine(
         RuntimeManifest.from_dict(_manifest()),
         RetrievalPorts(lexical, dense, metadata),
+        enable_dense_shadow=True,
         clock=lambda: DEMO_AS_OF,
     )
 
@@ -232,9 +258,10 @@ def test_dynamic_as_of_filters_before_top_k_and_retains_future_rows() -> None:
         ("140200",),
         DEMO_AS_OF,
         DEMO_AS_OF - timedelta(days=180),
+        ("資料工程師",),
     )
     assert lexical.requests == dense.requests == [(expected, 200)]
-    assert result.job_ids == ("1", "3", "2")
+    assert result.job_ids == ("1", "2", "3")
     assert result.trace.location_filter == "verified_on_returned_candidates"
     future = next(item for item in result.trace.results if item.job_id == "2")
     assert future.freshness_score == 0 and future.future_updated_snapshot
@@ -254,6 +281,7 @@ def test_as_of_is_evaluated_for_each_request() -> None:
     engine = ProductionSearchEngine(
         RuntimeManifest.from_dict(_manifest()),
         RetrievalPorts(lexical, dense, metadata),
+        enable_dense_shadow=True,
         clock=lambda: next(values),
     )
     first = engine.search(SearchQuery("工程師"), limit=10)
@@ -314,6 +342,21 @@ def test_lane_failure_and_unsorted_or_implicit_rank_fail_closed() -> None:
     assert "private endpoint" not in str(caught.value)
     engine.close()
 
+    lexical = StubRetriever((_candidate("1", 1.0, 1),))
+    shadow = StubRetriever()
+    shadow.error = RuntimeError("shadow failed")
+    engine = ProductionSearchEngine(
+        RuntimeManifest.from_dict(_manifest()),
+        RetrievalPorts(lexical, shadow, StubMetadata((_metadata("1", 0),))),
+        enable_dense_shadow=True,
+        clock=lambda: DEMO_AS_OF,
+    )
+    result = engine.search(SearchQuery("工程師"), limit=10)
+    assert result.job_ids == ("1",)
+    dense_lane = next(lane for lane in result.trace.lanes if lane.name == "qwen_dense_whole_jd")
+    assert dense_lane.status == "failed"
+    engine.close()
+
 
 def test_multiview_runs_only_when_explicitly_enabled() -> None:
     disabled = StubRetriever((_candidate("9", 1.0, 1),))
@@ -355,3 +398,66 @@ def test_close_is_idempotent_and_closed_engine_fails() -> None:
     assert lexical.closed and dense.closed and metadata.closed
     with pytest.raises(SearchUnavailableError, match="closed"):
         engine.search(SearchQuery("工程師"), limit=10)
+
+
+def test_dense_shadow_cannot_reorder_incumbent_top_ten() -> None:
+    lexical_candidates = tuple(
+        _candidate(str(index), float(20 - index), index) for index in range(1, 11)
+    )
+    dense_candidates = (
+        *(
+            _candidate(str(index), float(index), rank)
+            for rank, index in enumerate(range(10, 0, -1), start=1)
+        ),
+        _candidate("11", 0.1, 11),
+    )
+    metadata = StubMetadata(tuple(_metadata(str(index), 0) for index in range(1, 12)))
+    engine = ProductionSearchEngine(
+        RuntimeManifest.from_dict(_manifest()),
+        RetrievalPorts(
+            StubRetriever(lexical_candidates),
+            StubRetriever(dense_candidates),
+            metadata,
+        ),
+        enable_dense_shadow=True,
+        clock=lambda: DEMO_AS_OF,
+    )
+
+    result = engine.search(SearchQuery("工程師"), limit=10)
+
+    assert result.job_ids == tuple(str(index) for index in range(1, 11))
+    engine.close()
+
+
+def test_query_rewrite_preserves_original_and_is_audited() -> None:
+    lexical = StubRetriever()
+    engine = ProductionSearchEngine(
+        RuntimeManifest.from_dict(_manifest()),
+        RetrievalPorts(
+            lexical,
+            None,
+            StubMetadata(),
+            query_compiler=StubQueryCompiler(),
+        ),
+        clock=lambda: DEMO_AS_OF,
+    )
+
+    result = engine.search(SearchQuery("Kuberntes"), limit=10)
+
+    assert lexical.requests[0][0].lexical_texts == ("Kuberntes", "kubernetes")
+    assert result.trace.as_dict()["query_rewrites"] == [
+        {
+            "source": "kuberntes",
+            "target": "kubernetes",
+            "policy": "train_jd_corpus_v1",
+        }
+    ]
+    engine.close()
+
+
+def test_manifest_rejects_enabled_challenger_without_production_adapter() -> None:
+    value = _manifest()
+    value["challengers"]["skill_graph"] = {"enabled": True}  # type: ignore[index]
+
+    with pytest.raises(RuntimeError, match="must be disabled"):
+        RuntimeManifest.from_dict(value)

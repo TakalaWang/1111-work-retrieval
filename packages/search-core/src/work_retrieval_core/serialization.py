@@ -6,17 +6,36 @@ import re
 import unicodedata
 from collections.abc import Mapping
 
-DOCUMENT_POLICY_VERSION = "2026-07-24-clean-v1"
+DOCUMENT_POLICY_VERSION = "2026-08-01-full-jd-v2"
 FULL_JOB_FIELDS = (
     ("職務名稱", "title"),
     ("職務小類", "duty_minor"),
     ("職務中類", "duty_middle"),
     ("職務大類", "duty_major"),
+    ("薪資", "salary_text"),
+    ("職缺屬性", "job_attribute"),
+    ("工時", "work_hours"),
+    ("工時說明", "work_hours_description"),
     ("電腦技能資料", "computer_skills"),
     ("工作技能", "work_skills"),
     ("專業證照", "professional_certifications"),
     ("工作經驗需求", "experience_requirement"),
     ("學歷需求", "education_requirement"),
+    ("科系需求1", "major_requirement_1"),
+    ("科系需求2", "major_requirement_2"),
+    ("科系需求3", "major_requirement_3"),
+    ("語言能力一", "language_1"),
+    ("語言能力一聽", "language_1_listening"),
+    ("語言能力一說", "language_1_speaking"),
+    ("語言能力一讀", "language_1_reading"),
+    ("語言能力一寫", "language_1_writing"),
+    ("語言能力二", "language_2"),
+    ("語言能力二聽", "language_2_listening"),
+    ("語言能力二說", "language_2_speaking"),
+    ("語言能力二讀", "language_2_reading"),
+    ("語言能力二寫", "language_2_writing"),
+    ("管理人數", "management_count"),
+    ("是否需外派", "requires_travel"),
     ("工作城市", "work_city"),
     ("產業小類", "industry_minor"),
     ("產業中類", "industry_middle"),

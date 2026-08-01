@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 from work_retrieval_core import JobMetadata, RetrievalPorts, RuntimeManifest
 from work_retrieval_core.adapters import (
+    CorpusQueryCompiler,
     FilterTaxonomy,
     SageMakerQueryEncoder,
     TantivyBm25Retriever,
@@ -50,49 +51,62 @@ def create_production_ports(
 ) -> RetrievalPorts:
     if enable_multiview:
         raise RuntimeError("multi-view serving has no promoted production adapter")
+    enable_dense_shadow = _boolean(environment.get("SEARCH_ENABLE_DENSE_SHADOW", "false"))
     runtime_root = Path(_required(environment, "SEARCH_RUNTIME_ROOT")).resolve()
-    whole_layout = WholeEmbeddingLayout.from_path(
-        runtime_root / manifest.whole_embedding.manifest_path,
-        manifest,
-    )
     tantivy_layout = TantivyLayout.from_path(
         runtime_root / manifest.temporal_tantivy.manifest_path,
         manifest,
     )
     taxonomy = FilterTaxonomy.from_path(runtime_root / tantivy_layout.taxonomy_path)
     job_ids = load_job_ids(
-        runtime_root / whole_layout.job_ids_path,
+        runtime_root / tantivy_layout.job_ids_path,
         expected_rows=manifest.whole_embedding.rows,
     )
+    compiler = CorpusQueryCompiler.from_path(runtime_root / tantivy_layout.query_corrections_path)
     lexical = TantivyBm25Retriever(
         runtime_root / tantivy_layout.index_directory,
         job_ids,
         taxonomy,
     )
-    try:
-        dense = WholeQwenExactRetriever(
-            runtime_root=runtime_root,
-            layout=whole_layout,
-            job_ids=job_ids,
-            eligible_rows=lexical,
-            encoder=SageMakerQueryEncoder.from_aws(
-                endpoint_name=_required(environment, "EMBEDDING_ENDPOINT_NAME"),
-                region_name=_required(environment, "AWS_REGION"),
-            ),
-        )
-    except Exception:
-        lexical.close()
-        raise
+    dense: WholeQwenExactRetriever | None = None
+    if enable_dense_shadow:
+        try:
+            whole_layout = WholeEmbeddingLayout.from_path(
+                runtime_root / manifest.whole_embedding.manifest_path,
+                manifest,
+            )
+            dense_job_ids = load_job_ids(
+                runtime_root / whole_layout.job_ids_path,
+                expected_rows=manifest.whole_embedding.rows,
+            )
+            if dense_job_ids != job_ids:
+                raise RuntimeError("BM25 and whole-Qwen job row order differs")
+            dense = WholeQwenExactRetriever(
+                runtime_root=runtime_root,
+                layout=whole_layout,
+                job_ids=job_ids,
+                eligible_rows=lexical,
+                encoder=SageMakerQueryEncoder.from_aws(
+                    endpoint_name=_required(environment, "EMBEDDING_ENDPOINT_NAME"),
+                    endpoint_config_name=_required(environment, "EMBEDDING_ENDPOINT_CONFIG_NAME"),
+                    model_name=_required(environment, "EMBEDDING_MODEL_NAME"),
+                    region_name=_required(environment, "AWS_REGION"),
+                ),
+            )
+        except Exception:
+            lexical.close()
+            raise
     try:
         metadata = ProductionJobMetadataLookup(
             SqlAlchemyJobReader.from_settings(DatabaseSettings.from_environment(environment)),
             taxonomy,
         )
     except Exception:
-        dense.close()
+        if dense is not None:
+            dense.close()
         lexical.close()
         raise
-    return RetrievalPorts(lexical, dense, metadata)
+    return RetrievalPorts(lexical, dense, metadata, query_compiler=compiler)
 
 
 def _required(environment: Mapping[str, str], name: str) -> str:
@@ -100,6 +114,14 @@ def _required(environment: Mapping[str, str], name: str) -> str:
     if value is None or not value.strip():
         raise RuntimeError(f"missing required production setting: {name}")
     return value.strip()
+
+
+def _boolean(value: str) -> bool:
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise RuntimeError("SEARCH_ENABLE_DENSE_SHADOW must be true or false")
 
 
 def _source_timestamp(value: datetime) -> datetime:

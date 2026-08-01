@@ -6,20 +6,31 @@ from io import BytesIO
 from pathlib import Path
 
 import numpy as np
+import pytest
 import tantivy
-from work_retrieval_core import CandidateRequest
+import work_retrieval_core.adapters as adapters
+from work_retrieval_core import Artifact, CandidateRequest, RuntimeManifest
 from work_retrieval_core.adapters import (
+    CorpusQueryCompiler,
     EmbeddingShard,
     FilterTaxonomy,
     SageMakerQueryEncoder,
     TantivyBm25Retriever,
+    TantivyLayout,
     WholeEmbeddingLayout,
     WholeQwenExactRetriever,
     lexical_tokens,
 )
-from work_retrieval_core.serialization import FULL_JOB_FIELDS, serialize_full_job
+from work_retrieval_core.manifest import TemporalTantivy, WholeEmbedding
+from work_retrieval_core.serialization import (
+    DOCUMENT_POLICY_VERSION,
+    FULL_JOB_FIELDS,
+    document_template_sha256,
+    serialize_full_job,
+)
 
 AS_OF = datetime(2026, 6, 8, tzinfo=UTC)
+HEX = "a" * 64
 
 
 def _taxonomy() -> FilterTaxonomy:
@@ -105,21 +116,24 @@ def test_filter_taxonomy_resolves_known_codes_and_makes_unknown_codes_no_match()
 
 
 class FixedEligibleRows:
-    def eligible_indices(self, request: CandidateRequest) -> np.ndarray:
+    def eligible_indices(self, request: CandidateRequest, *, max_rows: int) -> np.ndarray:
         del request
-        return np.asarray([0, 2], dtype=np.int64)
+        values = np.asarray([0, 2], dtype=np.int64)
+        if len(values) > max_rows:
+            raise RuntimeError("eligible universe exceeds its bounded materialization limit")
+        return values
 
 
 class FixedEncoder:
     def encode(self, query: str) -> np.ndarray:
         assert query == "kubernetes"
-        value = np.zeros(4096, dtype=np.float32)
+        value = np.zeros(1024, dtype=np.float32)
         value[0] = 1
         return value
 
 
 def test_whole_qwen_exact_scan_uses_only_hard_filtered_rows(tmp_path: Path) -> None:
-    vectors = np.zeros((3, 4096), dtype=np.float16)
+    vectors = np.zeros((3, 1024), dtype=np.float16)
     vectors[:, 0] = [0.2, 1.0, 0.8]
     vector_path = tmp_path / "vectors.npy"
     np.save(vector_path, vectors, allow_pickle=False)
@@ -158,6 +172,7 @@ def test_sagemaker_encoder_uses_pinned_query_prompt_and_normalizes() -> None:
     body = json.loads(runtime.kwargs["Body"])
 
     assert result[0] == 1.0
+    assert result.shape == (1024,)
     assert body["inputs"][0].endswith("Query: 資料工程師")
 
 
@@ -165,7 +180,256 @@ def test_full_job_serializer_includes_description_and_is_deterministic() -> None
     values = {field: None for _label, field in FULL_JOB_FIELDS}
     values["title"] = "資料工程師"
     values["description"] = "<p>建立 ETL pipeline</p>"
+    values["work_hours_description"] = "彈性工時"
+    values["language_1"] = "英文"
+    values["requires_travel"] = "否"
 
     serialized = serialize_full_job(values)
 
-    assert serialized == "職務名稱: 資料工程師\n職務內容: 建立 ETL pipeline"
+    assert serialized == (
+        "職務名稱: 資料工程師\n"
+        "工時說明: 彈性工時\n"
+        "語言能力一: 英文\n"
+        "是否需外派: 否\n"
+        "職務內容: 建立 ETL pipeline"
+    )
+
+
+def test_query_compiler_uses_only_pre_cutoff_corpus_rules(tmp_path: Path) -> None:
+    path = tmp_path / "corrections.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source_policy": "train_jd_only",
+                "train_cutoff_exclusive": "2026-06-08T00:00:00+08:00",
+                "max_source_timestamp": "2026-06-07T23:59:59+08:00",
+                "corrections": {"kuberntes": "kubernetes"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    compiled = CorpusQueryCompiler.from_path(path).compile("Kuberntes")
+
+    assert compiled.lexical_texts == ("Kuberntes", "kubernetes")
+    assert compiled.rewrites[0].policy == "train_jd_corpus_v1"
+
+    invalid = json.loads(path.read_text(encoding="utf-8"))
+    invalid["max_source_timestamp"] = invalid["train_cutoff_exclusive"]
+    path.write_text(json.dumps(invalid), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="post-cutoff"):
+        CorpusQueryCompiler.from_path(path)
+
+
+def test_exact_dense_scan_rejects_unbounded_or_expired_work(tmp_path: Path) -> None:
+    vectors = np.zeros((3, 1024), dtype=np.float16)
+    vectors[:, 0] = [0.2, 1.0, 0.8]
+    np.save(tmp_path / "vectors.npy", vectors, allow_pickle=False)
+    layout = WholeEmbeddingLayout("job-ids.json", (EmbeddingShard("vectors.npy", 0, 3),))
+    with pytest.raises(RuntimeError, match="exceeds"):
+        WholeQwenExactRetriever(
+            runtime_root=tmp_path,
+            layout=layout,
+            job_ids=("1", "2", "3"),
+            eligible_rows=FixedEligibleRows(),
+            encoder=FixedEncoder(),
+            max_eligible_rows=1,
+        ).retrieve(_request(), limit=2)
+
+    clock_values = iter((0.0, 3.0))
+    with pytest.raises(RuntimeError, match="deadline"):
+        WholeQwenExactRetriever(
+            runtime_root=tmp_path,
+            layout=layout,
+            job_ids=("1", "2", "3"),
+            eligible_rows=FixedEligibleRows(),
+            encoder=FixedEncoder(),
+            timeout_seconds=2.0,
+            clock=lambda: next(clock_values),
+        ).retrieve(_request(), limit=2)
+
+
+class FakeControlPlane:
+    def __init__(self, image: str = adapters.TEI_IMAGE_URI) -> None:
+        self.image = image
+
+    def describe_endpoint(self, **kwargs: object) -> dict[str, object]:
+        assert kwargs == {"EndpointName": adapters.ENDPOINT_NAME}
+        return {
+            "EndpointStatus": "InService",
+            "EndpointConfigName": adapters.ENDPOINT_CONFIG_NAME,
+        }
+
+    def describe_endpoint_config(self, **kwargs: object) -> dict[str, object]:
+        assert kwargs == {"EndpointConfigName": adapters.ENDPOINT_CONFIG_NAME}
+        return {"ProductionVariants": [{"ModelName": adapters.ENDPOINT_MODEL_NAME}]}
+
+    def describe_model(self, **kwargs: object) -> dict[str, object]:
+        assert kwargs == {"ModelName": adapters.ENDPOINT_MODEL_NAME}
+        return {
+            "PrimaryContainer": {
+                "Image": self.image,
+                "Environment": adapters.TEI_ENVIRONMENT,
+            }
+        }
+
+
+def test_sagemaker_factory_reads_back_promoted_model_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control = FakeControlPlane()
+    runtime = FakeSageMaker([[0.0] * 4096])
+
+    def client(service: str, *, region_name: str, config: object) -> object:
+        assert config is not None
+        assert region_name == "us-west-2"
+        return control if service == "sagemaker" else runtime
+
+    monkeypatch.setattr(adapters.boto3, "client", client)
+
+    encoder = SageMakerQueryEncoder.from_aws(
+        endpoint_name=adapters.ENDPOINT_NAME,
+        endpoint_config_name=adapters.ENDPOINT_CONFIG_NAME,
+        model_name=adapters.ENDPOINT_MODEL_NAME,
+        region_name="us-west-2",
+    )
+
+    assert isinstance(encoder, SageMakerQueryEncoder)
+
+    with pytest.raises(RuntimeError, match="promoted identity"):
+        SageMakerQueryEncoder.from_aws(
+            endpoint_name="mutable-latest",
+            endpoint_config_name=adapters.ENDPOINT_CONFIG_NAME,
+            model_name=adapters.ENDPOINT_MODEL_NAME,
+            region_name="us-west-2",
+        )
+
+    control = FakeControlPlane("mutable-image:latest")
+    with pytest.raises(RuntimeError, match="image or environment"):
+        SageMakerQueryEncoder.from_aws(
+            endpoint_name=adapters.ENDPOINT_NAME,
+            endpoint_config_name=adapters.ENDPOINT_CONFIG_NAME,
+            model_name=adapters.ENDPOINT_MODEL_NAME,
+            region_name="us-west-2",
+        )
+
+
+def test_whole_layout_requires_new_full_jd_build_lineage(tmp_path: Path) -> None:
+    component_path = "embeddings/qwen3-embedding-8b/whole/manifest.json"
+    build_path = "embeddings/qwen3-embedding-8b/whole/build-manifest.json"
+    job_ids_path = "embeddings/qwen3-embedding-8b/whole/job-ids.json"
+    vectors_path = "embeddings/qwen3-embedding-8b/whole/vectors.npy"
+    manifest = RuntimeManifest(
+        (
+            (component_path, Artifact("embedding", "b" * 64, 1)),
+            (build_path, Artifact("evidence", "c" * 64, 1)),
+            (job_ids_path, Artifact("embedding", "d" * 64, 1)),
+            (vectors_path, Artifact("embedding", "e" * 64, 1)),
+        ),
+        WholeEmbedding(component_path, "b" * 64, 3, 1024, HEX, HEX, HEX),
+        TemporalTantivy("indexes/x/manifest.json", HEX, HEX, HEX, HEX, "before Top-K"),
+        None,
+    )
+    component = {
+        "schema_version": 1,
+        "complete": True,
+        "model": "Qwen/Qwen3-Embedding-8B",
+        "revision": "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af",
+        "source_dimension": 4096,
+        "dimension": 1024,
+        "projection": "mrl_prefix_then_l2_normalize",
+        "dtype": "float16",
+        "normalized": True,
+        "rows": 3,
+        "dataset_sha256": HEX,
+        "jobs_sha256": HEX,
+        "job_row_order_sha256": HEX,
+        "document_policy_version": DOCUMENT_POLICY_VERSION,
+        "document_template_sha256": document_template_sha256(),
+        "document_fields": [label for label, _field in FULL_JOB_FIELDS],
+        "query_prompt": adapters.QUERY_PROMPT,
+        "build_manifest_path": build_path,
+        "build_manifest_sha256": "c" * 64,
+        "job_ids_path": job_ids_path,
+        "shards": [
+            {
+                "vectors_path": vectors_path,
+                "row_start": 0,
+                "row_end": 3,
+                "rows": 3,
+                "dimension": 1024,
+            }
+        ],
+    }
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(component), encoding="utf-8")
+
+    assert WholeEmbeddingLayout.from_path(path, manifest).job_ids_path == job_ids_path
+
+    component["build_manifest_sha256"] = "f" * 64
+    path.write_text(json.dumps(component), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="build manifest"):
+        WholeEmbeddingLayout.from_path(path, manifest)
+
+
+def test_tantivy_layout_pins_lexical_policy_and_build_lineage(tmp_path: Path) -> None:
+    component_path = "indexes/tantivy-bm25-temporal-v1/manifest.json"
+    index_file = "indexes/tantivy-bm25-temporal-v1/index/meta.json"
+    taxonomy_path = "indexes/tantivy-bm25-temporal-v1/taxonomy.json"
+    job_ids_path = "indexes/tantivy-bm25-temporal-v1/job-ids.json"
+    corrections_path = "indexes/tantivy-bm25-temporal-v1/query-corrections.json"
+    build_path = "indexes/tantivy-bm25-temporal-v1/build-manifest.json"
+    artifacts = (
+        (component_path, Artifact("index", "b" * 64, 1)),
+        (index_file, Artifact("index", "c" * 64, 1)),
+        (taxonomy_path, Artifact("index", "d" * 64, 1)),
+        (job_ids_path, Artifact("index", "e" * 64, 1)),
+        (corrections_path, Artifact("index", "f" * 64, 1)),
+        (build_path, Artifact("evidence", "1" * 64, 1)),
+    )
+    semantics = "updated_at >= as_of - 180 days before Top-K; future rows retained"
+    manifest = RuntimeManifest(
+        artifacts,
+        WholeEmbedding("embeddings/x/manifest.json", HEX, 3, 1024, HEX, HEX, HEX),
+        TemporalTantivy(component_path, "b" * 64, HEX, HEX, HEX, semantics),
+        None,
+    )
+    component = {
+        "schema_version": 1,
+        "complete": True,
+        "engine": "tantivy v0.26.0, index_format v7",
+        "jobs_sha256": HEX,
+        "job_row_order_sha256": HEX,
+        "index_sha256": HEX,
+        "index_directory": "indexes/tantivy-bm25-temporal-v1/index",
+        "index_files": [index_file],
+        "taxonomy_path": taxonomy_path,
+        "job_ids_path": job_ids_path,
+        "query_corrections_path": corrections_path,
+        "build_manifest_path": build_path,
+        "build_manifest_sha256": "1" * 64,
+        "schema_fields": [
+            *adapters.TEXT_FIELDS,
+            *adapters.RAW_FILTER_FIELDS,
+            adapters.UPDATED_AT_FIELD,
+            adapters.JOB_INDEX_FIELD,
+        ],
+        "field_boosts": adapters.FIELD_BOOSTS,
+        "lexical_policy_version": adapters.LEXICAL_POLICY_VERSION,
+        "lexical_policy_sha256": adapters.lexical_policy_sha256(),
+        "tokenizers": adapters.TOKENIZERS,
+        "source_fields": adapters.SOURCE_FIELDS,
+        "filter_semantics": ("visibility AND (location OR) AND (duty OR), applied before Top-K"),
+        "updated_at_field": adapters.UPDATED_AT_FIELD,
+        "temporal_filter_semantics": semantics,
+    }
+    path = tmp_path / "tantivy-manifest.json"
+    path.write_text(json.dumps(component), encoding="utf-8")
+
+    assert TantivyLayout.from_path(path, manifest).query_corrections_path == corrections_path
+
+    component["source_fields"] = {"body": ["description"]}
+    path.write_text(json.dumps(component), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="source_fields"):
+        TantivyLayout.from_path(path, manifest)

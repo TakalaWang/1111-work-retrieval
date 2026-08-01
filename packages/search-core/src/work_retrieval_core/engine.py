@@ -6,7 +6,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from math import isfinite
-from threading import Lock
+from threading import BoundedSemaphore, Lock
+from time import monotonic
 from typing import Protocol, runtime_checkable
 
 from work_retrieval_core.manifest import RuntimeManifest
@@ -14,7 +15,10 @@ from work_retrieval_core.serialization import canonical_code
 
 CANDIDATE_LIMIT = 200
 MAX_AGE_DAYS = 180
-RRF_K = 60
+LANE_TIMEOUT_SECONDS = 5.0
+SHADOW_COLLECTION_SECONDS = 1.0
+METADATA_RESERVE_SECONDS = 1.0
+MAX_INFLIGHT_SEARCHES = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +39,24 @@ class CandidateRequest:
     duty_codes: tuple[str, ...]
     as_of: datetime
     minimum_updated_at: datetime
+    lexical_texts: tuple[str, ...] = ()
+    query_rewrites: tuple[QueryRewrite, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class QueryRewrite:
+    source: str
+    target: str
+    policy: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {"source": self.source, "target": self.target, "policy": self.policy}
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledQuery:
+    lexical_texts: tuple[str, ...]
+    rewrites: tuple[QueryRewrite, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,12 +90,18 @@ class JobMetadataLookup(Protocol):
     def close(self) -> None: ...
 
 
+@runtime_checkable
+class QueryCompiler(Protocol):
+    def compile(self, text: str) -> CompiledQuery: ...
+
+
 @dataclass(frozen=True, slots=True)
 class RetrievalPorts:
     lexical_full_jd: CandidateRetriever
-    dense_whole_jd: CandidateRetriever
+    dense_whole_jd: CandidateRetriever | None
     metadata: JobMetadataLookup
     dense_multiview_maxsim: CandidateRetriever | None = None
+    query_compiler: QueryCompiler | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,21 +125,21 @@ class RankEvidence:
     lane: str
     rank: int
     raw_score: float
-    rrf_contribution: float
+    ranking_contribution: float
 
     def as_dict(self) -> dict[str, object]:
         return {
             "lane": self.lane,
             "rank": self.rank,
             "raw_score": round(self.raw_score, 8),
-            "rrf_contribution": round(self.rrf_contribution, 8),
+            "ranking_contribution": round(self.ranking_contribution, 8),
         }
 
 
 @dataclass(frozen=True, slots=True)
 class ResultTrace:
     job_id: str
-    fused_score: float
+    ranking_score: float
     freshness_score: float
     source_modified_at: datetime
     future_updated_snapshot: bool
@@ -120,7 +148,7 @@ class ResultTrace:
     def as_dict(self) -> dict[str, object]:
         return {
             "job_id": self.job_id,
-            "fused_score": round(self.fused_score, 8),
+            "ranking_score": round(self.ranking_score, 8),
             "freshness_score": round(self.freshness_score, 8),
             "source_modified_at": _isoformat(self.source_modified_at),
             "future_updated_snapshot": self.future_updated_snapshot,
@@ -136,6 +164,7 @@ class SearchAuditTrace:
     future_rows: str
     location_filter: str
     duty_filter: str
+    query_rewrites: tuple[QueryRewrite, ...]
     lanes: tuple[LaneTrace, ...]
     results: tuple[ResultTrace, ...]
 
@@ -152,6 +181,7 @@ class SearchAuditTrace:
                     "verified_on_returned_candidates" if self.results else "no_returned_candidates"
                 ),
             },
+            "query_rewrites": [rewrite.as_dict() for rewrite in self.query_rewrites],
             "lanes": [lane.as_dict() for lane in self.lanes],
             "results": [result.as_dict() for result in self.results],
         }
@@ -178,27 +208,31 @@ class SearchEngine(Protocol):
 
 
 @dataclass(slots=True)
-class _FusedCandidate:
+class _RankedCandidate:
     metadata: JobMetadata
     evidence: list[RankEvidence]
 
 
 class ProductionSearchEngine:
-    """Fail-closed BM25 + Qwen retrieval with bounded, auditable RRF fusion."""
+    """Fail-closed BM25 incumbent with optional bounded shadow evidence."""
 
     def __init__(
         self,
         manifest: RuntimeManifest,
         ports: RetrievalPorts,
         *,
+        enable_dense_shadow: bool = False,
         enable_multiview_maxsim: bool = False,
         multiview_artifact_key: str | None = None,
+        max_inflight_searches: int = MAX_INFLIGHT_SEARCHES,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
+        if isinstance(max_inflight_searches, bool) or max_inflight_searches < 1:
+            raise ValueError("max_inflight_searches must be a positive integer")
         if not isinstance(ports.lexical_full_jd, CandidateRetriever):
             raise TypeError("lexical_full_jd port does not satisfy CandidateRetriever")
-        if not isinstance(ports.dense_whole_jd, CandidateRetriever):
-            raise TypeError("dense_whole_jd port does not satisfy CandidateRetriever")
+        if enable_dense_shadow and not isinstance(ports.dense_whole_jd, CandidateRetriever):
+            raise TypeError("enabled dense shadow port does not satisfy CandidateRetriever")
         if not isinstance(ports.metadata, JobMetadataLookup):
             raise TypeError("metadata port does not satisfy JobMetadataLookup")
         artifact = manifest.artifact(multiview_artifact_key or "")
@@ -212,13 +246,15 @@ class ProductionSearchEngine:
             raise RuntimeError("enabled multi-view MaxSim requires its configured retrieval port")
 
         self._ports = ports
+        self._enable_dense_shadow = enable_dense_shadow
         self._enable_multiview_maxsim = enable_multiview_maxsim
         self._clock = clock or (lambda: datetime.now(UTC))
-        lane_count = 3 if enable_multiview_maxsim else 2
+        lane_count = 1 + int(enable_dense_shadow) + int(enable_multiview_maxsim)
         self._executor = ThreadPoolExecutor(
-            max_workers=lane_count,
+            max_workers=lane_count * max_inflight_searches,
             thread_name_prefix="retrieval-lane",
         )
+        self._inflight = BoundedSemaphore(max_inflight_searches)
         self._closed = False
         self._state_lock = Lock()
 
@@ -228,20 +264,32 @@ class ProductionSearchEngine:
         with self._state_lock:
             if self._closed:
                 raise SearchUnavailableError("search engine is closed")
+        if not self._inflight.acquire(blocking=False):
+            raise SearchUnavailableError("search capacity is saturated")
+        try:
+            return self._search_once(query, limit=limit)
+        finally:
+            self._inflight.release()
 
+    def _search_once(self, query: SearchQuery, *, limit: int) -> SearchResult:
         as_of = _aware(self._clock(), field="as_of")
         eligible_from = as_of - timedelta(days=MAX_AGE_DAYS)
+        compiled = self._compile_query(query.text)
         request = CandidateRequest(
             text=query.text,
             location_codes=tuple(canonical_code(value) for value in query.location_codes),
             duty_codes=tuple(canonical_code(value) for value in query.duty_codes),
             as_of=as_of,
             minimum_updated_at=eligible_from,
+            lexical_texts=compiled.lexical_texts,
+            query_rewrites=compiled.rewrites,
         )
         lanes: list[tuple[str, CandidateRetriever]] = [
             ("tantivy_bm25_full_jd", self._ports.lexical_full_jd),
-            ("qwen_dense_whole_jd", self._ports.dense_whole_jd),
         ]
+        if self._enable_dense_shadow:
+            assert self._ports.dense_whole_jd is not None
+            lanes.append(("qwen_dense_whole_jd", self._ports.dense_whole_jd))
         if self._enable_multiview_maxsim:
             assert self._ports.dense_multiview_maxsim is not None
             lanes.append(("qwen_dense_multiview_maxsim", self._ports.dense_multiview_maxsim))
@@ -255,17 +303,43 @@ class ProductionSearchEngine:
             for name, retriever in lanes
         }
         lane_results: list[tuple[str, tuple[CandidateEvidence, ...]]] = []
+        lane_failures: dict[str, str] = {}
+        deadline = monotonic() + LANE_TIMEOUT_SECONDS
         try:
-            for name, _retriever in lanes:
-                lane_results.append((name, futures[name].result()))
+            lane_results.append(
+                (lanes[0][0], futures[lanes[0][0]].result(timeout=_remaining(deadline)))
+            )
         except Exception as error:
             for future in futures.values():
                 future.cancel()
             raise SearchUnavailableError("a required retrieval lane failed") from error
 
+        shadow_deadline = min(
+            monotonic() + SHADOW_COLLECTION_SECONDS,
+            deadline - METADATA_RESERVE_SECONDS,
+        )
+        for name, _retriever in lanes[1:]:
+            try:
+                lane_results.append(
+                    (name, futures[name].result(timeout=_remaining(shadow_deadline)))
+                )
+            except Exception:
+                futures[name].cancel()
+                lane_failures[name] = "shadow_lane_failed"
+                lane_results.append((name, ()))
+
         validated_lane_results = [
-            (name, self._validate_lane(name, candidates)) for name, candidates in lane_results
+            (
+                lane_results[0][0],
+                self._validate_lane(lane_results[0][0], lane_results[0][1]),
+            )
         ]
+        for name, candidates in lane_results[1:]:
+            try:
+                validated_lane_results.append((name, self._validate_lane(name, candidates)))
+            except SearchUnavailableError:
+                lane_failures[name] = "shadow_lane_failed"
+                validated_lane_results.append((name, ()))
         candidate_ids = tuple(
             dict.fromkeys(
                 candidate.job_id
@@ -274,30 +348,59 @@ class ProductionSearchEngine:
             )
         )
         try:
-            metadata = self._ports.metadata.get_many(candidate_ids)
+            metadata = self._executor.submit(
+                self._ports.metadata.get_many,
+                candidate_ids,
+            ).result(timeout=_remaining(deadline))
         except Exception as error:
             raise SearchUnavailableError("job metadata lookup failed") from error
-        metadata_by_id = self._validate_metadata(candidate_ids, metadata, request=request)
+        required_ids = {candidate.job_id for candidate in validated_lane_results[0][1]}
+        metadata_by_id = self._validate_metadata(
+            candidate_ids,
+            metadata,
+            request=request,
+            required_ids=required_ids,
+        )
 
-        fused: dict[str, _FusedCandidate] = {}
+        ranked_candidates: dict[str, _RankedCandidate] = {}
         lane_traces: list[LaneTrace] = []
         for lane_name, validated in validated_lane_results:
+            if failure := lane_failures.get(lane_name):
+                lane_traces.append(LaneTrace(lane_name, "failed", failure, 0))
+                continue
+            incumbent = lane_name == "tantivy_bm25_full_jd"
             lane_traces.append(
-                LaneTrace(lane_name, "enabled", "required_production_lane", len(validated))
+                LaneTrace(
+                    lane_name,
+                    "enabled",
+                    "top10_incumbent" if incumbent else "shadow_tail_only",
+                    len(validated),
+                )
             )
             for rank, candidate in enumerate(validated, start=1):
-                contribution = 1.0 / (RRF_K + rank)
+                if candidate.job_id not in metadata_by_id:
+                    continue
+                contribution = candidate.score if incumbent else 0.0
                 rank_evidence = RankEvidence(lane_name, rank, candidate.score, contribution)
                 job_metadata = metadata_by_id[candidate.job_id]
-                existing = fused.get(candidate.job_id)
+                existing = ranked_candidates.get(candidate.job_id)
                 if existing is None:
-                    fused[candidate.job_id] = _FusedCandidate(
+                    ranked_candidates[candidate.job_id] = _RankedCandidate(
                         metadata=job_metadata,
                         evidence=[rank_evidence],
                     )
                 else:
                     existing.evidence.append(rank_evidence)
 
+        if not self._enable_dense_shadow:
+            lane_traces.append(
+                LaneTrace(
+                    "qwen_dense_whole_jd",
+                    "disabled",
+                    "production_latency_not_approved",
+                    0,
+                )
+            )
         if not self._enable_multiview_maxsim:
             lane_traces.append(
                 LaneTrace(
@@ -319,15 +422,9 @@ class ProductionSearchEngine:
 
         scored = [
             self._result_trace(job_id, candidate, as_of=as_of)
-            for job_id, candidate in fused.items()
+            for job_id, candidate in ranked_candidates.items()
         ]
-        scored.sort(
-            key=lambda item: (
-                -item.fused_score,
-                -item.freshness_score,
-                item.job_id,
-            )
-        )
+        scored.sort(key=_serving_order)
         selected = tuple(scored[:limit])
         return SearchResult(
             job_ids=tuple(item.job_id for item in selected),
@@ -336,8 +433,9 @@ class ProductionSearchEngine:
                 eligible_from=eligible_from,
                 max_age_days=MAX_AGE_DAYS,
                 future_rows="retained_with_zero_freshness",
-                location_filter=_filter_status(request.location_codes, len(fused)),
-                duty_filter=_filter_status(request.duty_codes, len(fused)),
+                location_filter=_filter_status(request.location_codes, len(ranked_candidates)),
+                duty_filter=_filter_status(request.duty_codes, len(ranked_candidates)),
+                query_rewrites=request.query_rewrites,
                 lanes=tuple(lane_traces),
                 results=selected,
             ),
@@ -394,36 +492,65 @@ class ProductionSearchEngine:
         metadata: object,
         *,
         request: CandidateRequest,
+        required_ids: set[str],
     ) -> dict[str, JobMetadata]:
-        if not isinstance(metadata, tuple) or len(metadata) != len(candidate_ids):
-            raise SearchUnavailableError("job metadata lookup returned an incomplete result")
+        if not isinstance(metadata, tuple) or len(metadata) > len(candidate_ids):
+            raise SearchUnavailableError("job metadata lookup returned malformed metadata")
         by_id: dict[str, JobMetadata] = {}
         for item in metadata:
-            if not isinstance(item, JobMetadata) or item.job_id in by_id:
+            if (
+                not isinstance(item, JobMetadata)
+                or item.job_id in by_id
+                or item.job_id not in candidate_ids
+            ):
                 raise SearchUnavailableError("job metadata lookup returned malformed metadata")
             updated_at = _aware(item.source_modified_at, field="source_modified_at")
             if updated_at < request.minimum_updated_at:
-                raise SearchUnavailableError("candidate violated temporal eligibility")
+                if item.job_id in required_ids:
+                    raise SearchUnavailableError("candidate violated temporal eligibility")
+                continue
             locations = {canonical_code(value) for value in item.location_codes}
             duties = {canonical_code(value) for value in item.duty_codes}
             if request.location_codes and not locations.intersection(request.location_codes):
-                raise SearchUnavailableError("candidate violated the location hard filter")
+                if item.job_id in required_ids:
+                    raise SearchUnavailableError("candidate violated the location hard filter")
+                continue
             if request.duty_codes and not duties.intersection(request.duty_codes):
-                raise SearchUnavailableError("candidate violated the duty hard filter")
+                if item.job_id in required_ids:
+                    raise SearchUnavailableError("candidate violated the duty hard filter")
+                continue
             by_id[item.job_id] = item
-        if set(by_id) != set(candidate_ids):
-            raise SearchUnavailableError("job metadata lookup returned unexpected job IDs")
+        if not required_ids.issubset(by_id):
+            raise SearchUnavailableError(
+                "job metadata lookup returned an incomplete incumbent result"
+            )
         return by_id
+
+    def _compile_query(self, text: str) -> CompiledQuery:
+        if self._ports.query_compiler is None:
+            return CompiledQuery((text,))
+        compiled = self._ports.query_compiler.compile(text)
+        if (
+            not isinstance(compiled, CompiledQuery)
+            or not 1 <= len(compiled.lexical_texts) <= 4
+            or compiled.lexical_texts[0] != text
+            or any(
+                not isinstance(value, str) or not value.strip() for value in compiled.lexical_texts
+            )
+            or any(not isinstance(value, QueryRewrite) for value in compiled.rewrites)
+        ):
+            raise SearchUnavailableError("query compiler violated its serving contract")
+        return compiled
 
     def _result_trace(
         self,
         job_id: str,
-        candidate: _FusedCandidate,
+        candidate: _RankedCandidate,
         *,
         as_of: datetime,
     ) -> ResultTrace:
         evidence = tuple(candidate.evidence)
-        fused_score = sum(item.rrf_contribution for item in evidence)
+        ranking_score = sum(item.ranking_contribution for item in evidence)
         source_modified_at = candidate.metadata.source_modified_at
         future_updated_snapshot = source_modified_at > as_of
         if future_updated_snapshot:
@@ -436,7 +563,7 @@ class ProductionSearchEngine:
             )
         return ResultTrace(
             job_id=job_id,
-            fused_score=fused_score,
+            ranking_score=ranking_score,
             freshness_score=freshness,
             source_modified_at=source_modified_at,
             future_updated_snapshot=future_updated_snapshot,
@@ -458,3 +585,17 @@ def _filter_status(requested: tuple[str, ...], returned: int) -> str:
     if not requested:
         return "not_requested"
     return "verified_on_returned_candidates" if returned else "no_returned_candidates"
+
+
+def _remaining(deadline: float) -> float:
+    return max(0.0, deadline - monotonic())
+
+
+def _serving_order(item: ResultTrace) -> tuple[int, int, float, str]:
+    lexical = [
+        evidence.rank for evidence in item.evidence if evidence.lane == "tantivy_bm25_full_jd"
+    ]
+    if lexical:
+        return (0, min(lexical), -item.freshness_score, item.job_id)
+    shadow = [evidence.rank for evidence in item.evidence]
+    return (1, min(shadow), -item.freshness_score, item.job_id)
