@@ -11,6 +11,7 @@ import math
 import re
 import subprocess
 import tempfile
+import unicodedata
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -25,26 +26,58 @@ AWS_REGION = "us-west-2"
 SOURCE_BUCKET = "jobbank-data-bucket"
 DESTINATION_BUCKET = "workretrievaldata-runtimebucket404c5ee4-hkvrjx5fbkij"
 
-APPROVED_WHOLE_BUILD_MANIFEST_SHA256 = (
-    "a02a23655fe8e5cc6b08afde35e93898ff94c62b88bbf7522e09f2c15378715c"
-)
-APPROVED_WHOLE_BUILD_PROVENANCE_PATH = "provenance/qwen3-embedding-8b/eva-6-build-manifest.json"
+# Intentionally unset until a full-JD-v2 build is independently verified. Promotion must fail
+# closed instead of relabeling the legacy 15-field EVA vectors as the serving corpus.
+APPROVED_WHOLE_BUILD_MANIFEST_SHA256: str | None = None
+APPROVED_WHOLE_BUILD_PROVENANCE_PATH = "embeddings/qwen3-embedding-8b/whole/build-manifest.json"
+WHOLE_BUILD_PROVENANCE_SOURCE_PATH = "provenance/qwen3-embedding-8b/build-manifest.json"
+APPROVED_TANTIVY_BUILD_MANIFEST_SHA256: str | None = None
+APPROVED_TANTIVY_INDEX_SHA256: str | None = None
+APPROVED_CITY_TAXONOMY_SHA256 = "6fb964a02a5700df3e31235b1d9adf72f353a0c4885e52ab200e9bf0cf2bab4a"
+APPROVED_DUTY_TAXONOMY_SHA256 = "51654e460e17a49bde42a3a4e867a21656158799173a68330b7dcc8295a41619"
+APPROVED_TANTIVY_BUILD_PROVENANCE_PATH = "indexes/tantivy-bm25-temporal-v1/build-manifest.json"
+TANTIVY_BUILD_PROVENANCE_SOURCE_PATH = "provenance/tantivy-bm25-temporal-v1/build-manifest.json"
+MATERIALIZATION_REPORT_PATH = "evidence/provenance/materialization-report.json"
+TANTIVY_JOB_IDS_RUNTIME_PATH = "indexes/tantivy-bm25-temporal-v1/job-ids.json"
+QUERY_CORRECTIONS_RUNTIME_PATH = "indexes/tantivy-bm25-temporal-v1/query-corrections.json"
 APPROVED_MODEL = "Qwen/Qwen3-Embedding-8B"
 APPROVED_MODEL_REVISION = "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"
-APPROVED_WHOLE_DIMENSION = 4096
-APPROVED_DOCUMENT_POLICY_VERSION = "2026-07-24-clean-v1"
+APPROVED_SOURCE_EMBEDDING_DIMENSION = 4096
+APPROVED_WHOLE_DIMENSION = 1024
+APPROVED_WHOLE_PROJECTION = "mrl_prefix_then_l2_normalize"
+APPROVED_DOCUMENT_POLICY_VERSION = "2026-08-01-full-jd-v2"
 APPROVED_MULTIVIEW_DIMENSION = 1024
+APPROVED_MULTIVIEW_REFERENCE_DIMENSION = 4096
 APPROVED_MULTIVIEW_KINDS = ["occupation", "skill", "requirement", "content"]
 APPROVED_DOCUMENT_FIELDS = [
     "職務名稱",
     "職務小類",
     "職務中類",
     "職務大類",
+    "薪資",
+    "職缺屬性",
+    "工時",
+    "工時說明",
     "電腦技能資料",
     "工作技能",
     "專業證照",
     "工作經驗需求",
     "學歷需求",
+    "科系需求1",
+    "科系需求2",
+    "科系需求3",
+    "語言能力一",
+    "語言能力一聽",
+    "語言能力一說",
+    "語言能力一讀",
+    "語言能力一寫",
+    "語言能力二",
+    "語言能力二聽",
+    "語言能力二說",
+    "語言能力二讀",
+    "語言能力二寫",
+    "管理人數",
+    "是否需外派",
     "工作城市",
     "產業小類",
     "產業中類",
@@ -53,7 +86,7 @@ APPROVED_DOCUMENT_FIELDS = [
     "職務內容",
 ]
 APPROVED_DOCUMENT_TEMPLATE_SHA256 = (
-    "3275f93ade6c4f043084e36303d38b33443858546a80104840f0e2b9468d2abb"
+    "8300647bfc45ac387f53d92aacbaa3924647a9575c9faf5b37da1b923758d234"
 )
 APPROVED_QUERY_PROMPT = (
     "Instruct: Given a job search query, retrieve relevant job postings matching "
@@ -78,6 +111,50 @@ APPROVED_TANTIVY_FIELD_BOOSTS = {
     "skills": 6.0,
     "industry": 1.0,
     "body": 0.5,
+}
+APPROVED_LEXICAL_POLICY_VERSION = "2026-08-01-pretokenized-v2"
+APPROVED_LEXICAL_POLICY_SHA256 = "c1ba79b6d98e4650500249b53fe34a184a5ab32c0651d16daeb5255e8a4d7abb"
+APPROVED_TANTIVY_TOKENIZERS = {
+    "title": "default",
+    "duty": "default",
+    "skills": "default",
+    "industry": "default",
+    "body": "default",
+    "location_filter": "raw",
+    "duty_filter": "raw",
+    "visibility_filter": "raw",
+}
+APPROVED_TANTIVY_SOURCE_FIELDS = {
+    "title": ["title"],
+    "duty": ["duty_minor", "duty_middle", "duty_major"],
+    "skills": ["computer_skills", "work_skills", "professional_certifications"],
+    "industry": ["industry_minor", "industry_middle", "industry_major"],
+    "body": [
+        "salary_text",
+        "job_attribute",
+        "work_hours",
+        "work_hours_description",
+        "experience_requirement",
+        "education_requirement",
+        "major_requirement_1",
+        "major_requirement_2",
+        "major_requirement_3",
+        "language_1",
+        "language_1_listening",
+        "language_1_speaking",
+        "language_1_reading",
+        "language_1_writing",
+        "language_2",
+        "language_2_listening",
+        "language_2_speaking",
+        "language_2_reading",
+        "language_2_writing",
+        "management_count",
+        "requires_travel",
+        "work_city",
+        "additional_conditions",
+        "description",
+    ],
 }
 DEMO_AS_OF = "2026-06-08T23:59:59.999+08:00"
 APPROVED_GRAPH_TRAIN_CUTOFF = "2026-06-08T00:00:00+08:00"
@@ -220,8 +297,8 @@ def validate_relative_path(path: str, kind: str | None = None) -> None:
         or path.startswith("/")
         or any(part in {"", ".", ".."} for part in raw_parts)
         or candidate.parts[0] not in set(ARTIFACT_ROOTS.values())
-        or (root is not None and candidate.parts[0] != root)
-        or (candidate.parts[0] == "evidence" and not path.endswith(".json"))
+        or (kind != "evidence" and root is not None and candidate.parts[0] != root)
+        or (kind == "evidence" and not path.endswith(".json"))
     ):
         raise RuntimeError(f"unsafe runtime artifact path: {path!r}")
 
@@ -304,7 +381,8 @@ def _selection_rules(spec: Mapping[str, object]) -> list[dict[str, str]]:
         _validate_source_path(source_prefix.removesuffix("/"))
         if kind not in ARTIFACT_ROOTS:
             raise RuntimeError(f"unsupported artifact kind: {kind}")
-        validate_relative_path(f"{destination_prefix}placeholder", kind)
+        placeholder = "placeholder.json" if kind == "evidence" else "placeholder"
+        validate_relative_path(f"{destination_prefix}{placeholder}", kind)
         rules.append(cast(dict[str, str], raw))
     for index, first in enumerate(rules):
         for second in rules[index + 1 :]:
@@ -312,10 +390,6 @@ def _selection_rules(spec: Mapping[str, object]) -> list[dict[str, str]]:
                 "source_prefix"
             ].startswith(first["source_prefix"]):
                 raise RuntimeError("release selection source prefixes overlap")
-            if first["destination_prefix"].startswith(second["destination_prefix"]) or second[
-                "destination_prefix"
-            ].startswith(first["destination_prefix"]):
-                raise RuntimeError("release selection destination prefixes overlap")
     return rules
 
 
@@ -323,12 +397,26 @@ def select_artifacts(
     source: Mapping[str, object], spec: Mapping[str, object]
 ) -> list[dict[str, object]]:
     inventory = _parse_source_manifest(source)
-    provenance = inventory.get(APPROVED_WHOLE_BUILD_PROVENANCE_PATH)
     if (
-        not isinstance(provenance, dict)
-        or provenance.get("sha256") != APPROVED_WHOLE_BUILD_MANIFEST_SHA256
+        APPROVED_WHOLE_BUILD_MANIFEST_SHA256 is None
+        or APPROVED_TANTIVY_BUILD_MANIFEST_SHA256 is None
+        or APPROVED_TANTIVY_INDEX_SHA256 is None
     ):
-        raise RuntimeError("source inventory does not pin the approved EVA whole build manifest")
+        raise RuntimeError("approved full-JD-v2 whole/Tantivy build lineage is not configured")
+    required_provenance = {
+        WHOLE_BUILD_PROVENANCE_SOURCE_PATH: (
+            APPROVED_WHOLE_BUILD_MANIFEST_SHA256,
+            "approved EVA whole build manifest",
+        ),
+        TANTIVY_BUILD_PROVENANCE_SOURCE_PATH: (
+            APPROVED_TANTIVY_BUILD_MANIFEST_SHA256,
+            "approved Tantivy build manifest",
+        ),
+    }
+    for path, (expected_sha256, label) in required_provenance.items():
+        provenance = inventory.get(path)
+        if not isinstance(provenance, dict) or provenance.get("sha256") != expected_sha256:
+            raise RuntimeError(f"source inventory does not pin the {label}")
     rules = _selection_rules(spec)
     selected: list[dict[str, object]] = []
     matched_rules: set[int] = set()
@@ -518,6 +606,52 @@ def _validate_whole_shards(
     return shard_paths
 
 
+def _validate_query_corrections_document(document: Mapping[str, object]) -> None:
+    _require_exact_keys(
+        "query corrections",
+        document,
+        {
+            "schema_version",
+            "source_policy",
+            "train_cutoff_exclusive",
+            "max_source_timestamp",
+            "corrections",
+        },
+    )
+    if (
+        document.get("schema_version") != 1
+        or document.get("source_policy") != "train_jd_only"
+        or document.get("train_cutoff_exclusive") != APPROVED_GRAPH_TRAIN_CUTOFF
+    ):
+        raise RuntimeError("query corrections are not pinned to the train-JD corpus")
+    cutoff = _timestamp(document.get("train_cutoff_exclusive"), "query correction cutoff")
+    maximum = _timestamp(document.get("max_source_timestamp"), "query correction maximum")
+    if maximum >= cutoff:
+        raise RuntimeError("query corrections include post-cutoff source data")
+    corrections = document.get("corrections")
+    if not isinstance(corrections, dict):
+        raise RuntimeError("query corrections mapping differs")
+    for source, target in corrections.items():
+        normalized_source = (
+            " ".join(unicodedata.normalize("NFKC", source).casefold().split())
+            if isinstance(source, str)
+            else ""
+        )
+        normalized_target = (
+            " ".join(unicodedata.normalize("NFKC", target).casefold().split())
+            if isinstance(target, str)
+            else ""
+        )
+        if (
+            not normalized_source
+            or not normalized_target
+            or normalized_source != source
+            or normalized_target != target
+            or source == target
+        ):
+            raise RuntimeError("query corrections contain a non-canonical rule")
+
+
 def _validate_component_manifests(
     manifest: Mapping[str, object], documents: Mapping[str, bytes]
 ) -> set[str]:
@@ -533,7 +667,9 @@ def _validate_component_manifests(
             "complete": True,
             "model": APPROVED_MODEL,
             "revision": APPROVED_MODEL_REVISION,
+            "source_dimension": APPROVED_SOURCE_EMBEDDING_DIMENSION,
             "dimension": APPROVED_WHOLE_DIMENSION,
+            "projection": APPROVED_WHOLE_PROJECTION,
             "dtype": "float16",
             "normalized": True,
             "document_policy_version": APPROVED_DOCUMENT_POLICY_VERSION,
@@ -550,7 +686,9 @@ def _validate_component_manifests(
             "complete",
             "model",
             "revision",
+            "source_dimension",
             "dimension",
+            "projection",
             "dtype",
             "normalized",
             "rows",
@@ -561,6 +699,8 @@ def _validate_component_manifests(
             "document_template_sha256",
             "document_fields",
             "query_prompt",
+            "build_manifest_path",
+            "build_manifest_sha256",
             "job_ids_path",
             "shards",
         },
@@ -572,7 +712,9 @@ def _validate_component_manifests(
             "complete": True,
             "model": APPROVED_MODEL,
             "revision": APPROVED_MODEL_REVISION,
+            "source_dimension": APPROVED_SOURCE_EMBEDDING_DIMENSION,
             "dimension": APPROVED_WHOLE_DIMENSION,
+            "projection": APPROVED_WHOLE_PROJECTION,
             "dtype": "float16",
             "normalized": True,
             "rows": whole.get("rows"),
@@ -586,6 +728,17 @@ def _validate_component_manifests(
         },
         whole_document,
     )
+    build_manifest_path = _artifact_reference(
+        artifacts,
+        {
+            "manifest_path": whole_document.get("build_manifest_path"),
+            "manifest_sha256": whole_document.get("build_manifest_sha256"),
+        },
+        "evidence",
+    )
+    if build_manifest_path != APPROVED_WHOLE_BUILD_PROVENANCE_PATH:
+        raise RuntimeError("whole embedding build manifest path differs")
+    reachable.add(build_manifest_path)
     whole_prefix = str(PurePosixPath(whole_path).parent) + "/"
     reachable.add(
         _component_file(
@@ -631,8 +784,16 @@ def _validate_component_manifests(
             "index_directory",
             "index_files",
             "taxonomy_path",
+            "job_ids_path",
+            "query_corrections_path",
+            "build_manifest_path",
+            "build_manifest_sha256",
             "schema_fields",
             "field_boosts",
+            "lexical_policy_version",
+            "lexical_policy_sha256",
+            "tokenizers",
+            "source_fields",
         },
     )
     _require_equal(
@@ -648,6 +809,10 @@ def _validate_component_manifests(
             "temporal_filter_semantics": TEMPORAL_FILTER_SEMANTICS,
             "schema_fields": APPROVED_TANTIVY_SCHEMA_FIELDS,
             "field_boosts": APPROVED_TANTIVY_FIELD_BOOSTS,
+            "lexical_policy_version": APPROVED_LEXICAL_POLICY_VERSION,
+            "lexical_policy_sha256": APPROVED_LEXICAL_POLICY_SHA256,
+            "tokenizers": APPROVED_TANTIVY_TOKENIZERS,
+            "source_fields": APPROVED_TANTIVY_SOURCE_FIELDS,
             "filter_semantics": TANTIVY_FILTER_SEMANTICS,
         },
         temporal_document,
@@ -682,6 +847,44 @@ def _validate_component_manifests(
             prefix=temporal_prefix,
         )
     )
+    job_ids_path = _component_file(
+        "temporal Tantivy",
+        temporal_document.get("job_ids_path"),
+        artifacts,
+        kind="index",
+        prefix=temporal_prefix,
+    )
+    whole_job_ids_path = cast(str, whole_document["job_ids_path"])
+    if cast(Mapping[str, object], artifacts[job_ids_path]).get("sha256") != cast(
+        Mapping[str, object], artifacts[whole_job_ids_path]
+    ).get("sha256"):
+        raise RuntimeError("Tantivy job IDs differ from whole embedding row order")
+    reachable.add(job_ids_path)
+    corrections_path = _component_file(
+        "temporal Tantivy",
+        temporal_document.get("query_corrections_path"),
+        artifacts,
+        kind="index",
+        prefix=temporal_prefix,
+    )
+    if (
+        job_ids_path != TANTIVY_JOB_IDS_RUNTIME_PATH
+        or corrections_path != QUERY_CORRECTIONS_RUNTIME_PATH
+    ):
+        raise RuntimeError("Tantivy auxiliary runtime path differs")
+    tantivy_build_manifest_path = _artifact_reference(
+        artifacts,
+        {
+            "manifest_path": temporal_document.get("build_manifest_path"),
+            "manifest_sha256": temporal_document.get("build_manifest_sha256"),
+        },
+        "evidence",
+    )
+    if tantivy_build_manifest_path != APPROVED_TANTIVY_BUILD_PROVENANCE_PATH:
+        raise RuntimeError("Tantivy build manifest path differs")
+    reachable.add(tantivy_build_manifest_path)
+    _validate_query_corrections_document(_json_document(corrections_path, artifacts, documents))
+    reachable.add(corrections_path)
 
     challengers = cast(Mapping[str, Mapping[str, object]], manifest["challengers"])
     multiview = challengers["multiview_embedding"]
@@ -744,7 +947,7 @@ def _validate_component_manifests(
                 "report_sha256": runtime_evidence.get("report_sha256"),
                 "stable_result_sha256": runtime_evidence.get("stable_result_sha256"),
                 "selected_dimension": APPROVED_MULTIVIEW_DIMENSION,
-                "reference_dimension": APPROVED_WHOLE_DIMENSION,
+                "reference_dimension": APPROVED_MULTIVIEW_REFERENCE_DIMENSION,
             },
             component_evidence,
         )
@@ -847,25 +1050,11 @@ def _forbid_sensitive_fields(value: object) -> None:
 
 
 def _forbid_artifact_path(path: str) -> None:
-    normalized_parts = {
-        re.sub(r"[^a-z0-9]+", "_", part.casefold().split(".", 1)[0]).strip("_")
-        for part in path.split("/")
-    }
-    tokens = {token for part in normalized_parts for token in part.split("_")}
-    if normalized_parts & FORBIDDEN_PATH_PARTS or tokens & {
-        "credential",
-        "credentials",
-        "gt",
-        "judgment",
-        "judgments",
-        "log",
-        "logs",
-        "qrel",
-        "qrels",
-        "secret",
-        "secrets",
-    }:
-        raise RuntimeError(f"runtime bundle contains forbidden artifact path: {path}")
+    normalized = re.sub(r"[^a-z0-9]+", "_", path.casefold()).strip("_")
+    for marker in FORBIDDEN_PATH_PARTS:
+        canonical_marker = re.sub(r"[^a-z0-9]+", "_", marker.casefold()).strip("_")
+        if re.search(rf"(?:^|_){re.escape(canonical_marker)}(?:_|$)", normalized):
+            raise RuntimeError(f"runtime bundle contains forbidden artifact path: {path}")
 
 
 def _timestamp(value: object, name: str) -> datetime:
@@ -878,6 +1067,91 @@ def _timestamp(value: object, name: str) -> datetime:
     if parsed.tzinfo is None:
         raise RuntimeError(f"{name} must include a timezone")
     return parsed
+
+
+def _validate_materialization_lineage(
+    manifest: Mapping[str, object], documents: Mapping[str, bytes]
+) -> set[str]:
+    if (
+        APPROVED_WHOLE_BUILD_MANIFEST_SHA256 is None
+        or APPROVED_TANTIVY_BUILD_MANIFEST_SHA256 is None
+        or APPROVED_TANTIVY_INDEX_SHA256 is None
+    ):
+        raise RuntimeError("approved full-JD-v2 whole/Tantivy build lineage is not configured")
+    artifacts = cast(Mapping[str, object], manifest["artifacts"])
+    incumbents = cast(Mapping[str, Mapping[str, object]], manifest["incumbents"])
+    for path, expected_sha256, label in (
+        (
+            APPROVED_WHOLE_BUILD_PROVENANCE_PATH,
+            APPROVED_WHOLE_BUILD_MANIFEST_SHA256,
+            "whole build provenance",
+        ),
+        (
+            APPROVED_TANTIVY_BUILD_PROVENANCE_PATH,
+            APPROVED_TANTIVY_BUILD_MANIFEST_SHA256,
+            "Tantivy build provenance",
+        ),
+    ):
+        artifact = artifacts.get(path)
+        if (
+            not isinstance(artifact, dict)
+            or artifact.get("kind") != "evidence"
+            or artifact.get("sha256") != expected_sha256
+        ):
+            raise RuntimeError(f"{label} is absent from runtime selection lineage")
+    report = _json_document(MATERIALIZATION_REPORT_PATH, artifacts, documents)
+    _require_exact_keys(
+        "materialization lineage",
+        report,
+        {
+            "schema_version",
+            "whole_build_manifest_sha256",
+            "whole_runtime_manifest_sha256",
+            "tantivy_build_manifest_sha256",
+            "tantivy_runtime_manifest_sha256",
+            "tantivy_index_sha256",
+            "dataset_sha256",
+            "jobs_sha256",
+            "job_row_order_sha256",
+            "rows",
+            "placement",
+            "city_taxonomy_sha256",
+            "duty_taxonomy_sha256",
+            "query_corrections_sha256",
+        },
+    )
+    whole = incumbents["whole_embedding"]
+    temporal = incumbents["temporal_tantivy"]
+    temporal_document = _json_document(cast(str, temporal["manifest_path"]), artifacts, documents)
+    corrections_path = temporal_document.get("query_corrections_path")
+    corrections_artifact = (
+        artifacts.get(corrections_path) if isinstance(corrections_path, str) else None
+    )
+    if not isinstance(corrections_artifact, dict):
+        raise RuntimeError("query corrections are absent from materialization lineage")
+    expected = {
+        "schema_version": 1,
+        "whole_build_manifest_sha256": APPROVED_WHOLE_BUILD_MANIFEST_SHA256,
+        "whole_runtime_manifest_sha256": whole.get("manifest_sha256"),
+        "tantivy_build_manifest_sha256": APPROVED_TANTIVY_BUILD_MANIFEST_SHA256,
+        "tantivy_runtime_manifest_sha256": temporal.get("manifest_sha256"),
+        "tantivy_index_sha256": APPROVED_TANTIVY_INDEX_SHA256,
+        "dataset_sha256": whole.get("dataset_sha256"),
+        "jobs_sha256": whole.get("jobs_sha256"),
+        "job_row_order_sha256": whole.get("job_row_order_sha256"),
+        "rows": whole.get("rows"),
+        "placement": "copy_sha256_verified",
+        "city_taxonomy_sha256": APPROVED_CITY_TAXONOMY_SHA256,
+        "duty_taxonomy_sha256": APPROVED_DUTY_TAXONOMY_SHA256,
+        "query_corrections_sha256": corrections_artifact.get("sha256"),
+    }
+    if report != expected or temporal.get("index_sha256") != APPROVED_TANTIVY_INDEX_SHA256:
+        raise RuntimeError("materialization lineage differs from approved source artifacts")
+    return {
+        APPROVED_WHOLE_BUILD_PROVENANCE_PATH,
+        APPROVED_TANTIVY_BUILD_PROVENANCE_PATH,
+        MATERIALIZATION_REPORT_PATH,
+    }
 
 
 def _validate_promotion_evidence(
@@ -994,28 +1268,9 @@ def validate_runtime_manifest(
         _require_sha256(f"artifact SHA-256 for {path}", raw.get("sha256"))
         if type(raw.get("size_bytes")) is not int or cast(int, raw["size_bytes"]) < 0:
             raise RuntimeError(f"runtime artifact size is invalid: {path}")
-    graph = challengers["skill_graph"]
-    if graph.get("enabled") is True:
-        cutoff = _timestamp(graph.get("train_cutoff_exclusive"), "Graph train cutoff")
-        demo_as_of = _timestamp(
-            cast(Mapping[str, object], retrieval["as_of"]).get("demo_reference"),
-            "Demo as_of",
-        )
-        if cutoff > demo_as_of:
-            raise RuntimeError("Graph train cutoff must not exceed Demo as_of")
-        max_source_timestamp = _timestamp(
-            graph.get("max_source_timestamp"), "Graph maximum source timestamp"
-        )
-        if max_source_timestamp >= cutoff:
-            raise RuntimeError("Graph source timestamp must precede its exclusive train cutoff")
-        if (
-            graph.get("train_cutoff_exclusive") != APPROVED_GRAPH_TRAIN_CUTOFF
-            or graph.get("max_source_timestamp") != APPROVED_GRAPH_MAX_SOURCE_TIMESTAMP
-            or graph.get("source_jd_sha256") != APPROVED_GRAPH_SOURCE_JD_SHA256
-        ):
-            raise RuntimeError("Graph does not match the approved Graph train snapshot")
-        if graph.get("source_policy") != "train_jd_only" or graph.get("test_jd_used") is not False:
-            raise RuntimeError("Graph is not proven train-only")
+    for name in ("skill_graph", "semantic_reranker", "learning_to_rank", "guardrails"):
+        if challengers[name] != {"enabled": False}:
+            raise RuntimeError(f"{name} has no production adapter and must be disabled")
     evidence_paths: set[str] = set()
     for name, challenger in challengers.items():
         enabled = challenger.get("enabled")
@@ -1041,7 +1296,7 @@ def validate_runtime_manifest(
                 or not isinstance(evidence, dict)
                 or evidence.get("decision") != "accepted"
                 or evidence.get("selected_dimension") != APPROVED_MULTIVIEW_DIMENSION
-                or evidence.get("reference_dimension") != APPROVED_WHOLE_DIMENSION
+                or evidence.get("reference_dimension") != APPROVED_MULTIVIEW_REFERENCE_DIMENSION
             ):
                 raise RuntimeError("multi-view MRL publication gate differs")
             _artifact_reference(
@@ -1059,7 +1314,7 @@ def validate_runtime_manifest(
             if (
                 mrl_body.get("stable_result_sha256") != evidence.get("stable_result_sha256")
                 or mrl_body.get("selected_dimension") != APPROVED_MULTIVIEW_DIMENSION
-                or mrl_body.get("reference_dimension") != APPROVED_WHOLE_DIMENSION
+                or mrl_body.get("reference_dimension") != APPROVED_MULTIVIEW_REFERENCE_DIMENSION
             ):
                 raise RuntimeError("multi-view MRL report lineage differs")
             evidence_paths.add(mrl_path)
@@ -1083,7 +1338,11 @@ def validate_runtime_manifest(
     ):
         _require_sha256(name, release.get(name))
     _forbid_sensitive_fields(manifest)
-    reachable = _validate_component_manifests(manifest, documents) | evidence_paths
+    reachable = (
+        _validate_component_manifests(manifest, documents)
+        | _validate_materialization_lineage(manifest, documents)
+        | evidence_paths
+    )
     if reachable != set(artifacts):
         extra = sorted(set(artifacts) - reachable)
         missing = sorted(reachable - set(artifacts))
@@ -1200,7 +1459,11 @@ def _document_paths(runtime: Mapping[str, object]) -> set[str]:
         challengers = cast(Mapping[str, Mapping[str, object]], runtime["challengers"])
     except (KeyError, TypeError) as error:
         raise RuntimeError("release runtime component contract is incomplete") from error
-    paths = {cast(str, value["manifest_path"]) for value in incumbents.values()}
+    paths = {
+        *(cast(str, value["manifest_path"]) for value in incumbents.values()),
+        MATERIALIZATION_REPORT_PATH,
+        QUERY_CORRECTIONS_RUNTIME_PATH,
+    }
     paths.update(
         cast(str, value["manifest_path"])
         for value in challengers.values()

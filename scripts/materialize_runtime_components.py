@@ -5,21 +5,28 @@ from __future__ import annotations
 
 import argparse
 import csv
+import ctypes
+import errno
 import hashlib
 import json
 import os
 import shutil
+import sys
 import tempfile
 import unicodedata
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import cast
 
+import numpy as np
 import promote_runtime_artifacts as contract
 
 WHOLE_DESTINATION = Path("runtime/embeddings/qwen3-embedding-8b/whole")
 TANTIVY_DESTINATION = Path("runtime/indexes/tantivy-bm25-temporal-v1")
-PROVENANCE_DESTINATION = Path(contract.APPROVED_WHOLE_BUILD_PROVENANCE_PATH)
+PROVENANCE_DESTINATION = Path(contract.WHOLE_BUILD_PROVENANCE_SOURCE_PATH)
+TANTIVY_PROVENANCE_DESTINATION = Path(contract.TANTIVY_BUILD_PROVENANCE_SOURCE_PATH)
+REPORT_DESTINATION = Path("runtime") / contract.MATERIALIZATION_REPORT_PATH
 
 
 def _sha256(path: Path) -> str:
@@ -60,16 +67,98 @@ def _write_json(path: Path, value: object) -> bytes:
     return payload
 
 
-def _place(source: Path, destination: Path, mode: str) -> None:
+def _copy_verified(source: Path, destination: Path, expected_sha256: str) -> None:
     if not source.is_file() or source.is_symlink():
         raise RuntimeError(f"runtime source is not a regular file: {source}")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    if mode == "hardlink":
-        os.link(source, destination)
-    elif mode == "copy":
-        shutil.copyfile(source, destination)
+    if destination.exists():
+        raise RuntimeError(f"runtime destination already exists: {destination}")
+    shutil.copyfile(source, destination)
+    if _sha256(destination) != expected_sha256:
+        destination.unlink(missing_ok=True)
+        raise RuntimeError(f"copied runtime artifact checksum differs: {destination}")
+
+
+def _project_mrl_prefix(
+    source: Path, destination: Path, expected_source_sha256: str, expected_rows: int
+) -> None:
+    if not source.is_file() or source.is_symlink():
+        raise RuntimeError(f"runtime source is not a regular file: {source}")
+    if _sha256(source) != expected_source_sha256:
+        raise RuntimeError(f"whole build source vector checksum differs: {source}")
+    try:
+        source_vectors = np.load(source, mmap_mode="r", allow_pickle=False)
+    except (OSError, ValueError) as error:
+        raise RuntimeError(
+            f"whole build source vector is not a valid NumPy array: {source}"
+        ) from error
+    if source_vectors.dtype != np.float16 or source_vectors.shape != (
+        expected_rows,
+        contract.APPROVED_SOURCE_EMBEDDING_DIMENSION,
+    ):
+        raise RuntimeError(f"whole build source vector shape/dtype differs: {source}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        raise RuntimeError(f"runtime destination already exists: {destination}")
+    output = np.lib.format.open_memmap(
+        destination,
+        mode="w+",
+        dtype=np.float16,
+        shape=(expected_rows, contract.APPROVED_WHOLE_DIMENSION),
+    )
+    for start in range(0, expected_rows, 4_096):
+        end = min(start + 4_096, expected_rows)
+        prefix = np.asarray(
+            source_vectors[start:end, : contract.APPROVED_WHOLE_DIMENSION], dtype=np.float32
+        )
+        norms = np.linalg.norm(prefix, axis=1)
+        if not np.isfinite(prefix).all() or not np.isfinite(norms).all() or np.any(norms <= 0):
+            raise RuntimeError(f"whole build MRL prefix is non-finite or zero-norm: {source}")
+        output[start:end] = (prefix / norms[:, None]).astype(np.float16)
+    output.flush()
+    del output
+    projected = np.load(destination, mmap_mode="r", allow_pickle=False)
+    projected_norms = np.linalg.norm(np.asarray(projected, dtype=np.float32), axis=1)
+    if (
+        projected.dtype != np.float16
+        or projected.shape != (expected_rows, contract.APPROVED_WHOLE_DIMENSION)
+        or not np.isfinite(projected_norms).all()
+        or not np.allclose(projected_norms, 1.0, rtol=0, atol=2e-3)
+    ):
+        destination.unlink(missing_ok=True)
+        raise RuntimeError(f"materialized MRL prefix is invalid: {destination}")
+
+
+def _publish_exclusive(source: Path, destination: Path) -> None:
+    """Atomically publish a directory without replacing an existing destination."""
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    source_bytes = os.fsencode(source)
+    destination_bytes = os.fsencode(destination)
+    if sys.platform == "darwin":
+        rename = libc.renamex_np
+        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(source_bytes, destination_bytes, 0x00000004)
+    elif sys.platform.startswith("linux"):
+        rename = libc.renameat2
+        rename.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename.restype = ctypes.c_int
+        result = rename(-100, source_bytes, -100, destination_bytes, 0x00000001)
     else:
-        raise ValueError("link mode must be hardlink or copy")
+        raise RuntimeError(f"atomic exclusive directory publish is unsupported on {sys.platform}")
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
+        raise RuntimeError(f"materialization output already exists: {destination}")
+    raise OSError(error_number, os.strerror(error_number), destination)
 
 
 def _terms_csv(path: Path) -> dict[str, list[str]]:
@@ -100,6 +189,57 @@ def _terms_csv(path: Path) -> dict[str, list[str]]:
     if not result:
         raise RuntimeError(f"taxonomy CSV is empty: {path}")
     return result
+
+
+def _validate_query_corrections(path: Path) -> None:
+    value = _read_object(path, "query corrections")
+    if set(value) != {
+        "schema_version",
+        "source_policy",
+        "train_cutoff_exclusive",
+        "max_source_timestamp",
+        "corrections",
+    }:
+        raise RuntimeError("query corrections schema differs")
+    if value["schema_version"] != 1 or value["source_policy"] != "train_jd_only":
+        raise RuntimeError("query corrections are not train-JD corpus safe")
+    cutoff = value.get("train_cutoff_exclusive")
+    maximum = value.get("max_source_timestamp")
+    if not isinstance(cutoff, str) or not isinstance(maximum, str):
+        raise RuntimeError("query corrections timestamps are missing")
+    try:
+        parsed_cutoff = datetime.fromisoformat(cutoff.replace("Z", "+00:00"))
+        parsed_maximum = datetime.fromisoformat(maximum.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise RuntimeError("query corrections timestamps are invalid") from error
+    if (
+        parsed_cutoff.tzinfo is None
+        or parsed_maximum.tzinfo is None
+        or parsed_maximum >= parsed_cutoff
+    ):
+        raise RuntimeError("query corrections include post-cutoff source data")
+    corrections = value.get("corrections")
+    if not isinstance(corrections, dict):
+        raise RuntimeError("query corrections mapping differs")
+    for source, target in corrections.items():
+        normalized_source = (
+            " ".join(unicodedata.normalize("NFKC", source).casefold().split())
+            if isinstance(source, str)
+            else ""
+        )
+        normalized_target = (
+            " ".join(unicodedata.normalize("NFKC", target).casefold().split())
+            if isinstance(target, str)
+            else ""
+        )
+        if (
+            not normalized_source
+            or not normalized_target
+            or normalized_source != source
+            or normalized_target != target
+            or source == target
+        ):
+            raise RuntimeError("query corrections contain a non-canonical rule")
 
 
 def _artifact_inventory(root: Path, excluded: set[Path]) -> list[dict[str, object]]:
@@ -147,16 +287,28 @@ def materialize(
     tantivy_build_root: Path,
     city_taxonomy_csv: Path,
     duty_taxonomy_csv: Path,
+    query_corrections_json: Path,
     output_root: Path,
     source_manifest_key: str,
-    link_mode: str,
-    approved_whole_build_sha256: str = contract.APPROVED_WHOLE_BUILD_MANIFEST_SHA256,
+    approved_whole_build_sha256: str,
+    approved_tantivy_build_sha256: str,
+    approved_tantivy_index_sha256: str,
+    approved_query_corrections_sha256: str,
+    approved_city_taxonomy_sha256: str = contract.APPROVED_CITY_TAXONOMY_SHA256,
+    approved_duty_taxonomy_sha256: str = contract.APPROVED_DUTY_TAXONOMY_SHA256,
 ) -> None:
     if output_root.exists():
         raise RuntimeError("materialization output already exists")
     if not source_manifest_key.endswith("/manifest.json"):
         raise RuntimeError("source manifest key must end with /manifest.json")
     contract._validate_source_path(source_manifest_key)
+    if _sha256(city_taxonomy_csv) != approved_city_taxonomy_sha256:
+        raise RuntimeError("city taxonomy is not the approved city taxonomy")
+    if _sha256(duty_taxonomy_csv) != approved_duty_taxonomy_sha256:
+        raise RuntimeError("duty taxonomy is not the approved duty taxonomy")
+    if _sha256(query_corrections_json) != approved_query_corrections_sha256:
+        raise RuntimeError("query corrections are not the approved train-JD corrections")
+    _validate_query_corrections(query_corrections_json)
     output_root.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{output_root.name}.", dir=output_root.parent))
     try:
@@ -219,10 +371,11 @@ def materialize(
                 row_order.update(job_id.encode())
                 row_order.update(b"\n")
             vector_path = f"{WHOLE_DESTINATION.as_posix()}/shards/{expected_index:05d}.f16.npy"
-            _place(
+            _project_mrl_prefix(
                 vectors_source,
                 temporary / vector_path,
-                link_mode,
+                cast(str, raw["embedding_sha256"]),
+                shard_rows,
             )
             serving_shards.append(
                 {
@@ -230,7 +383,7 @@ def materialize(
                     "row_start": row_start,
                     "row_end": row_start + shard_rows,
                     "rows": shard_rows,
-                    "dimension": 4096,
+                    "dimension": contract.APPROVED_WHOLE_DIMENSION,
                 }
             )
             row_start += shard_rows
@@ -253,7 +406,9 @@ def materialize(
             "complete": True,
             "model": contract.APPROVED_MODEL,
             "revision": contract.APPROVED_MODEL_REVISION,
-            "dimension": 4096,
+            "source_dimension": contract.APPROVED_SOURCE_EMBEDDING_DIMENSION,
+            "dimension": contract.APPROVED_WHOLE_DIMENSION,
+            "projection": contract.APPROVED_WHOLE_PROJECTION,
             "dtype": "float16",
             "normalized": True,
             "rows": rows,
@@ -264,13 +419,18 @@ def materialize(
             "document_template_sha256": contract.APPROVED_DOCUMENT_TEMPLATE_SHA256,
             "document_fields": contract.APPROVED_DOCUMENT_FIELDS,
             "query_prompt": contract.APPROVED_QUERY_PROMPT,
+            "build_manifest_path": contract.APPROVED_WHOLE_BUILD_PROVENANCE_PATH,
+            "build_manifest_sha256": approved_whole_build_sha256,
             "job_ids_path": job_ids_runtime_path,
             "shards": serving_shards,
         }
         whole_payload = _write_json(whole_destination / "manifest.json", whole_component)
 
+        tantivy_source_manifest_path = tantivy_build_root / "manifest.json"
+        if _sha256(tantivy_source_manifest_path) != approved_tantivy_build_sha256:
+            raise RuntimeError("Tantivy build manifest is not the approved Tantivy build manifest")
         tantivy_source_manifest = _read_object(
-            tantivy_build_root / "manifest.json", "Tantivy build manifest"
+            tantivy_source_manifest_path, "Tantivy build manifest"
         )
         contract._require_equal(
             "Tantivy build",
@@ -282,11 +442,19 @@ def materialize(
                 "updated_at_field": "updated_at_epoch_ms",
                 "filter_semantics": contract.TANTIVY_FILTER_SEMANTICS,
                 "fields": contract.APPROVED_TANTIVY_FIELD_BOOSTS,
+                "document_policy_version": contract.APPROVED_DOCUMENT_POLICY_VERSION,
+                "lexical_policy_version": contract.APPROVED_LEXICAL_POLICY_VERSION,
+                "lexical_policy_sha256": contract.APPROVED_LEXICAL_POLICY_SHA256,
+                "tokenizers": contract.APPROVED_TANTIVY_TOKENIZERS,
+                "source_fields": contract.APPROVED_TANTIVY_SOURCE_FIELDS,
             },
             tantivy_source_manifest,
         )
         source_index = tantivy_build_root / "index"
-        if _tree_sha256(source_index) != tantivy_source_manifest.get("index_sha256"):
+        if (
+            tantivy_source_manifest.get("index_sha256") != approved_tantivy_index_sha256
+            or _tree_sha256(source_index) != approved_tantivy_index_sha256
+        ):
             raise RuntimeError("Tantivy build index checksum differs")
         tantivy_destination = temporary / TANTIVY_DESTINATION
         index_files: list[str] = []
@@ -295,7 +463,7 @@ def materialize(
         ):
             relative = source.relative_to(source_index)
             destination = tantivy_destination / "index" / relative
-            _place(source, destination, link_mode)
+            _copy_verified(source, destination, _sha256(source))
             index_files.append(
                 f"{TANTIVY_DESTINATION.as_posix()}/index/{relative.as_posix()}".removeprefix(
                     "runtime/"
@@ -303,8 +471,27 @@ def materialize(
             )
         if not index_files:
             raise RuntimeError("Tantivy build index is empty")
+        if _tree_sha256(tantivy_destination / "index") != approved_tantivy_index_sha256:
+            raise RuntimeError("copied Tantivy index checksum differs")
         taxonomy_runtime_path = (
             f"{TANTIVY_DESTINATION.as_posix()}/filter-taxonomy.json".removeprefix("runtime/")
+        )
+        tantivy_job_ids_runtime_path = (
+            f"{TANTIVY_DESTINATION.as_posix()}/job-ids.json".removeprefix("runtime/")
+        )
+        query_corrections_runtime_path = (
+            f"{TANTIVY_DESTINATION.as_posix()}/query-corrections.json".removeprefix("runtime/")
+        )
+        whole_job_ids_path = whole_destination / "job-ids.json"
+        _copy_verified(
+            whole_job_ids_path,
+            temporary / "runtime" / tantivy_job_ids_runtime_path,
+            _sha256(whole_job_ids_path),
+        )
+        _copy_verified(
+            query_corrections_json,
+            temporary / "runtime" / query_corrections_runtime_path,
+            approved_query_corrections_sha256,
         )
         _write_json(
             tantivy_destination / "filter-taxonomy.json",
@@ -324,33 +511,49 @@ def materialize(
             "index_directory": f"{TANTIVY_DESTINATION.as_posix()}/index".removeprefix("runtime/"),
             "index_files": index_files,
             "taxonomy_path": taxonomy_runtime_path,
+            "job_ids_path": tantivy_job_ids_runtime_path,
+            "query_corrections_path": query_corrections_runtime_path,
+            "build_manifest_path": contract.APPROVED_TANTIVY_BUILD_PROVENANCE_PATH,
+            "build_manifest_sha256": approved_tantivy_build_sha256,
             "schema_fields": contract.APPROVED_TANTIVY_SCHEMA_FIELDS,
             "field_boosts": contract.APPROVED_TANTIVY_FIELD_BOOSTS,
+            "lexical_policy_version": contract.APPROVED_LEXICAL_POLICY_VERSION,
+            "lexical_policy_sha256": contract.APPROVED_LEXICAL_POLICY_SHA256,
+            "tokenizers": contract.APPROVED_TANTIVY_TOKENIZERS,
+            "source_fields": contract.APPROVED_TANTIVY_SOURCE_FIELDS,
             "filter_semantics": contract.TANTIVY_FILTER_SEMANTICS,
             "updated_at_field": "updated_at_epoch_ms",
             "temporal_filter_semantics": contract.TEMPORAL_FILTER_SEMANTICS,
         }
         tantivy_payload = _write_json(tantivy_destination / "manifest.json", tantivy_component)
 
-        provenance_path = temporary / PROVENANCE_DESTINATION
-        provenance_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(whole_source_manifest_path, provenance_path)
-        report_path = Path("provenance/materialization-report.json")
+        _copy_verified(
+            whole_source_manifest_path,
+            temporary / PROVENANCE_DESTINATION,
+            approved_whole_build_sha256,
+        )
+        _copy_verified(
+            tantivy_source_manifest_path,
+            temporary / TANTIVY_PROVENANCE_DESTINATION,
+            approved_tantivy_build_sha256,
+        )
         _write_json(
-            temporary / report_path,
+            temporary / REPORT_DESTINATION,
             {
                 "schema_version": 1,
                 "whole_build_manifest_sha256": approved_whole_build_sha256,
                 "whole_runtime_manifest_sha256": hashlib.sha256(whole_payload).hexdigest(),
-                "tantivy_build_manifest_sha256": _sha256(tantivy_build_root / "manifest.json"),
+                "tantivy_build_manifest_sha256": approved_tantivy_build_sha256,
                 "tantivy_runtime_manifest_sha256": hashlib.sha256(tantivy_payload).hexdigest(),
+                "tantivy_index_sha256": approved_tantivy_index_sha256,
                 "dataset_sha256": whole["dataset_sha256"],
                 "jobs_sha256": whole["jobs_sha256"],
                 "job_row_order_sha256": whole["job_row_order_sha256"],
                 "rows": rows,
-                "link_mode": link_mode,
-                "city_taxonomy_sha256": _sha256(city_taxonomy_csv),
-                "duty_taxonomy_sha256": _sha256(duty_taxonomy_csv),
+                "placement": "copy_sha256_verified",
+                "city_taxonomy_sha256": approved_city_taxonomy_sha256,
+                "duty_taxonomy_sha256": approved_duty_taxonomy_sha256,
+                "query_corrections_sha256": approved_query_corrections_sha256,
             },
         )
 
@@ -371,6 +574,21 @@ def materialize(
                 "source_prefix": f"{TANTIVY_DESTINATION.as_posix()}/",
                 "destination_prefix": "indexes/tantivy-bm25-temporal-v1/",
                 "kind": "index",
+            },
+            {
+                "source_prefix": "runtime/evidence/provenance/",
+                "destination_prefix": "evidence/provenance/",
+                "kind": "evidence",
+            },
+            {
+                "source_prefix": "provenance/qwen3-embedding-8b/",
+                "destination_prefix": "embeddings/qwen3-embedding-8b/whole/",
+                "kind": "evidence",
+            },
+            {
+                "source_prefix": "provenance/tantivy-bm25-temporal-v1/",
+                "destination_prefix": "indexes/tantivy-bm25-temporal-v1/",
+                "kind": "evidence",
             },
         ]
         selected = _selected_inventory(source_manifest, selections)
@@ -402,7 +620,9 @@ def materialize(
                         "complete": True,
                         "model": contract.APPROVED_MODEL,
                         "revision": contract.APPROVED_MODEL_REVISION,
-                        "dimension": 4096,
+                        "dimension": contract.APPROVED_WHOLE_DIMENSION,
+                        "source_dimension": contract.APPROVED_SOURCE_EMBEDDING_DIMENSION,
+                        "projection": contract.APPROVED_WHOLE_PROJECTION,
                         "dtype": "float16",
                         "normalized": True,
                         "rows": rows,
@@ -429,7 +649,7 @@ def materialize(
             },
         }
         _write_json(temporary / release_spec_path, release_spec)
-        temporary.replace(output_root)
+        _publish_exclusive(temporary, output_root)
     except Exception:
         shutil.rmtree(temporary)
         raise
@@ -441,9 +661,13 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--tantivy-build-root", type=Path, required=True)
     parser.add_argument("--city-taxonomy-csv", type=Path, required=True)
     parser.add_argument("--duty-taxonomy-csv", type=Path, required=True)
+    parser.add_argument("--query-corrections-json", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--source-manifest-key", required=True)
-    parser.add_argument("--link-mode", choices=("hardlink", "copy"), default="hardlink")
+    parser.add_argument("--approved-whole-build-sha256", required=True)
+    parser.add_argument("--approved-tantivy-build-sha256", required=True)
+    parser.add_argument("--approved-tantivy-index-sha256", required=True)
+    parser.add_argument("--approved-query-corrections-sha256", required=True)
     return parser.parse_args(argv)
 
 
@@ -454,9 +678,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         tantivy_build_root=args.tantivy_build_root,
         city_taxonomy_csv=args.city_taxonomy_csv,
         duty_taxonomy_csv=args.duty_taxonomy_csv,
+        query_corrections_json=args.query_corrections_json,
         output_root=args.output_root,
         source_manifest_key=args.source_manifest_key,
-        link_mode=args.link_mode,
+        approved_whole_build_sha256=args.approved_whole_build_sha256,
+        approved_tantivy_build_sha256=args.approved_tantivy_build_sha256,
+        approved_tantivy_index_sha256=args.approved_tantivy_index_sha256,
+        approved_query_corrections_sha256=args.approved_query_corrections_sha256,
     )
     print(json.dumps({"complete": True, "output_root": str(args.output_root)}, sort_keys=True))
 

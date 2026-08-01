@@ -93,9 +93,9 @@
       ],
       "properties": {
         "multiview_embedding": { "$ref": "#/$defs/multiviewEmbedding" },
-        "skill_graph": { "$ref": "#/$defs/skillGraph" },
-        "semantic_reranker": { "$ref": "#/$defs/genericChallenger" },
-        "learning_to_rank": { "$ref": "#/$defs/genericChallenger" },
+        "skill_graph": { "$ref": "#/$defs/disabled" },
+        "semantic_reranker": { "$ref": "#/$defs/disabled" },
+        "learning_to_rank": { "$ref": "#/$defs/disabled" },
         "guardrails": { "$ref": "#/$defs/disabled" }
       }
     },
@@ -126,14 +126,7 @@
       "required": ["kind", "sha256", "size_bytes"],
       "properties": {
         "kind": {
-          "enum": [
-            "embedding",
-            "model",
-            "index",
-            "graph",
-            "ranker",
-            "evidence"
-          ]
+          "enum": ["embedding", "model", "index", "graph", "ranker", "evidence"]
         },
         "sha256": { "$ref": "#/$defs/sha256" },
         "size_bytes": { "type": "integer", "minimum": 0 }
@@ -148,7 +141,9 @@
         "complete",
         "model",
         "revision",
+        "source_dimension",
         "dimension",
+        "projection",
         "dtype",
         "normalized",
         "rows",
@@ -166,15 +161,19 @@
         "revision": {
           "const": "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"
         },
-        "dimension": { "const": 4096 },
+        "source_dimension": { "const": 4096 },
+        "dimension": { "const": 1024 },
+        "projection": { "const": "mrl_prefix_then_l2_normalize" },
         "dtype": { "const": "float16" },
         "normalized": { "const": true },
         "rows": { "type": "integer", "minimum": 1 },
         "dataset_sha256": { "$ref": "#/$defs/sha256" },
         "jobs_sha256": { "$ref": "#/$defs/sha256" },
         "job_row_order_sha256": { "$ref": "#/$defs/sha256" },
-        "document_policy_version": { "type": "string", "minLength": 1 },
-        "document_template_sha256": { "$ref": "#/$defs/sha256" }
+        "document_policy_version": { "const": "2026-08-01-full-jd-v2" },
+        "document_template_sha256": {
+          "const": "8300647bfc45ac387f53d92aacbaa3924647a9575c9faf5b37da1b923758d234"
+        }
       }
     },
     "temporalTantivy": {
