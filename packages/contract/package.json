@@ -1,0 +1,22 @@
+{
+  "name": "@1111-work-retrieval/contract",
+  "version": "0.1.0",
+  "private": true,
+  "types": "./types.d.ts",
+  "files": [
+    "openapi.json",
+    "runtime-manifest.schema.json",
+    "types.d.ts"
+  ],
+  "scripts": {
+    "build": "pnpm generate",
+    "check": "pnpm generate:check",
+    "generate": "pnpm generate:openapi && pnpm generate:types",
+    "generate:openapi": "uv run python -m work_retrieval_api.export_openapi openapi.json",
+    "generate:check": "node scripts/check-generated.mjs",
+    "generate:types": "openapi-typescript openapi.json -o types.d.ts"
+  },
+  "devDependencies": {
+    "openapi-typescript": "^7.13.0"
+  }
+}

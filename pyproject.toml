@@ -1,0 +1,41 @@
+[project]
+name = "work-retrieval-workspace"
+version = "0.0.0"
+requires-python = "==3.12.*"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "alembic>=1.16,<2",
+    "httpx>=0.28,<1",
+    "mypy>=1.17,<2",
+    "psycopg[binary]>=3.2,<4",
+    "pytest>=8.4,<9",
+    "ruff>=0.12,<1",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["apps/api", "packages/search-core"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["work_retrieval_core", "work_retrieval_api"]
+mypy_path = ["packages/search-core/src", "apps/api/src"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["apps/api/tests", "packages/search-core/tests"]
+filterwarnings = [
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning",
+]

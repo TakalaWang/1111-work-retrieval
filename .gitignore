@@ -1,0 +1,14 @@
+.DS_Store
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+.svelte-kit/
+build/
+coverage/
+cdk.out/
+*.pyc
+*.log
+.env

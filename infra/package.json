@@ -1,0 +1,22 @@
+{
+  "name": "@1111-work-retrieval/infra",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "synth": "cdk synth",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "2.263.0",
+    "constructs": "10.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "aws-cdk": "2.1134.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
+  }
+}

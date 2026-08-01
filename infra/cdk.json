@@ -1,0 +1,8 @@
+{
+  "app": "node bin/platform.ts",
+  "context": {
+    "@aws-cdk/aws-rds:databaseProxyUniqueResourceName": true,
+    "@aws-cdk/core:checkSecretUsage": true,
+    "@aws-cdk/core:newStyleStackSynthesis": true
+  }
+}

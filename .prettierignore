@@ -1,0 +1,9 @@
+.venv
+.svelte-kit
+build
+cdk.out
+node_modules
+packages/contract/openapi.json
+packages/contract/types.d.ts
+pnpm-lock.yaml
+uv.lock

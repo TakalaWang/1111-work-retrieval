@@ -1,0 +1,86 @@
+name: Deploy production
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Type DEPLOY to confirm a production deployment
+        required: true
+        type: string
+      api_image_uri:
+        description: Immutable ECR image URI including its sha256 digest
+        required: true
+        type: string
+      artifact_manifest_sha:
+        description: Lowercase SHA-256 identifying runtime artifacts in S3
+        required: true
+        type: string
+      gpu_instance_type:
+        description: EC2 GPU instance type for the ECS capacity provider
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    if: ${{ github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true' && inputs.confirm == 'DEPLOY' }}
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency: production
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Validate immutable deployment inputs
+        env:
+          API_IMAGE_URI: ${{ inputs.api_image_uri }}
+          ARTIFACT_MANIFEST_SHA: ${{ inputs.artifact_manifest_sha }}
+          GPU_INSTANCE_TYPE: ${{ inputs.gpu_instance_type }}
+          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          test -n "$AWS_DEPLOY_ROLE_ARN"
+          test -n "$AWS_REGION"
+          [[ "$API_IMAGE_URI" =~ ^[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/.+@sha256:[0-9a-f]{64}$ ]]
+          [[ "$ARTIFACT_MANIFEST_SHA" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$GPU_INSTANCE_TYPE" =~ ^[a-z0-9][a-z0-9.-]*$ ]]
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 10.28.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir apps/web build
+      - uses: aws-actions/configure-aws-credentials@ff717079ee2060e4bcee96c4779b553acc87447c # v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Validate image ownership
+        env:
+          API_IMAGE_URI: ${{ inputs.api_image_uri }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          [[ "$API_IMAGE_URI" == "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/"* ]]
+      - name: Deploy the reviewed stack
+        env:
+          API_IMAGE_URI: ${{ inputs.api_image_uri }}
+          ARTIFACT_MANIFEST_SHA: ${{ inputs.artifact_manifest_sha }}
+          GPU_INSTANCE_TYPE: ${{ inputs.gpu_instance_type }}
+        run: |
+          pnpm --dir infra exec cdk deploy --all --require-approval never \
+            --outputs-file cdk-outputs.json \
+            --parameters "ApiImageUri=$API_IMAGE_URI" \
+            --parameters "ArtifactManifestSha256=$ARTIFACT_MANIFEST_SHA" \
+            --parameters "GpuInstanceType=$GPU_INSTANCE_TYPE"
+      - name: Publish the static web app
+        run: |
+          WEB_BUCKET="$(jq -r '.WorkRetrievalPlatform.WebBucketName' cdk-outputs.json)"
+          DISTRIBUTION_ID="$(jq -r '.WorkRetrievalPlatform.DistributionId' cdk-outputs.json)"
+          [[ "$WEB_BUCKET" =~ ^[a-z0-9][a-z0-9.-]+$ ]]
+          [[ "$DISTRIBUTION_ID" =~ ^[A-Z0-9]+$ ]]
+          aws s3 sync apps/web/build "s3://$WEB_BUCKET" --delete
+          aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths '/*'
