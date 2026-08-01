@@ -120,3 +120,5 @@ jobs:
         run: |
           docker build --platform linux/amd64 --tag work-retrieval-api:ci .
           test "$(docker image inspect work-retrieval-api:ci --format '{{.Architecture}}')" = amd64
+          docker run --rm --entrypoint /app/.venv/bin/python work-retrieval-api:ci \
+            -c 'import ssl, numpy, psycopg, tantivy, uvicorn, work_retrieval_api'
