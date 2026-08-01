@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import subprocess
 import sys
 from pathlib import Path
 
@@ -191,6 +192,26 @@ def test_long_sql_requests_continue_after_timeout(
     importer.execute_sql("cluster", "secret", "SELECT 1", long_running=True)
 
     assert "--continue-after-timeout" in calls[0]
+
+
+def test_aws_error_surfaces_bounded_stderr_without_command_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stderr = "  Access   denied\nfor caller  " + "x" * 2_100
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(["aws"], 1, stdout="", stderr=stderr)
+
+    monkeypatch.setattr("import_jobs_to_aws.subprocess.run", fake_run)
+
+    with pytest.raises(importer.AwsError) as caught:
+        importer.aws(["rds-data", "execute-statement", "--secret-arn", "must-not-appear"])
+
+    assert "Access denied for caller" in str(caught.value)
+    assert "\n" not in str(caught.value)
+    assert "must-not-appear" not in str(caught.value)
+    assert len(str(caught.value)) < 2_100
+    assert caught.value.stderr == stderr.strip()
 
 
 def test_polling_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:

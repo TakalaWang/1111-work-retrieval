@@ -121,8 +121,11 @@ REQUIRED_FIELDS = {
 
 class AwsError(RuntimeError):
     def __init__(self, message: str, stderr: str) -> None:
-        super().__init__(message)
         self.stderr = stderr
+        detail = " ".join(stderr.split())
+        if len(detail) > 2_000:
+            detail = f"{detail[:1_997]}..."
+        super().__init__(f"{message}: {detail}" if detail else message)
 
 
 def validate_source(source: Path) -> None:
