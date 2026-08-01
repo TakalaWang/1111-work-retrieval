@@ -16,7 +16,7 @@ from work_retrieval_database import JobSnapshot, JobStoreUnavailableError
 
 
 class FakeEngine:
-    def __init__(self, result: tuple[str, ...] = ("job-2", "job-1")) -> None:
+    def __init__(self, result: tuple[str, ...] = ("2", "1")) -> None:
         self.result = result
         self.queries: list[tuple[SearchQuery, int]] = []
         self.closed = False
@@ -91,8 +91,8 @@ def test_valid_request_maps_to_engine_and_returns_closed_shape(
     assert set(body) == {"request_id", "result"}
     assert body["request_id"].startswith("req_")
     assert body["result"] == [
-        {"job_id": "job-2", "rank": 1},
-        {"job_id": "job-1", "rank": 2},
+        {"job_id": "2", "rank": 1},
+        {"job_id": "1", "rank": 2},
     ]
     assert response.headers["X-Request-Id"] == body["request_id"]
     assert engine.queries == [(SearchQuery("後端工程師", ("100100",), ("140200",)), 10)]
@@ -185,16 +185,16 @@ def test_body_rules_apply_to_detail_get_without_breaking_bodyless_get(
         yield b"x" * (8 * 1024 + 1)
 
     with client() as http:
-        bodyless = http.get("/api/v1/jobs/missing")
+        bodyless = http.get("/api/v1/jobs/999999")
         oversized = http.request(
             "GET",
-            "/api/v1/jobs/missing",
+            "/api/v1/jobs/999999",
             content=oversized_chunks(),
             headers={"content-type": "application/json"},
         )
         wrong_type = http.request(
             "GET",
-            "/api/v1/jobs/missing",
+            "/api/v1/jobs/999999",
             content=b"{}",
             headers={"content-type": "text/plain"},
         )
@@ -231,7 +231,7 @@ def test_unavailable_and_contract_violations_fail_closed(
     )
 
     engine.error = None
-    engine.result = ("duplicate", "duplicate")
+    engine.result = ("1", "1")
     with client() as http:
         invalid = http.post("/api/v1/jobs/search", json={"query": "工程師"})
     assert invalid.status_code == 500
@@ -241,9 +241,11 @@ def test_unavailable_and_contract_violations_fail_closed(
 @pytest.mark.parametrize(
     "invalid_result",
     [
-        ["job-1"],
-        tuple(f"job-{index}" for index in range(11)),
+        ["1"],
+        tuple(str(index) for index in range(11)),
         ("",),
+        ("job-1",),
+        ("\uff11\uff12\uff13",),
         (1,),
     ],
 )
@@ -334,7 +336,7 @@ def test_internal_error_logs_are_structured_and_sanitized(
 def _job_snapshot() -> JobSnapshot:
     values: dict[str, Any] = {name: f"value:{name}" for name in JobSnapshot.__dataclass_fields__}
     values.update(
-        job_id="job-1",
+        job_id="123456",
         salary_min=Decimal("1234567890.10"),
         salary_max=Decimal("9999999999.99"),
         source_modified_at=datetime(2026, 8, 1, 12, 30, 45, 123000),
@@ -349,7 +351,7 @@ def test_job_detail_returns_all_source_fields_without_lineage(
     jobs.records[snapshot.job_id] = snapshot
 
     with client() as http:
-        response = http.get("/api/v1/jobs/job-1")
+        response = http.get("/api/v1/jobs/123456")
 
     assert response.status_code == 200
     body = response.json()
@@ -375,14 +377,14 @@ def test_job_detail_returns_all_source_fields_without_lineage(
     assert body["job"]["salary_min"] == "1234567890.10"
     assert body["job"]["salary_max"] == "9999999999.99"
     assert body["job"]["source_modified_at"] == "2026-08-01T12:30:45.123000"
-    assert jobs.requested == ["job-1"]
+    assert jobs.requested == ["123456"]
 
 
 def test_job_detail_not_found_uses_shared_error_envelope(
     client: Callable[[], TestClient],
 ) -> None:
     with client() as http:
-        response = http.get("/api/v1/jobs/missing")
+        response = http.get("/api/v1/jobs/999999")
 
     body = response.json()
     assert response.status_code == 404
@@ -403,7 +405,7 @@ def test_job_detail_database_failure_is_sanitized(
     caplog.set_level(logging.INFO, logger="work_retrieval")
 
     with client() as http:
-        response = http.get("/api/v1/jobs/job-1")
+        response = http.get("/api/v1/jobs/123456")
 
     assert response.status_code == 503
     assert response.json()["error"] == {

@@ -84,5 +84,6 @@
 8. Commit, merge to `main`, push, and verify remote CI. Do not claim the future detail API exists.
 
 Status: AWS deployment, migration, immutable S3 upload, atomic Aurora import, and independent
-readback completed on 2026-08-01. Final repository acceptance, review, merge, push, and remote CI
-verification remain.
+readback completed on 2026-08-01. Commit `0450279` is merged and pushed;
+[GitHub Actions run 30689351027](https://github.com/TakalaWang/1111-work-retrieval/actions/runs/30689351027)
+passed Python, web/contracts, PostgreSQL migration, and infrastructure.

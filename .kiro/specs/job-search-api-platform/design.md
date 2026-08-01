@@ -1,5 +1,10 @@
 # Job Search API Platform Design
 
+The reviewer-facing architecture and data-flow diagrams live in
+[`docs/architecture.md`](../../../docs/architecture.md). Benchmark reproducibility and its current
+artifact gaps live in [`docs/benchmark.md`](../../../docs/benchmark.md). This specification retains
+the normative design decisions behind those documents.
+
 ## Architecture
 
 ```text
@@ -20,7 +25,8 @@ corpus audit belong to that future engine and are deliberately absent from this 
    startup.
 2. FastAPI validates and normalizes the request at the trust boundary.
 3. The async route invokes the synchronous engine through a worker thread with `limit=10`.
-4. The route validates engine output for count, uniqueness, and valid job IDs before responding.
+4. The route validates engine output for count, uniqueness, and ASCII-decimal job IDs before
+   responding.
 5. Shutdown closes the engine once. No alternate engine is selected on failure.
 
 Health reports process liveness. Readiness is true only after successful engine initialization.
@@ -29,9 +35,10 @@ Request IDs cross response headers, response envelopes, and structured metadata-
 ## Contracts
 
 The committed OpenAPI document is exported from the FastAPI app without initializing an engine.
-TypeScript API types are generated from that document. The artifact manifest JSON Schema requires
-content-addressed runtime assets so a deployment resolves one immutable set rather than mutable
-"latest" files.
+TypeScript API types are generated from that document. The browser still validates untrusted JSON
+at runtime, including result count, numeric IDs, uniqueness, consecutive ranks, and parse failures.
+The artifact manifest JSON Schema requires content-addressed runtime assets so a deployment
+resolves one immutable set rather than mutable "latest" files.
 
 ## Data and infrastructure
 
@@ -68,5 +75,14 @@ before a real image and artifacts exist.
 CI independently verifies Python, web/contract, PostgreSQL migration, and infrastructure paths.
 The deployment workflow is manual and uses GitHub OIDC—never long-lived AWS credentials. The
 `production` environment supplies approval, while repository variables and inputs keep deployment
-disabled by default. A full deployment names both stacks and scopes image and GPU parameters only
-to `WorkRetrievalPlatform`. Synthesis and tests prove configuration shape only, not live AWS state.
+disabled by default. The deploy role can assume only the four standard CDK bootstrap roles for the
+default qualifier, account, and region. A full deployment names both stacks and scopes image
+and GPU parameters only to `WorkRetrievalPlatform`. Synthesis and tests prove configuration shape
+only, not live AWS state.
+
+## Documentation contract
+
+`README.md` is the single entry point for setup, examples, status, lockfiles, and artifact versions.
+The architecture document owns cross-module and data-flow explanations; the benchmark document owns
+evaluation provenance. Repository acceptance checks are never presented as retrieval metrics, and
+contracts or infrastructure definitions are never presented as deployed runtime evidence.

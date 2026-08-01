@@ -1,63 +1,79 @@
-# 1111-work-retrieval
+# 1111 Work Retrieval
 
-Production platform for 1111 job retrieval. This repository contains the FastAPI application,
-SvelteKit web interface, PostgreSQL data access, immutable runtime-artifact contract, container
-image, and AWS CDK infrastructure.
+1111 職缺搜尋平台 repository：
+[github.com/TakalaWang/1111-work-retrieval](https://github.com/TakalaWang/1111-work-retrieval)
 
-Search ranking is intentionally temporary: the production entrypoint returns the same first ten
-real Aurora job IDs for every valid query. It is explicit, deterministic, and visibly labelled in
-the web interface; it is not a production retrieval algorithm. The job-detail path reads all 39
-source fields from PostgreSQL.
+## 現況
 
-## Boundaries
+- `WorkRetrievalData` 與 `WorkRetrievalPlatform` 均已在 AWS competition account
+  `378849533305`、`us-west-2` 完成部署（CloudFormation `CREATE_COMPLETE`）。
+- Web 與 API 目前可由 [https://dukvebbbaov1r.cloudfront.net](https://dukvebbbaov1r.cloudfront.net)
+  同源存取。
+- Qwen3 Embedding endpoint `qwen3-embedding-8b-20260801-031826` 與 reranker endpoint
+  `work-retrieval-qwen3-reranker-8b` 均為 `InService`。
+- 現行搜尋仍是明確標示的暫時實作：每個合法 query 固定回傳 Aurora 中前十個真實 job ID；這不是
+  production retrieval algorithm，也不是 retrieval benchmark。`GET /api/v1/jobs/{job_id}` 會回傳資料庫中
+  保存的完整 39 欄職缺內容。
+- Embedding／reranker endpoint 已上線不代表它們已整合成正式 `SearchEngine`，也不代表任何 retrieval
+  品質指標已發布。
 
-- PostgreSQL/Aurora is the only relational database. SQLite is not supported.
-- SQLAlchemy owns PostgreSQL domain models and pooled reads, Alembic owns migrations, and Pydantic
-  owns the HTTP contract. These layers do not share model classes.
-- `GET /api/v1/jobs/{job_id}` returns the complete persisted job record. Snapshot ingestion is an
-  operator-only workflow and is never exposed as an HTTP write route.
-- Runtime models, embeddings, and indexes live in private S3 objects under
-  `runtime/<manifest-sha256>/...`; they are not committed to Git.
-- There is no SQLite path, experimental ranking implementation, mock server, or automatic
-  fallback.
-- The deployable CPU API runs on Fargate. The GPU ECS-on-EC2 capacity provider remains explicitly
-  at `0/0/0` until its production retrieval runtime and quota are approved.
+以上是 2026-08-01 的部署 readback。進行操作或宣稱目前線上狀態前，仍應重新讀取 AWS stack、endpoint
+與 public smoke 結果。這也不表示尚未完成的 main branch CD merge 已完成。
 
-## Repository layout
+## 原始碼與文件
 
-| Path                   | Responsibility                                                                      |
-| ---------------------- | ----------------------------------------------------------------------------------- |
-| `apps/api`             | FastAPI request validation, error envelopes, health endpoints, and OpenAPI          |
-| `apps/web`             | Thin SvelteKit search UI                                                            |
-| `packages/search-core` | Immutable search types and the `SearchEngine` protocol                              |
-| `packages/database`    | SQLAlchemy job model, PostgreSQL settings, and pooled read repository               |
-| `packages/contract`    | Committed OpenAPI, generated TypeScript types, and artifact manifest schema         |
-| `database`             | Alembic configuration, baseline, and `jobs` table migration                         |
-| `infra`                | AWS CDK stack for Aurora, S3, ECR, GPU ECS, ALB, CloudFront, WAF, and observability |
+| 路徑                                           | 內容                                                 |
+| ---------------------------------------------- | ---------------------------------------------------- |
+| [`apps/api`](apps/api)                         | FastAPI request validation、lifecycle 與 OpenAPI     |
+| [`apps/web`](apps/web)                         | SvelteKit 搜尋介面                                   |
+| [`packages/search-core`](packages/search-core) | `SearchEngine` contract 與 search types              |
+| [`packages/database`](packages/database)       | SQLAlchemy `Job` model 與 PostgreSQL read repository |
+| [`packages/contract`](packages/contract)       | OpenAPI、TypeScript types 與 runtime manifest schema |
+| [`database`](database)                         | PostgreSQL Alembic migrations                        |
+| [`infra`](infra)                               | AWS CDK infrastructure                               |
+| [`scripts`](scripts)                           | 職缺資料驗證、AWS importer 與 artifact promotion     |
+| [`docs/architecture.md`](docs/architecture.md) | 系統架構與資料流程                                   |
+| [`docs/benchmark.md`](docs/benchmark.md)       | Benchmark 重現範圍與版本證據要求                     |
 
-## Prerequisites
+PostgreSQL／Aurora 是唯一 relational database；不支援 SQLite。SQLAlchemy、Alembic 與 Pydantic
+分別負責 persistence model、schema migration 與 HTTP contract。Runtime model、embedding 與大型 index
+放在私有 S3 immutable prefix `runtime/<manifest-sha256>/...`，不提交到 Git，也沒有 mock／automatic
+fallback runtime。
 
-- Python 3.12 and [uv](https://docs.astral.sh/uv/)
-- Node.js 24 and pnpm 10.28.0
-- PostgreSQL 16 for migration verification
-- Docker for the production image build
-- AWS CLI v2 and an AWS CDK-bootstrapped `competition` account for operator workflows
+## 環境設定
 
-## Local checks
-
-Copy `.env.example` to `.env` and export it in your shell when running Alembic against the
-standard local PostgreSQL database. The file contains fixed AWS resource names for reference but
-no AWS credentials or production secrets.
+- Python `3.12.x` 與 [uv](https://docs.astral.sh/uv/)
+- Node.js `24.x` 與 pnpm `10.28.0`
+- PostgreSQL `16`
+- production image 驗證需要 Docker
+- AWS operator workflow 需要 AWS CLI v2 與已 bootstrap 的 `competition` profile
 
 ```bash
+git clone https://github.com/TakalaWang/1111-work-retrieval.git
+cd 1111-work-retrieval
+
 uv sync --frozen --all-packages
-uv run ruff format --check .
+pnpm install --frozen-lockfile
+
+cp .env.example .env
+set -a
+source .env
+set +a
+```
+
+依賴版本由 [`uv.lock`](uv.lock) 與 [`pnpm-lock.yaml`](pnpm-lock.yaml) 鎖定；`.env.example` 只有本機設定名稱，
+不含 production secret。
+
+## 本機驗證
+
+```bash
 uv run ruff check .
+uv run ruff format --check .
 uv run mypy
 uv run pytest
 uv run python -m work_retrieval_api.export_openapi packages/contract/openapi.json --check
 
-pnpm install --frozen-lockfile
+pnpm format:check
 pnpm lint
 pnpm --dir packages/contract generate:check
 pnpm --dir apps/web check
@@ -66,76 +82,69 @@ pnpm --dir apps/web build
 pnpm --dir infra test
 pnpm --dir infra build
 pnpm --dir infra synth
-docker build --tag work-retrieval-api:local .
+docker build --platform linux/amd64 --tag work-retrieval-api:local .
 ```
 
-Run all migrations against an explicit PostgreSQL database:
+在明確指定的 PostgreSQL 16 database 上驗證 migration：
 
 ```bash
-DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/work_retrieval \
-  uv run alembic -c database/alembic.ini upgrade head
+export DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/work_retrieval
+uv run alembic -c database/alembic.ini upgrade head
+uv run alembic -c database/alembic.ini upgrade head
+uv run alembic -c database/alembic.ini check
 ```
 
-To intentionally update the committed API contract after changing the FastAPI schema:
+啟動 Web UI：
+
+```bash
+pnpm --dir apps/web dev
+```
+
+變更 FastAPI schema 後，重新產生並提交 API contract consumers：
 
 ```bash
 uv run python -m work_retrieval_api.export_openapi packages/contract/openapi.json
 pnpm --dir packages/contract generate
+git diff -- packages/contract/openapi.json packages/contract/types.d.ts
 ```
 
-Commit both the OpenAPI document and generated TypeScript types. CI rejects drift.
+## Runtime contract
 
-## Runtime behavior
-
-The container entrypoint is `work_retrieval_api.main:app`. Startup requires all five database
-settings below and fails closed if PostgreSQL is unavailable or fewer than ten jobs exist:
+Container entrypoint 是 `work_retrieval_api.main:app`。啟動時必須提供以下五個 database settings；
+PostgreSQL 無法連線或可用職缺少於十筆時會 fail closed：
 
 ```text
 DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
 ```
 
-The public paths are:
+公開路徑：
 
-- `POST /api/v1/jobs/search` — temporary deterministic ten-job response.
-- `GET /api/v1/jobs/{job_id}` — complete 39-field job detail.
-- `GET /healthz` and `GET /readyz` — process and initialized-runtime health.
+- `POST /api/v1/jobs/search`：暫時的 deterministic 十筆結果。
+- `GET /api/v1/jobs/{job_id}`：完整 39 欄職缺內容。
+- `GET /healthz` 與 `GET /readyz`：process 與 initialized-runtime health。
 
-Copy `.env.example` for local names only. It contains no production credentials. Aurora
-credentials are injected from Secrets Manager by ECS.
+Aurora credentials 由 ECS 經 Secrets Manager 注入，不保存於 image、Git 或 workflow。
 
-## Runtime artifacts
+## 資料與 runtime artifacts
 
-The promotion script accepts exactly the approved complete job embeddings, Qwen3-Embedding-8B
-snapshot, and Tantivy index. It rejects SQLite, query history, behavior data, rerankers, and all
-other experiment artifacts. Dry-run is the default:
+| 項目                    | 已驗證版本                                                                                           |
+| ----------------------- | ---------------------------------------------------------------------------------------------------- |
+| Source code             | 每次交付以 Git commit SHA 固定                                                                       |
+| Job dataset             | 1,218,635 rows；SHA-256 `53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089`           |
+| Database schema         | Alembic `0002_create_jobs`；Aurora PostgreSQL 16                                                     |
+| Runtime manifest format | [`runtime-manifest.schema.json`](packages/contract/runtime-manifest.schema.json)，schema version `1` |
+| Embedding endpoint      | `qwen3-embedding-8b-20260801-031826`；`InService`                                                    |
+| Reranker endpoint       | `work-retrieval-qwen3-reranker-8b`；`InService`                                                      |
+| Production retrieval    | 尚未整合或發布                                                                                       |
 
-```bash
-uv run python scripts/promote_runtime_artifacts.py
-uv run python scripts/promote_runtime_artifacts.py --execute
-```
-
-The script is pinned to profile `competition`, account `378849533305`, and region `us-west-2`.
-Execution performs conditional server-side copies, verifies native S3 SHA-256 checksums, and
-publishes canonical `runtime/<manifest-sha256>/manifest.json` last.
-
-## Production data status
-
-The last recorded data-plane readback in competition account `378849533305`, region `us-west-2`,
-verified CloudFormation stack `WorkRetrievalData`, Aurora PostgreSQL 16.13 Serverless v2, and its
-private, encrypted, versioned S3 bucket. Treat this as historical evidence and read AWS back again
-before making an operational claim.
-
-The authoritative snapshot is stored at:
+職缺 snapshot 的 authoritative S3 object：
 
 ```text
 s3://workretrievaldata-runtimebucket404c5ee4-hkvrjx5fbkij/data/jobs/53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089/jobs.csv
 ```
 
-AWS readback on 2026-08-01 verified 1,218,635 rows, 1,218,635 distinct job IDs, source rows
-`0..1218634`, Alembic revision `0002_create_jobs`, and only `alembic_version` plus `jobs` in the
-public schema. The S3 object is 1,285,945,103 bytes and its SHA-256 metadata matches its prefix.
-The importer is intentionally pinned to the `competition` profile, account, region, source path,
-checksum, header, and row count:
+AWS readback 已驗證 1,218,635 rows、1,218,635 distinct job IDs、source rows `0..1218634`，以及
+`alembic_version`、`jobs` 兩張 public tables。固定資料匯入命令為：
 
 ```bash
 AWS_PROFILE=competition AWS_DEFAULT_REGION=us-west-2 \
@@ -143,40 +152,48 @@ AWS_PROFILE=competition AWS_DEFAULT_REGION=us-west-2 \
   "/Users/takala/code/1111 work retrieval/dataset/職缺.csv"
 ```
 
-## Manual production deployment
+Runtime artifact promotion 預設只做 dry-run：
 
-`.github/workflows/deploy.yml` is manual-only and runs only from `main` through the protected
-`production` GitHub environment. It also requires repository variable `DEPLOY_ENABLED=true`,
-environment variable `AWS_DEPLOY_ROLE_ARN`, and confirmation text `DEPLOY`. No push or merge
-automatically deploys.
+```bash
+uv run python scripts/promote_runtime_artifacts.py
+uv run python scripts/promote_runtime_artifacts.py --execute
+```
 
-The workflow performs these operations in order:
+Importer 與 promotion script 都固定 account、region、來源 identity 與完整性檢查；不要繞過其驗證。
 
-1. Frozen Python and Node installs, followed by the static web build.
-2. OIDC authentication to account `378849533305` in `us-west-2` and an idempotent
-   `WorkRetrievalData` deployment.
-3. Root Dockerfile build and push to the DataStack ECR repository, immutable digest resolution,
-   and fail-closed ECR scan requiring zero critical or high findings.
-4. `WorkRetrievalPlatform` deployment with CPU desired count `1` and GPU capacities `0/0/0`.
-5. Static-site sync, CloudFront invalidation, and public health, readiness, web, search, and
-   39-field detail smoke checks.
+## Benchmark 重現
 
-Required dispatch inputs are the promoted artifact manifest SHA and GPU instance type; the CPU and
-GPU capacity inputs default to `1` and `0/0/0`. The workflow currently rejects non-zero GPU values.
-It builds the API image itself—there is no caller-supplied image URI.
+目前沒有可發布的 retrieval benchmark，因為正式 `SearchEngine`、versioned evaluation queries／qrels 與
+單一 committed benchmark runner 尚未齊備。Repository tests、migration checks、contract checks、CDK
+synth 與 endpoint smoke 都是 acceptance evidence，不是 Recall、MRR、nDCG 或 latency benchmark。
 
-The GitHub OIDC provider and deploy role are owned by `WorkRetrievalPlatform`, so a trusted
-operator must perform the first CDK bootstrap/data-image/platform cycle with local profile
-`competition`. The repository OIDC customization must then be set and read back with
-`use_immutable_subject=true`; its immutable prefix is
-`repo:TakalaWang@50894789/1111-work-retrieval@1318865130`. The workflow deliberately has no
-repository-administration token, so this is a bootstrap prerequisite rather than a workflow
-mutation. After that, set `AWS_DEPLOY_ROLE_ARN` from `GitHubDeployRoleArn` and restrict the GitHub
-`production` environment to `main`. Enable required reviewers when the repository billing plan
-supports them; the current private-repository plan rejects that rule, so deployment remains gated
-by the main-only environment, `DEPLOY_ENABLED=true`, and the exact `DEPLOY` confirmation input.
-Workflow definitions and passing CI are not deployment evidence; use the emitted stack outputs and
-smoke results to establish live state.
+可重現的 acceptance commands 與未來 benchmark 所需的 artifact、provenance、metrics 見
+[`docs/benchmark.md`](docs/benchmark.md)。
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) and the authoritative platform specification in
-[`.kiro/specs/job-search-api-platform`](.kiro/specs/job-search-api-platform).
+## 手動 production deployment
+
+`.github/workflows/deploy.yml` 僅支援 `workflow_dispatch`，且只允許由 `main` 經 GitHub `production`
+environment 執行。它同時要求：
+
+- repository variable `DEPLOY_ENABLED=true`
+- environment variable `AWS_DEPLOY_ROLE_ARN`
+- confirmation input 必須精確等於 `DEPLOY`
+- 64-character lowercase artifact manifest SHA-256
+- CPU desired count 至少為 `1`
+- GPU min／max／desired 目前必須全部為 `0`
+
+流程依序執行 frozen installs、static web build、OIDC authentication、DataStack deploy、runtime manifest
+驗證、`linux/amd64` API image build／push、ECR scan、digest-pinned PlatformStack deploy、web sync、等待
+CloudFront invalidation，最後才執行 public health、readiness、web、search 與 39-field detail smoke。
+
+Workflow 自行 build image，不接受 caller-supplied image URI；CDK 只接收 ECR digest URI。任何 push 或
+merge 都不會自動部署。ECR scan、stack deployment、CloudFront publication 與 public smoke 是彼此獨立的
+gate，不可用前一項成功代表後一項已完成。
+
+GitHub OIDC 使用 repository-ID-bound immutable subject；不要改回可變動的 owner／repository-name
+subject。`production` environment 已限制為 `main`。目前 private-repository billing plan 不支援 required
+reviewers，因此現有 gate 是 main-only environment、`DEPLOY_ENABLED=true` 與精確的 `DEPLOY` confirmation；
+若方案之後支援，再啟用 required reviewers。
+
+系統元件、request flow、資料匯入與 infrastructure ownership 詳見
+[`docs/architecture.md`](docs/architecture.md)，貢獻規則見 [CONTRIBUTING.md](CONTRIBUTING.md)。

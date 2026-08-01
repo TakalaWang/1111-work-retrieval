@@ -72,7 +72,10 @@ def _validate_engine_output(job_ids: object) -> tuple[str, ...]:
         raise EngineContractError("engine result must be a tuple")
     if len(job_ids) > MAX_RESULTS:
         raise EngineContractError("engine returned too many jobs")
-    if any(not isinstance(job_id, str) or not job_id.strip() for job_id in job_ids):
+    if any(
+        not isinstance(job_id, str) or not job_id.isascii() or not job_id.isdecimal()
+        for job_id in job_ids
+    ):
         raise EngineContractError("engine returned an invalid job_id")
     if len(job_ids) != len(set(job_ids)):
         raise EngineContractError("engine returned duplicate job_id")

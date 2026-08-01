@@ -27,6 +27,7 @@ jobs:
       - run: uv sync --frozen --all-packages
       - run: uv run ruff format --check .
       - run: uv run ruff check .
+      - run: uv run ruff format --check .
       - run: uv run mypy
       - run: uv run pytest
       - name: Verify committed OpenAPI
@@ -68,7 +69,7 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d work_retrieval"
+          --health-cmd "psql -U postgres -d work_retrieval -Atqc 'SELECT 1'"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10

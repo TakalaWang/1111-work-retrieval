@@ -298,10 +298,18 @@ describe('platform stack', () => {
     expect(policyText).toContain('s3:PutObject');
     expect(policyText).toContain('s3:DeleteObject');
     expect(policyText).toContain('cloudfront:CreateInvalidation');
-    expect(policyText).toContain('role/cdk-*');
     expect(policyText).toContain('ec2:DescribeManagedPrefixLists');
     expect(policyText).toContain('/runtime/*/manifest.json');
     expect(policyText).not.toContain('repository/*');
+    expect(policyText).not.toContain('role/cdk-*');
+    for (const role of [
+      'deploy-role',
+      'file-publishing-role',
+      'image-publishing-role',
+      'lookup-role'
+    ]) {
+      expect(policyText).toContain(`cdk-hnb659fds-${role}`);
+    }
   });
 
   test('exports all deployment and operational identifiers', () => {

@@ -19,7 +19,8 @@ out of scope until it is promoted through a separate, evidence-backed change.
   values are trimmed, non-empty, de-duplicated, and retain first-seen order.
 - Unknown fields and legacy aliases are rejected. JSON bodies are limited to 16 KiB and other
   media types return `415`.
-- Successful responses contain `request_id` and at most ten unique, consecutively ranked job IDs.
+- Successful responses contain `request_id` and at most ten unique, consecutively ranked ASCII
+  decimal job IDs from the authoritative snapshot.
 - Every failure uses the shared error envelope and does not expose exceptions, SQL, or paths.
 - Access logs record metadata and latency, never query text.
 - `GET /healthz`, `GET /readyz`, and `GET /openapi.json` remain available.
@@ -29,6 +30,8 @@ out of scope until it is promoted through a separate, evidence-backed change.
 - The repository commits deterministic OpenAPI JSON and generated TypeScript types.
 - The SvelteKit UI calls the relative `/api/v1/jobs/search` path and renders loading, results,
   empty results, and request-ID-bearing failures.
+- The browser rejects invalid JSON and any successful response that violates the numeric job-ID,
+  result-count, uniqueness, or consecutive-rank invariants.
 - CI rejects stale OpenAPI or generated TypeScript output. No mock server is a supported runtime.
 
 ## R4. PostgreSQL and artifacts
@@ -62,6 +65,9 @@ out of scope until it is promoted through a separate, evidence-backed change.
   security group from `WorkRetrievalData`; it never creates a second database or artifact bucket.
   It owns ECR, GPU ECS on EC2 capacity, interface endpoints, ALB, CloudFront `/api/*` routing, WAF,
   CloudWatch, the web bucket, and the least-privilege GitHub OIDC role.
+- The GitHub OIDC role may assume only the standard deploy, file-publishing, image-publishing, and
+  lookup roles for the default CDK bootstrap qualifier, account, and region; `cdk-*` is
+  forbidden.
 - ALB ingress accepts only the CloudFront origin-facing managed prefix list.
 - GPU desired capacity defaults to zero. Image URI, artifact manifest SHA-256, and GPU instance type
   are required deployment inputs.
@@ -74,3 +80,17 @@ out of scope until it is promoted through a separate, evidence-backed change.
 - The full deployment workflow explicitly deploys `WorkRetrievalData` and then
   `WorkRetrievalPlatform`; application parameters are scoped only to `WorkRetrievalPlatform`.
 - A scaffold, successful build, CDK synthesis, or merged change must not be described as deployed.
+
+## R7. Repository documentation and reproducibility
+
+- `README.md` is the reviewer entry point and states environment setup, executable examples,
+  dependency lockfiles, delivery status, and data/model/index versions without implying absent
+  runtime capabilities.
+- `docs/architecture.md` is the canonical overview of module ownership, target request flow,
+  verified job import flow, contract generation, infrastructure ownership, and trust boundaries.
+- `docs/benchmark.md` separates reproducible repository acceptance from retrieval evaluation. It
+  must not publish a benchmark command or metrics until the production engine, versioned evaluation
+  set, model, index, runtime manifest, and committed runner exist.
+- Every future retrieval result records source commit, dependency locks, corpus and evaluation-set
+  checksums, runtime artifact checksums, retrieval configuration, execution parameters, hardware,
+  and metric definitions.

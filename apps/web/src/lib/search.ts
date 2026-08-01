@@ -135,7 +135,7 @@ function isSearchResponse(value: unknown): value is SearchResponse {
       !isRecord(item) ||
       !hasExactKeys(item, ['job_id', 'rank']) ||
       typeof item.job_id !== 'string' ||
-      item.job_id.trim().length === 0 ||
+      !/^[0-9]+$/u.test(item.job_id) ||
       item.rank !== index + 1 ||
       jobIds.has(item.job_id)
     )
@@ -174,6 +174,17 @@ export function serializeSearch(form: SearchForm): SearchRequest {
   };
 }
 
+async function jsonPayload(
+  response: Response,
+  invalidMessage: string
+): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch {
+    throw new ApiError(invalidMessage);
+  }
+}
+
 export async function searchJobs(
   request: SearchRequest,
   fetcher: typeof fetch = fetch
@@ -183,7 +194,12 @@ export async function searchJobs(
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(request)
   });
-  const payload: unknown = await response.json();
+  const payload = await jsonPayload(
+    response,
+    response.ok
+      ? '搜尋服務回傳了無法辨識的內容。'
+      : '搜尋服務回傳了無法辨識的錯誤。'
+  );
 
   if (!response.ok) {
     if (isErrorResponse(payload))
