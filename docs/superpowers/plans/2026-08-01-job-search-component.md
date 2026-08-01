@@ -23,10 +23,12 @@
 ### Task 1: Typed pull boundary and job presentation model
 
 **Files:**
+
 - Modify: `apps/web/src/lib/search.ts:1-99`
 - Test: `apps/web/src/lib/search.test.ts:1-91`
 
 **Interfaces:**
+
 - Consumes: `components['schemas']['PullJobRequest']`, `components['schemas']['JobResponse']`, and the existing `SearchApiError`.
 - Produces: `pullJob(jobId: string, fetcher?: typeof fetch): Promise<JobResponse>`, `presentJob(response: JobResponse, rank: number): PresentedJob`, and exported `PresentedJob`.
 
@@ -34,10 +36,14 @@
 
 ```ts
 it('posts one job id to the pull endpoint', async () => {
-  const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
-    jsonResponse({ job_id: '53256270', details: { 職務名稱: '口譯人員' } })
-  );
-  await expect(pullJob('53256270', fetcher)).resolves.toMatchObject({ job_id: '53256270' });
+  const fetcher = vi
+    .fn<typeof fetch>()
+    .mockResolvedValue(
+      jsonResponse({ job_id: '53256270', details: { 職務名稱: '口譯人員' } })
+    );
+  await expect(pullJob('53256270', fetcher)).resolves.toMatchObject({
+    job_id: '53256270'
+  });
   expect(fetcher).toHaveBeenCalledWith('/api/v1/jobs/pull', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -46,9 +52,11 @@ it('posts one job id to the pull endpoint', async () => {
 });
 
 it('rejects malformed pull details', async () => {
-  const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
-    jsonResponse({ job_id: '53256270', details: { 職務名稱: 7 } })
-  );
+  const fetcher = vi
+    .fn<typeof fetch>()
+    .mockResolvedValue(
+      jsonResponse({ job_id: '53256270', details: { 職務名稱: 7 } })
+    );
   await expect(pullJob('53256270', fetcher)).rejects.toEqual(
     new SearchApiError('職缺資料服務回傳了無法辨識的內容。')
   );
@@ -92,13 +100,34 @@ Expected: all existing and new tests PASS.
 
 ```ts
 it('selects useful populated CSV fields for presentation', () => {
-  expect(presentJob({ job_id: '53256270', details: {
-    職務名稱: '後端工程師', 工作城市: '台北市', 薪資: '月薪 55,000 元',
-    職務小類: '後端開發', 職務內容: '開發 API', 工作技能: null, 廠商編號: '123'
-  } }, 1)).toEqual({
-    jobId: '53256270', rank: 1, title: '後端工程師', city: '台北市',
-    salary: '月薪 55,000 元', category: '後端開發', description: '開發 API',
-    experience: undefined, education: undefined, skills: undefined, updatedAt: undefined
+  expect(
+    presentJob(
+      {
+        job_id: '53256270',
+        details: {
+          職務名稱: '後端工程師',
+          工作城市: '台北市',
+          薪資: '月薪 55,000 元',
+          職務小類: '後端開發',
+          職務內容: '開發 API',
+          工作技能: null,
+          廠商編號: '123'
+        }
+      },
+      1
+    )
+  ).toEqual({
+    jobId: '53256270',
+    rank: 1,
+    title: '後端工程師',
+    city: '台北市',
+    salary: '月薪 55,000 元',
+    category: '後端開發',
+    description: '開發 API',
+    experience: undefined,
+    education: undefined,
+    skills: undefined,
+    updatedAt: undefined
   });
 });
 ```
@@ -127,10 +156,12 @@ git commit -m "feat(web): add job detail API boundary"
 ### Task 2: Concurrent search-to-details orchestration
 
 **Files:**
+
 - Modify: `apps/web/src/lib/search.ts`
 - Test: `apps/web/src/lib/search.test.ts`
 
 **Interfaces:**
+
 - Consumes: `searchJobs`, `pullJob`, `presentJob`, and `PresentedJob` from Task 1.
 - Produces: `searchJobDetails(query: string, fetcher?: typeof fetch): Promise<JobSearchOutcome>` where `JobSearchOutcome` contains `requestId`, `jobs`, and `failedCount`.
 
@@ -139,9 +170,14 @@ git commit -m "feat(web): add job detail API boundary"
 ```ts
 it('pulls every ranked id concurrently and keeps successful jobs ordered', async () => {
   const fetcher = routeFetch({
-    search: { request_id: 'req_1', result: [
-      { job_id: '20', rank: 1 }, { job_id: '10', rank: 2 }, { job_id: '30', rank: 3 }
-    ] },
+    search: {
+      request_id: 'req_1',
+      result: [
+        { job_id: '20', rank: 1 },
+        { job_id: '10', rank: 2 },
+        { job_id: '30', rank: 3 }
+      ]
+    },
     pulls: {
       '20': { job_id: '20', details: { 職務名稱: '第一筆' } },
       '10': new Response(JSON.stringify(errorEnvelope), { status: 404 }),
@@ -149,8 +185,12 @@ it('pulls every ranked id concurrently and keeps successful jobs ordered', async
     }
   });
   await expect(searchJobDetails('工程師', fetcher)).resolves.toMatchObject({
-    requestId: 'req_1', failedCount: 1,
-    jobs: [{ jobId: '20', rank: 1 }, { jobId: '30', rank: 3 }]
+    requestId: 'req_1',
+    failedCount: 1,
+    jobs: [
+      { jobId: '20', rank: 1 },
+      { jobId: '30', rank: 3 }
+    ]
   });
 });
 ```
@@ -167,13 +207,20 @@ export async function searchJobDetails(
   query: string,
   fetcher: typeof fetch = fetch
 ): Promise<JobSearchOutcome> {
-  const search = await searchJobs({ query: query.trim(), location_code: [], duty_code: [] }, fetcher);
+  const search = await searchJobs(
+    { query: query.trim(), location_code: [], duty_code: [] },
+    fetcher
+  );
   const pulled = await Promise.allSettled(
-    search.result.map(async ({ job_id, rank }) => presentJob(await pullJob(job_id, fetcher), rank))
+    search.result.map(async ({ job_id, rank }) =>
+      presentJob(await pullJob(job_id, fetcher), rank)
+    )
   );
   return {
     requestId: search.request_id,
-    jobs: pulled.flatMap((result) => result.status === 'fulfilled' ? [result.value] : []),
+    jobs: pulled.flatMap((result) =>
+      result.status === 'fulfilled' ? [result.value] : []
+    ),
     failedCount: pulled.filter((result) => result.status === 'rejected').length
   };
 }
@@ -198,9 +245,11 @@ git commit -m "feat(web): resolve ranked search results"
 ### Task 3: Compact accessible Svelte search component
 
 **Files:**
+
 - Modify: `apps/web/src/routes/+page.svelte:1-EOF`
 
 **Interfaces:**
+
 - Consumes: `searchJobDetails`, `SearchApiError`, `PresentedJob`, and `JobSearchOutcome` from Tasks 1–2.
 - Produces: a responsive page whose only primary interaction is the search form and whose results use the presentation model.
 
@@ -254,11 +303,13 @@ git commit -m "feat(web): present searchable job details"
 ### Task 4: Final verification
 
 **Files:**
+
 - Verify: `apps/web/src/lib/search.ts`
 - Verify: `apps/web/src/lib/search.test.ts`
 - Verify: `apps/web/src/routes/+page.svelte`
 
 **Interfaces:**
+
 - Consumes: the completed component.
 - Produces: fresh completion evidence and a final screenshot for the user.
 

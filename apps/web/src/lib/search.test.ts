@@ -244,10 +244,7 @@ describe('search API boundary', () => {
     });
 
     await expect(searchJobDetails('工程師', fetcher)).rejects.toEqual(
-      new SearchApiError(
-        '找到職缺，但詳細資料目前無法載入。',
-        'req_all_failed'
-      )
+      new SearchApiError('找到職缺，但詳細資料目前無法載入。', 'req_all_failed')
     );
   });
 });
