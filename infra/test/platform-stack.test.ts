@@ -2,12 +2,20 @@ import { App } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { describe, expect, test } from 'vitest';
 
+import { DataStack } from '../lib/data-stack.ts';
 import { PlatformStack } from '../lib/platform-stack.ts';
 
 const app = new App();
+const data = new DataStack(app, 'TestData', {
+  env: { account: '111111111111', region: 'us-east-1' }
+});
 const template = Template.fromStack(
   new PlatformStack(app, 'TestPlatform', {
-    env: { account: '111111111111', region: 'us-east-1' }
+    cluster: data.cluster,
+    databaseSecurityGroup: data.databaseSecurityGroup,
+    env: { account: '111111111111', region: 'us-east-1' },
+    runtimeBucket: data.runtimeBucket,
+    vpc: data.vpc
   })
 );
 
@@ -40,49 +48,33 @@ describe('platform stack', () => {
     });
   });
 
-  test('keeps artifacts private and immutable', () => {
-    template.hasResourceProperties('AWS::S3::Bucket', {
-      BucketEncryption: {
-        ServerSideEncryptionConfiguration: [
-          { ServerSideEncryptionByDefault: { SSEAlgorithm: 'AES256' } }
-        ]
-      },
-      PublicAccessBlockConfiguration: {
-        BlockPublicAcls: true,
-        BlockPublicPolicy: true,
-        IgnorePublicAcls: true,
-        RestrictPublicBuckets: true
-      },
-      VersioningConfiguration: { Status: 'Enabled' }
-    });
-  });
-
-  test('uses encrypted private Aurora PostgreSQL Serverless v2', () => {
-    template.hasResourceProperties('AWS::RDS::DBCluster', {
-      DatabaseName: 'work_retrieval',
-      DeletionProtection: true,
-      EnableHttpEndpoint: true,
-      Engine: 'aurora-postgresql',
-      ServerlessV2ScalingConfiguration: {
-        MaxCapacity: 4,
-        MinCapacity: 0,
-        SecondsUntilAutoPause: 600
-      },
-      StorageEncrypted: true
-    });
-    template.hasResourceProperties('AWS::RDS::DBCluster', {
-      AssociatedRoles: Match.arrayWith([
-        Match.objectLike({ FeatureName: 's3Import' })
+  test('reuses the data plane without duplicating persistent resources', () => {
+    template.resourceCountIs('AWS::RDS::DBCluster', 0);
+    template.resourceCountIs('AWS::RDS::DBInstance', 0);
+    template.resourceCountIs('AWS::S3::Bucket', 1);
+    const endpoints = Object.values(
+      template.findResources('AWS::EC2::VPCEndpoint')
+    );
+    expect(endpoints).toHaveLength(7);
+    expect(endpoints).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          Properties: expect.objectContaining({ VpcEndpointType: 'Interface' })
+        })
       ])
+    );
+    expect(endpoints).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          Properties: expect.objectContaining({ VpcEndpointType: 'Gateway' })
+        })
+      ])
+    );
+    template.hasResourceProperties('AWS::EC2::SecurityGroupIngress', {
+      Description: 'ECS tasks only',
+      FromPort: 5432,
+      ToPort: 5432
     });
-    template.hasResourceProperties('AWS::RDS::DBInstance', {
-      DBInstanceClass: 'db.serverless',
-      PubliclyAccessible: false
-    });
-    template.hasOutput('DatabaseSecretArn', { Value: Match.anyValue() });
-    const policies = JSON.stringify(template.findResources('AWS::IAM::Policy'));
-    expect(policies).toContain('s3:GetObject*');
-    expect(policies).toContain('s3:List*');
   });
 
   test('routes API traffic through CloudFront and restricts the ALB source', () => {

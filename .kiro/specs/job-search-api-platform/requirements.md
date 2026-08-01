@@ -52,10 +52,16 @@ out of scope until it is promoted through a separate, evidence-backed change.
 
 ## R5. AWS platform
 
-- CDK defines private, encrypted Aurora Serverless v2 with Secrets Manager and Data API; scaling is
-  0–4 ACU with a ten-minute auto-pause.
-- CDK defines a private artifact bucket, ECR, GPU ECS on EC2 capacity, ALB, CloudFront `/api/*`
-  routing, WAF, CloudWatch, and a least-privilege GitHub OIDC role.
+- `WorkRetrievalData` owns the shared VPC, private versioned artifact bucket, database security
+  group, and private encrypted Aurora Serverless v2 with Secrets Manager, Data API, S3 import,
+  0–4 ACU scaling, and a ten-minute auto-pause.
+- Deploying `WorkRetrievalData` alone creates no NAT gateway or application-plane resources. Its
+  only VPC endpoint is the free S3 gateway endpoint; it creates no interface endpoints, ALB,
+  CloudFront, WAF, ECR, ECS, Auto Scaling group, web bucket, application logs, or GitHub OIDC role.
+- `WorkRetrievalPlatform` reuses the exact VPC, artifact bucket, Aurora cluster, and database
+  security group from `WorkRetrievalData`; it never creates a second database or artifact bucket.
+  It owns ECR, GPU ECS on EC2 capacity, interface endpoints, ALB, CloudFront `/api/*` routing, WAF,
+  CloudWatch, the web bucket, and the least-privilege GitHub OIDC role.
 - ALB ingress accepts only the CloudFront origin-facing managed prefix list.
 - GPU desired capacity defaults to zero. Image URI, artifact manifest SHA-256, and GPU instance type
   are required deployment inputs.
@@ -65,4 +71,6 @@ out of scope until it is promoted through a separate, evidence-backed change.
 - Pull requests and pushes may run CI, but pushes never deploy.
 - Deployment is available only through `workflow_dispatch`, the protected `production`
   environment, `DEPLOY_ENABLED=true`, exact human confirmation, and validated immutable inputs.
+- The full deployment workflow explicitly deploys `WorkRetrievalData` and then
+  `WorkRetrievalPlatform`; application parameters are scoped only to `WorkRetrievalPlatform`.
 - A scaffold, successful build, CDK synthesis, or merged change must not be described as deployed.

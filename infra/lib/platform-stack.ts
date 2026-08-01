@@ -2,7 +2,6 @@ import {
   Aws,
   CfnOutput,
   CfnParameter,
-  Duration,
   RemovalPolicy,
   Stack,
   type StackProps
@@ -23,9 +22,17 @@ import * as cr from 'aws-cdk-lib/custom-resources';
 import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import type { Construct } from 'constructs';
 
+export interface PlatformStackProps extends StackProps {
+  readonly cluster: rds.DatabaseCluster;
+  readonly databaseSecurityGroup: ec2.ISecurityGroup;
+  readonly runtimeBucket: s3.IBucket;
+  readonly vpc: ec2.IVpc;
+}
+
 export class PlatformStack extends Stack {
-  constructor(scope: Construct, id: string, props?: StackProps) {
+  constructor(scope: Construct, id: string, props: PlatformStackProps) {
     super(scope, id, props);
+    const { cluster, databaseSecurityGroup, runtimeBucket, vpc } = props;
 
     const apiImageUri = new CfnParameter(this, 'ApiImageUri', {
       type: 'String',
@@ -55,17 +62,6 @@ export class PlatformStack extends Stack {
       'GpuServiceDesiredCount'
     );
 
-    const vpc = new ec2.Vpc(this, 'Vpc', {
-      natGateways: 0,
-      maxAzs: 2,
-      subnetConfiguration: [
-        { name: 'public', subnetType: ec2.SubnetType.PUBLIC },
-        { name: 'private', subnetType: ec2.SubnetType.PRIVATE_ISOLATED }
-      ]
-    });
-    vpc.addGatewayEndpoint('S3Endpoint', {
-      service: ec2.GatewayVpcEndpointAwsService.S3
-    });
     for (const [name, service] of [
       ['EcrApiEndpoint', ec2.InterfaceVpcEndpointAwsService.ECR],
       ['EcrDockerEndpoint', ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER],
@@ -78,16 +74,13 @@ export class PlatformStack extends Stack {
       ['LogsEndpoint', ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS],
       ['SecretsEndpoint', ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER]
     ] as const) {
-      vpc.addInterfaceEndpoint(name, { service, privateDnsEnabled: true });
+      new ec2.InterfaceVpcEndpoint(this, name, {
+        vpc,
+        service,
+        privateDnsEnabled: true
+      });
     }
 
-    const runtimeBucket = new s3.Bucket(this, 'RuntimeBucket', {
-      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-      encryption: s3.BucketEncryption.S3_MANAGED,
-      enforceSSL: true,
-      removalPolicy: RemovalPolicy.RETAIN,
-      versioned: true
-    });
     const webBucket = new s3.Bucket(this, 'WebBucket', {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
@@ -101,44 +94,17 @@ export class PlatformStack extends Stack {
       lifecycleRules: [{ maxImageCount: 20 }]
     });
 
-    const databaseSecurityGroup = new ec2.SecurityGroup(
-      this,
-      'DatabaseSecurityGroup',
-      {
-        vpc,
-        allowAllOutbound: false
-      }
-    );
-    const cluster = new rds.DatabaseCluster(this, 'Database', {
-      engine: rds.DatabaseClusterEngine.auroraPostgres({
-        version: rds.AuroraPostgresEngineVersion.VER_16_6
-      }),
-      writer: rds.ClusterInstance.serverlessV2('Writer', {
-        publiclyAccessible: false
-      }),
-      credentials: rds.Credentials.fromGeneratedSecret('work_retrieval'),
-      defaultDatabaseName: 'work_retrieval',
-      deletionProtection: true,
-      enableDataApi: true,
-      serverlessV2AutoPauseDuration: Duration.minutes(10),
-      serverlessV2MaxCapacity: 4,
-      serverlessV2MinCapacity: 0,
-      storageEncrypted: true,
-      removalPolicy: RemovalPolicy.RETAIN,
-      s3ImportBuckets: [runtimeBucket],
-      securityGroups: [databaseSecurityGroup],
-      vpc,
-      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED }
-    });
-
     const ecsSecurityGroup = new ec2.SecurityGroup(this, 'EcsSecurityGroup', {
       vpc
     });
-    databaseSecurityGroup.addIngressRule(
-      ecsSecurityGroup,
-      ec2.Port.tcp(cluster.clusterEndpoint.port),
-      'ECS tasks only'
-    );
+    new ec2.CfnSecurityGroupIngress(this, 'EcsToDatabase', {
+      description: 'ECS tasks only',
+      fromPort: 5432,
+      groupId: databaseSecurityGroup.securityGroupId,
+      ipProtocol: 'tcp',
+      sourceSecurityGroupId: ecsSecurityGroup.securityGroupId,
+      toPort: 5432
+    });
     const ecsCluster = new ecs.Cluster(this, 'EcsCluster', {
       containerInsightsV2: ecs.ContainerInsights.ENABLED,
       vpc
@@ -378,10 +344,6 @@ export class PlatformStack extends Stack {
     new CfnOutput(this, 'ApiRepositoryUri', {
       value: repository.repositoryUri
     });
-    new CfnOutput(this, 'DatabaseClusterArn', { value: cluster.clusterArn });
-    new CfnOutput(this, 'DatabaseSecretArn', {
-      value: cluster.secret!.secretArn
-    });
     new CfnOutput(this, 'DistributionDomainName', {
       value: distribution.domainName
     });
@@ -389,9 +351,6 @@ export class PlatformStack extends Stack {
       value: distribution.distributionId
     });
     new CfnOutput(this, 'GitHubDeployRoleArn', { value: githubRole.roleArn });
-    new CfnOutput(this, 'RuntimeBucketName', {
-      value: runtimeBucket.bucketName
-    });
     new CfnOutput(this, 'WebBucketName', { value: webBucket.bucketName });
   }
 }

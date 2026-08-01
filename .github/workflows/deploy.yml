@@ -71,11 +71,12 @@ jobs:
           ARTIFACT_MANIFEST_SHA: ${{ inputs.artifact_manifest_sha }}
           GPU_INSTANCE_TYPE: ${{ inputs.gpu_instance_type }}
         run: |
-          pnpm --dir infra exec cdk deploy --all --require-approval never \
+          pnpm --dir infra exec cdk deploy WorkRetrievalData WorkRetrievalPlatform \
+            --require-approval never \
             --outputs-file cdk-outputs.json \
-            --parameters "ApiImageUri=$API_IMAGE_URI" \
-            --parameters "ArtifactManifestSha256=$ARTIFACT_MANIFEST_SHA" \
-            --parameters "GpuInstanceType=$GPU_INSTANCE_TYPE"
+            --parameters "WorkRetrievalPlatform:ApiImageUri=$API_IMAGE_URI" \
+            --parameters "WorkRetrievalPlatform:ArtifactManifestSha256=$ARTIFACT_MANIFEST_SHA" \
+            --parameters "WorkRetrievalPlatform:GpuInstanceType=$GPU_INSTANCE_TYPE"
       - name: Publish the static web app
         run: |
           WEB_BUCKET="$(jq -r '.WorkRetrievalPlatform.WebBucketName' cdk-outputs.json)"
