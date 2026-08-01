@@ -21,23 +21,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/jobs/{job_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get Job */
-        get: operations["get_job_api_v1_jobs__job_id__get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -63,96 +46,6 @@ export interface components {
         /** ErrorResponse */
         ErrorResponse: {
             error: components["schemas"]["ErrorBody"];
-            /** Request Id */
-            request_id: string;
-        };
-        /** JobDetail */
-        JobDetail: {
-            /** Additional Conditions */
-            additional_conditions: string | null;
-            /** Computer Skills */
-            computer_skills: string | null;
-            /** Description */
-            description: string | null;
-            /** Duty Major */
-            duty_major: string | null;
-            /** Duty Middle */
-            duty_middle: string | null;
-            /** Duty Minor */
-            duty_minor: string | null;
-            /** Education Requirement */
-            education_requirement: string | null;
-            /** Experience Requirement */
-            experience_requirement: string | null;
-            /** Industry Major */
-            industry_major: string | null;
-            /** Industry Middle */
-            industry_middle: string | null;
-            /** Industry Minor */
-            industry_minor: string | null;
-            /** Job Attribute */
-            job_attribute: string | null;
-            /** Job Id */
-            job_id: string;
-            /** Language 1 */
-            language_1: string | null;
-            /** Language 1 Listening */
-            language_1_listening: string | null;
-            /** Language 1 Reading */
-            language_1_reading: string | null;
-            /** Language 1 Speaking */
-            language_1_speaking: string | null;
-            /** Language 1 Writing */
-            language_1_writing: string | null;
-            /** Language 2 */
-            language_2: string | null;
-            /** Language 2 Listening */
-            language_2_listening: string | null;
-            /** Language 2 Reading */
-            language_2_reading: string | null;
-            /** Language 2 Speaking */
-            language_2_speaking: string | null;
-            /** Language 2 Writing */
-            language_2_writing: string | null;
-            /** Major Requirement 1 */
-            major_requirement_1: string | null;
-            /** Major Requirement 2 */
-            major_requirement_2: string | null;
-            /** Major Requirement 3 */
-            major_requirement_3: string | null;
-            /** Management Count */
-            management_count: string | null;
-            /** Professional Certifications */
-            professional_certifications: string | null;
-            /** Requires Travel */
-            requires_travel: string | null;
-            /** Salary Max */
-            salary_max: string | null;
-            /** Salary Min */
-            salary_min: string | null;
-            /** Salary Text */
-            salary_text: string;
-            /**
-             * Source Modified At
-             * Format: date-time
-             */
-            source_modified_at: string;
-            /** Title */
-            title: string;
-            /** Vendor Id */
-            vendor_id: string;
-            /** Work City */
-            work_city: string | null;
-            /** Work Hours */
-            work_hours: string | null;
-            /** Work Hours Description */
-            work_hours_description: string | null;
-            /** Work Skills */
-            work_skills: string | null;
-        };
-        /** JobDetailResponse */
-        JobDetailResponse: {
-            job: components["schemas"]["JobDetail"];
             /** Request Id */
             request_id: string;
         };
@@ -221,64 +114,6 @@ export interface operations {
             };
             /** @description Unsupported Media Type */
             415: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /** @description Unprocessable Entity */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /** @description Internal Server Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /** @description Service Unavailable */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-        };
-    };
-    get_job_api_v1_jobs__job_id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                job_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["JobDetailResponse"];
-                };
-            };
-            /** @description Not Found */
-            404: {
                 headers: {
                     [name: string]: unknown;
                 };

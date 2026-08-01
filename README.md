@@ -12,13 +12,12 @@
 - Qwen3 Embedding endpoint `qwen3-embedding-8b-20260801-031826` 與 reranker endpoint
   `work-retrieval-qwen3-reranker-8b` 均為 `InService`。
 - 現行搜尋仍是明確標示的暫時實作：每個合法 query 固定回傳 Aurora 中前十個真實 job ID；這不是
-  production retrieval algorithm，也不是 retrieval benchmark。`GET /api/v1/jobs/{job_id}` 會回傳資料庫中
-  保存的完整 39 欄職缺內容。
+  production retrieval algorithm，也不是 retrieval benchmark。職缺詳情 API 尚未實作。
 - Embedding／reranker endpoint 已上線不代表它們已整合成正式 `SearchEngine`，也不代表任何 retrieval
   品質指標已發布。
 
-以上是 2026-08-01 的部署 readback。進行操作或宣稱目前線上狀態前，仍應重新讀取 AWS stack、endpoint
-與 public smoke 結果。這也不表示尚未完成的 main branch CD merge 已完成。
+以上是 2026-08-01 的部署 readback。進行操作或宣稱目前線上狀態前，仍應重新讀取 AWS stack、endpoint、
+Git commit 與 public smoke 結果；各層狀態必須分別確認。
 
 ## 原始碼與文件
 
@@ -120,7 +119,6 @@ DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
 公開路徑：
 
 - `POST /api/v1/jobs/search`：暫時的 deterministic 十筆結果。
-- `GET /api/v1/jobs/{job_id}`：完整 39 欄職缺內容。
 - `GET /healthz` 與 `GET /readyz`：process 與 initialized-runtime health。
 
 Aurora credentials 由 ECS 經 Secrets Manager 注入，不保存於 image、Git 或 workflow。
@@ -184,7 +182,7 @@ environment 執行。它同時要求：
 
 流程依序執行 frozen installs、static web build、OIDC authentication、DataStack deploy、runtime manifest
 驗證、`linux/amd64` API image build／push、ECR scan、digest-pinned PlatformStack deploy、web sync、等待
-CloudFront invalidation，最後才執行 public health、readiness、web、search 與 39-field detail smoke。
+CloudFront invalidation，最後才執行 public health、readiness、web 與 search smoke。
 
 Workflow 自行 build image，不接受 caller-supplied image URI；CDK 只接收 ECR digest URI。任何 push 或
 merge 都不會自動部署。ECR scan、stack deployment、CloudFront publication 與 public smoke 是彼此獨立的

@@ -4,7 +4,7 @@
 
 **Goal:** Deploy a usable fake-search API and web application in `competition/us-west-2`, retain a production-ready zero-capacity GPU service, publish the approved runtime artifacts, and configure gated GitHub CD.
 
-**Architecture:** A single API image serves deterministic fake search results backed by real Aurora job IDs and exposes job details from PostgreSQL. A small Fargate service runs that image now; a GPU ECS-on-EC2 service uses the same image and ALB target group but stays at zero until the account's G-family quota is raised. CloudFront serves the SvelteKit static site and forwards API paths to the private-origin ALB. Runtime artifacts live under one immutable, content-addressed S3 prefix.
+**Architecture:** A single API image serves deterministic fake search results backed by real Aurora job IDs. A small Fargate service runs that image now; a GPU ECS-on-EC2 service uses the same image and ALB target group but stays at zero. CloudFront serves the SvelteKit static site and forwards API paths to the private-origin ALB. Runtime artifacts live under one immutable, content-addressed S3 prefix. The job-detail API remains out of scope.
 
 **Stack:** Python 3.12, FastAPI, SQLAlchemy 2, psycopg 3, SvelteKit, TypeScript, AWS CDK, ECS/Fargate/ECS EC2 GPU, Aurora PostgreSQL, S3, CloudFront, WAF, GitHub Actions OIDC.
 
@@ -37,10 +37,10 @@
 - Create: `apps/api/Dockerfile`
 - Create: `.dockerignore`
 
-1. Add the smallest SQLAlchemy repository needed to read jobs by ID and select the first ten real IDs in source order.
+1. Add the smallest SQLAlchemy repository needed to select the first ten real IDs in source order, using `NullPool` so Aurora can auto-pause.
 2. Add a production environment factory with explicit PostgreSQL settings and no fallback.
 3. Make fake search deterministic and return only real Aurora job IDs; keep the existing `SearchEngine` boundary.
-4. Add `GET /api/v1/jobs/{job_id}` returning all 39 source fields, with decimal strings, ISO timestamps, request IDs, and fail-closed 404/503 envelopes.
+4. Keep the future job-detail API out of this deployment.
 5. Add the ASGI entrypoint and a Python 3.12 container image, then test the runtime, API contract, and container build.
 
 ## Task 3: Update the committed contract and web UI
@@ -54,9 +54,8 @@
 - Modify: `apps/web/src/routes/+page.svelte`
 
 1. Export the updated OpenAPI document and regenerate committed TypeScript types.
-2. Add a typed job-detail client.
-3. Show that search ranking is temporary, render result IDs, and allow loading complete job details.
-4. Cover success, empty, and request-ID-bearing error states; run Svelte checks, tests, and a production build.
+2. Show that search ranking is temporary and render result IDs only.
+3. Cover success, empty, and request-ID-bearing error states; run Svelte checks, tests, and a production build.
 
 ## Task 4: Make the application infrastructure deployable
 
@@ -87,7 +86,7 @@
 2. Require `DEPLOY_ENABLED=true`, explicit confirmation, the production GitHub environment, artifact SHA, and capacity inputs; default to Fargate `1` and GPU `0/0/0` while the quota is blocked.
 3. Deploy the data-stack ECR bootstrap, build/push the image, deploy the platform stack, and upload the web application with profile `competition` in `us-west-2`.
 4. Create/read back the GitHub production environment and variables, then exercise the manual workflow from `main` when permitted.
-5. Verify CloudFormation, ECS tasks/targets, CloudFront `/healthz`, `/readyz`, fake search, job details, web rendering, runtime S3 inventory, and AWS account/region.
+5. Verify CloudFormation, ECS tasks/targets, CloudFront `/healthz`, `/readyz`, fake search, web rendering, runtime S3 inventory, and AWS account/region.
 
 ## Task 6: Final verification and integration
 

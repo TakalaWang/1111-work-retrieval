@@ -3,8 +3,6 @@ import type { components } from '@1111-work-retrieval/contract';
 export type SearchRequest = components['schemas']['SearchRequest'];
 export type SearchResponse = components['schemas']['SearchResponse'];
 export type SearchResult = components['schemas']['SearchResultItem'];
-export type JobDetail = components['schemas']['JobDetail'];
-export type JobDetailResponse = components['schemas']['JobDetailResponse'];
 type ErrorResponse = components['schemas']['ErrorResponse'];
 
 export interface SearchForm {
@@ -47,75 +45,6 @@ function hasExactKeys(
   return (
     keys.length === expectedKeys.length &&
     keys.every((key) => expectedKeys.includes(key))
-  );
-}
-
-const requiredJobStrings = [
-  'job_id',
-  'title',
-  'salary_text',
-  'vendor_id',
-  'source_modified_at'
-] as const satisfies readonly (keyof JobDetail)[];
-
-const nullableJobStrings = [
-  'description',
-  'salary_min',
-  'salary_max',
-  'duty_major',
-  'duty_middle',
-  'duty_minor',
-  'job_attribute',
-  'work_hours',
-  'work_hours_description',
-  'work_city',
-  'education_requirement',
-  'major_requirement_1',
-  'major_requirement_2',
-  'major_requirement_3',
-  'experience_requirement',
-  'language_1',
-  'language_1_listening',
-  'language_1_speaking',
-  'language_1_reading',
-  'language_1_writing',
-  'language_2',
-  'language_2_listening',
-  'language_2_speaking',
-  'language_2_reading',
-  'language_2_writing',
-  'computer_skills',
-  'professional_certifications',
-  'work_skills',
-  'additional_conditions',
-  'management_count',
-  'requires_travel',
-  'industry_major',
-  'industry_middle',
-  'industry_minor'
-] as const satisfies readonly (keyof JobDetail)[];
-
-function isJobDetail(value: unknown): value is JobDetail {
-  if (!isRecord(value)) return false;
-  const expected = new Set<string>([
-    ...requiredJobStrings,
-    ...nullableJobStrings
-  ]);
-  if (Object.keys(value).length !== expected.size) return false;
-  if (Object.keys(value).some((key) => !expected.has(key))) return false;
-  if (requiredJobStrings.some((key) => typeof value[key] !== 'string'))
-    return false;
-  return nullableJobStrings.every(
-    (key) => value[key] === null || typeof value[key] === 'string'
-  );
-}
-
-function isJobDetailResponse(value: unknown): value is JobDetailResponse {
-  return (
-    isRecord(value) &&
-    hasExactKeys(value, ['request_id', 'job']) &&
-    typeof value.request_id === 'string' &&
-    isJobDetail(value.job)
   );
 }
 
@@ -212,26 +141,5 @@ export async function searchJobs(
   }
   if (!isSearchResponse(payload))
     throw new ApiError('搜尋服務回傳了無法辨識的內容。');
-  return payload;
-}
-
-export async function getJobDetail(
-  jobId: string,
-  fetcher: typeof fetch = fetch
-): Promise<JobDetailResponse> {
-  const response = await fetcher(`/api/v1/jobs/${encodeURIComponent(jobId)}`);
-  const payload: unknown = await response.json();
-
-  if (!response.ok) {
-    if (isErrorResponse(payload))
-      throw new ApiError(
-        payload.error.message,
-        payload.request_id,
-        payload.error.code
-      );
-    throw new ApiError('職缺服務回傳了無法辨識的錯誤。');
-  }
-  if (!isJobDetailResponse(payload))
-    throw new ApiError('職缺服務回傳了不完整的內容。');
   return payload;
 }

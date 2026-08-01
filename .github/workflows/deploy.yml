@@ -231,7 +231,7 @@ jobs:
           "${CURL[@]}" "$WEB_URL/healthz" >/dev/null
           "${CURL[@]}" "$WEB_URL/readyz" >/dev/null
           WEB_HTML="$("${CURL[@]}" "$WEB_URL/")"
-          grep -F '資料連線展示' <<<"$WEB_HTML" >/dev/null
+          grep -F '搜尋服務展示' <<<"$WEB_HTML" >/dev/null
           SEARCH="$("${CURL[@]}" \
             --header 'content-type: application/json' \
             --data '{"query":"deployment smoke test","location_code":[],"duty_code":[]}' \
@@ -240,11 +240,3 @@ jobs:
             (.request_id | type == "string" and length > 0) and
             (.result | type == "array" and length > 0 and length <= 10)
           ' <<<"$SEARCH" >/dev/null
-          JOB_ID="$(jq -er '.result[0].job_id' <<<"$SEARCH")"
-          ENCODED_JOB_ID="$(jq -rn --arg value "$JOB_ID" '$value | @uri')"
-          DETAIL="$("${CURL[@]}" "$WEB_URL/api/v1/jobs/$ENCODED_JOB_ID")"
-          jq -e --arg job_id "$JOB_ID" '
-            (.request_id | type == "string" and length > 0) and
-            .job.job_id == $job_id and
-            (.job | keys | length == 39)
-          ' <<<"$DETAIL" >/dev/null

@@ -18,21 +18,17 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from work_retrieval_core import SearchEngine, SearchQuery, SearchUnavailableError
-from work_retrieval_database import JobReader, JobStoreUnavailableError
 
 from work_retrieval_api.models import (
     ErrorBody,
     ErrorDetail,
     ErrorResponse,
-    JobDetailResponse,
-    JobId,
     SearchRequest,
     SearchResponse,
     SearchResultItem,
-    job_detail,
     validation_details,
 )
-from work_retrieval_api.runtime import AppRuntime, RuntimeFactory
+from work_retrieval_api.runtime import RuntimeFactory
 
 MAX_BODY_BYTES = 16 * 1024
 MAX_RESULTS = 10
@@ -42,10 +38,6 @@ internal_logger = logging.getLogger("work_retrieval.internal")
 
 
 class EngineContractError(RuntimeError):
-    pass
-
-
-class JobNotFoundError(LookupError):
     pass
 
 
@@ -198,24 +190,14 @@ class RequestContextMiddleware:
 def create_app(runtime_factory: RuntimeFactory) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        runtime = runtime_factory()
-        if not isinstance(runtime, AppRuntime):
-            raise TypeError("runtime_factory must return an AppRuntime")
-        if not isinstance(runtime.search, SearchEngine):
-            if isinstance(runtime.jobs, JobReader):
-                runtime.jobs.close()
-            raise TypeError("runtime search must implement SearchEngine")
-        if not isinstance(runtime.jobs, JobReader):
-            runtime.search.close()
-            raise TypeError("runtime jobs must implement JobReader")
-        app.state.runtime = runtime
+        engine = runtime_factory()
+        if not isinstance(engine, SearchEngine):
+            raise TypeError("runtime_factory must return a SearchEngine")
+        app.state.engine = engine
         try:
             yield
         finally:
-            try:
-                runtime.search.close()
-            finally:
-                runtime.jobs.close()
+            engine.close()
 
     app = FastAPI(title="1111 Work Retrieval API", version="1.0.0", lifespan=lifespan)
     app.add_middleware(RequestContextMiddleware)
@@ -239,21 +221,6 @@ def create_app(runtime_factory: RuntimeFactory) -> FastAPI:
             "The search engine is temporarily unavailable.",
         )
 
-    @app.exception_handler(JobStoreUnavailableError)
-    async def job_store_unavailable(
-        request: Request, _error_value: JobStoreUnavailableError
-    ) -> JSONResponse:
-        return _error(
-            request,
-            503,
-            "job_store_unavailable",
-            "Job details are temporarily unavailable.",
-        )
-
-    @app.exception_handler(JobNotFoundError)
-    async def job_not_found(request: Request, _error_value: JobNotFoundError) -> JSONResponse:
-        return _error(request, 404, "job_not_found", "The requested job was not found.")
-
     @app.exception_handler(StarletteHTTPException)
     async def http_error(request: Request, error: StarletteHTTPException) -> JSONResponse:
         code = "not_found" if error.status_code == 404 else "method_not_allowed"
@@ -275,7 +242,7 @@ def create_app(runtime_factory: RuntimeFactory) -> FastAPI:
 
     @app.get("/readyz", include_in_schema=False)
     async def readyz(request: Request) -> dict[str, str]:
-        if not hasattr(request.app.state, "runtime"):
+        if not hasattr(request.app.state, "engine"):
             raise SearchUnavailableError("engine was not initialized")
         return {"status": "ready"}
 
@@ -299,8 +266,7 @@ def create_app(runtime_factory: RuntimeFactory) -> FastAPI:
             location_codes=tuple(payload.location_code),
             duty_codes=tuple(payload.duty_code),
         )
-        runtime = cast(AppRuntime, request.app.state.runtime)
-        engine = runtime.search
+        engine = cast(SearchEngine, request.app.state.engine)
         raw_job_ids = await run_in_threadpool(engine.search, query, limit=MAX_RESULTS)
         job_ids = _validate_engine_output(raw_job_ids)
         request.state.result_count = len(job_ids)
@@ -310,22 +276,5 @@ def create_app(runtime_factory: RuntimeFactory) -> FastAPI:
                 SearchResultItem(job_id=job_id, rank=rank) for rank, job_id in enumerate(job_ids, 1)
             ],
         )
-
-    @app.get(
-        "/api/v1/jobs/{job_id}",
-        response_model=JobDetailResponse,
-        responses={
-            404: {"model": ErrorResponse},
-            422: {"model": ErrorResponse},
-            500: {"model": ErrorResponse},
-            503: {"model": ErrorResponse},
-        },
-    )
-    async def get_job(job_id: JobId, request: Request) -> JobDetailResponse:
-        runtime = cast(AppRuntime, request.app.state.runtime)
-        snapshot = await run_in_threadpool(runtime.jobs.get, job_id)
-        if snapshot is None:
-            raise JobNotFoundError(job_id)
-        return JobDetailResponse(request_id=_request_id(request), job=job_detail(snapshot))
 
     return app

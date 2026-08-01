@@ -1,6 +1,3 @@
-from datetime import datetime
-from decimal import Decimal
-from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -8,10 +5,9 @@ import work_retrieval_database.repository as repository
 from sqlalchemy import Engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import NullPool
 from work_retrieval_database import (
     DatabaseSettings,
-    Job,
-    JobSnapshot,
     JobStoreUnavailableError,
     SqlAlchemyJobReader,
 )
@@ -22,20 +18,6 @@ def _session() -> MagicMock:
     session.__enter__.return_value = session
     session.__exit__.return_value = None
     return session
-
-
-def _job() -> Job:
-    values: dict[str, Any] = {
-        column.name: f"value:{column.name}" for column in Job.__table__.columns
-    }
-    values.update(
-        job_id="job-1",
-        salary_min=Decimal("1234567890.10"),
-        salary_max=Decimal("9999999999.99"),
-        source_modified_at=datetime(2026, 8, 1, 12, 30, 45, 123000),
-        source_row=17,
-    )
-    return Job(**values)
 
 
 def test_database_settings_require_only_explicit_postgres_values() -> None:
@@ -94,7 +76,7 @@ def test_database_settings_fail_closed(environment: dict[str, str]) -> None:
         DatabaseSettings.from_environment(environment)
 
 
-def test_reader_connections_require_tls_and_bound_query_time(
+def test_reader_connections_use_null_pool_require_tls_and_bound_query_time(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     engine = MagicMock(spec=Engine)
@@ -109,52 +91,29 @@ def test_reader_connections_require_tls_and_bound_query_time(
         "options": "-c statement_timeout=5000",
         "sslmode": "require",
     }
+    assert create_engine.call_args.kwargs["poolclass"] is NullPool
 
 
 def test_reader_uses_one_session_per_call_and_orders_seed_ids_by_lineage() -> None:
     engine = MagicMock(spec=Engine)
-    first = _session()
-    first.scalars.return_value.all.return_value = ["job-1", "job-2"]
-    second = _session()
-    job = _job()
-    second.scalar.return_value = job
-    sessions = iter((first, second))
-    reader = SqlAlchemyJobReader(engine, session_factory=lambda: next(sessions))
-
-    assert reader.first_job_ids(limit=2) == ("job-1", "job-2")
-    snapshot = reader.get("job-1")
-
-    assert isinstance(snapshot, JobSnapshot)
-    assert all(getattr(snapshot, name) is not None for name in snapshot.__dataclass_fields__)
-    for field_name in snapshot.__dataclass_fields__:
-        assert getattr(snapshot, field_name) == getattr(job, field_name)
-    assert snapshot.salary_min == Decimal("1234567890.10")
-    assert snapshot.salary_max == Decimal("9999999999.99")
-    assert snapshot.source_modified_at == datetime(2026, 8, 1, 12, 30, 45, 123000)
-    first_statement = first.scalars.call_args.args[0]
-    assert "ORDER BY jobs.source_row" in str(first_statement)
-    assert "LIMIT" in str(first_statement)
-    second_statement = second.scalar.call_args.args[0]
-    assert "WHERE jobs.job_id" in str(second_statement)
-
-
-def test_reader_returns_none_for_an_unknown_job() -> None:
-    engine = MagicMock(spec=Engine)
     session = _session()
-    session.scalar.return_value = None
+    session.scalars.return_value.all.return_value = ["job-1", "job-2"]
     reader = SqlAlchemyJobReader(engine, session_factory=lambda: session)
 
-    assert reader.get("missing") is None
+    assert reader.first_job_ids(limit=2) == ("job-1", "job-2")
+    statement = session.scalars.call_args.args[0]
+    assert "ORDER BY jobs.source_row" in str(statement)
+    assert "LIMIT" in str(statement)
 
 
 def test_reader_wraps_database_errors_and_disposes_its_engine() -> None:
     engine = MagicMock(spec=Engine)
     session = _session()
-    session.scalar.side_effect = OperationalError("private SQL", {}, RuntimeError("secret"))
+    session.scalars.side_effect = OperationalError("private SQL", {}, RuntimeError("secret"))
     reader = SqlAlchemyJobReader(engine, session_factory=lambda: session)
 
     with pytest.raises(JobStoreUnavailableError, match="PostgreSQL job lookup failed") as caught:
-        reader.get("job-1")
+        reader.first_job_ids(limit=10)
     assert "private SQL" not in str(caught.value)
 
     reader.close()

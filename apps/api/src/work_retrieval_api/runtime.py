@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
 
 from work_retrieval_core import SearchEngine, SearchQuery, SearchUnavailableError
-from work_retrieval_database import DatabaseSettings, JobReader, SqlAlchemyJobReader
+from work_retrieval_database import DatabaseSettings, SqlAlchemyJobReader
 
 FAKE_RESULT_COUNT = 10
 
@@ -32,22 +31,14 @@ class DeterministicSearchEngine:
         self._closed = True
 
 
-@dataclass(frozen=True, slots=True)
-class AppRuntime:
-    search: SearchEngine
-    jobs: JobReader
+RuntimeFactory = Callable[[], SearchEngine]
 
 
-RuntimeFactory = Callable[[], AppRuntime]
-
-
-def runtime_from_environment() -> AppRuntime:
+def runtime_from_environment() -> SearchEngine:
     settings = DatabaseSettings.from_environment()
     jobs = SqlAlchemyJobReader.from_settings(settings)
     try:
         job_ids = jobs.first_job_ids(limit=FAKE_RESULT_COUNT)
-        search = DeterministicSearchEngine(job_ids)
-    except Exception:
+        return DeterministicSearchEngine(job_ids)
+    finally:
         jobs.close()
-        raise
-    return AppRuntime(search=search, jobs=jobs)

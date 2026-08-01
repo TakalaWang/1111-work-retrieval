@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-from typing import cast
-
 import pytest
 from work_retrieval_api import runtime as runtime_module
 from work_retrieval_api.runtime import (
-    AppRuntime,
     DeterministicSearchEngine,
     runtime_from_environment,
 )
 from work_retrieval_core import SearchEngine, SearchQuery, SearchUnavailableError
-from work_retrieval_database import DatabaseSettings, JobSnapshot
+from work_retrieval_database import DatabaseSettings
 
 
 class StubJobReader:
@@ -23,16 +20,12 @@ class StubJobReader:
         self.limits.append(limit)
         return self.job_ids[:limit]
 
-    def get(self, job_id: str) -> JobSnapshot | None:
-        del job_id
-        return None
-
     def close(self) -> None:
         self.closed = True
 
 
 def _job_ids(count: int = 10) -> tuple[str, ...]:
-    return tuple(f"job-{index}" for index in range(count))
+    return tuple(str(index + 1) for index in range(count))
 
 
 def test_deterministic_search_returns_the_same_stable_slice() -> None:
@@ -44,14 +37,14 @@ def test_deterministic_search_returns_the_same_stable_slice() -> None:
         limit=3,
     )
 
-    assert first == second == ("job-0", "job-1", "job-2")
+    assert first == second == ("1", "2", "3")
 
 
 def test_deterministic_search_rejects_invalid_seed_and_closed_use() -> None:
     with pytest.raises(RuntimeError, match="exactly 10"):
         DeterministicSearchEngine(_job_ids(9))
     with pytest.raises(RuntimeError, match="non-empty and unique"):
-        DeterministicSearchEngine((*_job_ids(9), "job-0"))
+        DeterministicSearchEngine((*_job_ids(9), "1"))
 
     engine = DeterministicSearchEngine(_job_ids())
     engine.close()
@@ -76,13 +69,12 @@ def test_environment_runtime_uses_real_job_ids_and_owns_reader(
         classmethod(lambda cls, actual: jobs if actual is settings else None),
     )
 
-    runtime = runtime_from_environment()
+    engine = runtime_from_environment()
 
-    assert isinstance(runtime, AppRuntime)
-    assert isinstance(runtime.search, SearchEngine)
-    assert runtime.jobs is jobs
+    assert isinstance(engine, SearchEngine)
     assert jobs.limits == [10]
-    assert runtime.search.search(SearchQuery("ignored"), limit=10) == _job_ids()
+    assert jobs.closed
+    assert engine.search(SearchQuery("ignored"), limit=10) == _job_ids()
 
 
 def test_environment_runtime_fails_closed_and_closes_reader(
@@ -105,10 +97,3 @@ def test_environment_runtime_fails_closed_and_closes_reader(
         runtime_from_environment()
 
     assert jobs.closed
-
-
-def test_runtime_types_remain_structural() -> None:
-    jobs = StubJobReader(_job_ids())
-    runtime = AppRuntime(search=DeterministicSearchEngine(_job_ids()), jobs=jobs)
-
-    assert cast(SearchEngine, runtime.search).search(SearchQuery("query"), limit=1) == ("job-0",)
