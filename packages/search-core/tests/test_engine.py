@@ -30,7 +30,7 @@ HEX = "a" * 64
 
 def _manifest(*, multiview: bool = False) -> dict[str, object]:
     whole_path = "embeddings/qwen3-embedding-8b/whole/manifest.json"
-    tantivy_path = "indexes/tantivy-bm25-temporal-v1/manifest.json"
+    tantivy_path = "indexes/tantivy-bm25-temporal-v2/manifest.json"
     artifacts: dict[str, object] = {
         whole_path: {"kind": "embedding", "sha256": "b" * 64, "size_bytes": 84},
         tantivy_path: {"kind": "index", "sha256": "c" * 64, "size_bytes": 42},
@@ -199,7 +199,7 @@ def test_manifest_requires_both_incumbents_and_selects_only_their_prefixes() -> 
             include_dense=False, include_multiview=False
         )
     ] == [
-        "indexes/tantivy-bm25-temporal-v1/manifest.json",
+        "indexes/tantivy-bm25-temporal-v2/manifest.json",
     ]
     assert [
         path
@@ -208,7 +208,7 @@ def test_manifest_requires_both_incumbents_and_selects_only_their_prefixes() -> 
         )
     ] == [
         "embeddings/qwen3-embedding-8b/whole/manifest.json",
-        "indexes/tantivy-bm25-temporal-v1/manifest.json",
+        "indexes/tantivy-bm25-temporal-v2/manifest.json",
     ]
 
     missing = _manifest()

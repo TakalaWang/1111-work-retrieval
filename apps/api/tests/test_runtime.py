@@ -52,7 +52,7 @@ def _manifest() -> dict[str, object]:
     )
 
     whole = "embeddings/qwen3-embedding-8b/whole/manifest.json"
-    lexical = "indexes/tantivy-bm25-temporal-v1/manifest.json"
+    lexical = "indexes/tantivy-bm25-temporal-v2/manifest.json"
     artifacts = {
         whole: {"kind": "embedding", "sha256": "b" * 64, "size_bytes": 42},
         lexical: {"kind": "index", "sha256": "c" * 64, "size_bytes": 42},

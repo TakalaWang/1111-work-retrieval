@@ -76,18 +76,18 @@ all remaining full-JD fields (including job content) are deterministically pre-t
 duty and visibility remain raw hard-filter fields; update time and row index are unsigned fast
 fields. The component pins the tokenizer/source-field policy hash and the complete index-tree SHA.
 
-Query correction is not learned from query history. It is derived only from supported
-surface-to-canonical pairs in the train-JD LLM evidence, and its maximum evidence timestamp must
-remain before the split cutoff.
+The BM25 baseline has no LLM dependency: its default component declares
+`query_corrections={"enabled":false}` and can be built, validated and evaluated before any Graph
+artifact exists. This keeps the lexical ablation honest. Query correction is a separate candidate,
+never learned from query history, and cannot enter the component merely because the LLM produced
+it. Enabling it requires both a train-JD-only candidate and an immutable organizer-evaluated
+attestation showing a significant positive NDCG@10 delta. Missing, mismatched or negative evidence
+fails closed; runtime never silently falls back to unapproved correction rules.
 
 ```bash
 uv run python scripts/tantivy_index_pipeline.py build \
   --jobs-csv /data/jobs.csv \
-  --skill-evidence artifacts/input/skill-extraction/evidence.jsonl \
-  --skill-extraction-manifest artifacts/input/skill-extraction/manifest.json \
-  --split-manifest artifacts/evaluations/split.json \
-  --output artifacts/incumbents/tantivy/<dataset-sha256> \
-  --correction-minimum-support 3
+  --output artifacts/incumbents/tantivy/<dataset-sha256>
 
 uv run python scripts/tantivy_index_pipeline.py validate \
   --jobs-csv /data/jobs.csv \
@@ -99,6 +99,32 @@ AWS_PROFILE=competition uv run python scripts/tantivy_index_pipeline.py publish-
   --bucket <artifact-bucket> \
   --prefix experiments/tantivy/<manifest-sha256> \
   --profile competition
+```
+
+After a fixed-input correction ablation passes, build the train-only candidate, create its
+promotion attestation, and supply both immutable files to a new Tantivy build:
+
+```bash
+uv run python scripts/query_correction_pipeline.py build \
+  --evidence artifacts/input/skill-extraction/evidence.jsonl \
+  --extraction-manifest artifacts/input/skill-extraction/manifest.json \
+  --split-manifest artifacts/evaluations/split.json \
+  --minimum-support 3 \
+  --output artifacts/challengers/query-correction/candidate.json
+
+uv run python scripts/query_correction_pipeline.py approve \
+  --candidate artifacts/challengers/query-correction/candidate.json \
+  --split-manifest artifacts/evaluations/split.json \
+  --promotion-report artifacts/evaluations/query-correction-promotion.json \
+  --promotion-report-sha256 <approved-report-sha256> \
+  --attestation artifacts/evaluations/query-correction-promotion.attestation.json
+
+uv run python scripts/tantivy_index_pipeline.py build \
+  --jobs-csv /data/jobs.csv \
+  --output artifacts/incumbents/tantivy-corrected/<dataset-sha256> \
+  --query-correction-candidate artifacts/challengers/query-correction/candidate.json \
+  --query-correction-attestation \
+    artifacts/evaluations/query-correction-promotion.attestation.json
 ```
 
 ## LLM evidence-locked entity and skill graph
@@ -114,17 +140,38 @@ does not load it while Graph is disabled. It does not replace the research extra
 second online traversal algorithm.
 
 The formal GenAI entry point is `scripts/llm_skill_extraction_pipeline.py`. `prepare` applies the
-dynamic split cutoff and serializes the exact full JD. `extract` calls a pinned Bedrock model and
-stores one immutable response per request, so a restart resumes after validating existing response
-lineage. Surface and evidence span must occur verbatim in the JD; invalid skills/relations are
-counted and excluded. OOV surfaces remain open-vocabulary. The current policy is honestly named
-`open_surface_per_jd_llm_canonicalization_v1`: it does not claim a cross-JD clustering stage.
+dynamic split cutoff and serializes the exact full JD. It deterministically selects a representative
+duty-stratified sample using square-root support allocation plus a split-pinned stable hash. The
+default is 5,000 JDs and the hard cap is 10,000; every non-empty duty stratum receives one record or
+the build fails when the number of strata cannot fit the cap. The manifest pins eligible train
+counts, selected counts per duty, source bytes and sampling identity, so the sample is auditable and
+reproducible rather than a convenient prefix of the CSV.
+
+`extract` calls a pinned Bedrock model and stores one immutable response per request, so a restart
+resumes after validating existing response lineage. Final evidence is streamed to a temporary
+JSONL and atomically sealed; full request/response payloads are never accumulated in memory. Calls
+are intentionally sequential with SDK standard exponential backoff capped at four total attempts,
+which bounds pressure on the shared Bedrock quota and keeps per-record cost attribution exact.
+Surface and evidence span must occur verbatim in the JD; invalid skills/relations are counted and
+excluded. OOV surfaces remain open-vocabulary.
+The current policy is honestly named `open_surface_per_jd_llm_canonicalization_v1`: it does not
+claim a cross-JD clustering stage. The Graph represents the sampled train evidence only; it does
+not pretend that all 1.2 million jobs received LLM extraction.
+
+Capacity planning is explicit: the default run has at most 5,000 logical model requests and the
+hard-cap run at most 10,000, each with no more than four SDK attempts. `maxTokens=2048`, so their
+successful-output ceilings are 10.24M and 20.48M tokens; actual input/output token totals are
+written into the extraction manifest. Estimate wall time as
+remaining records multiplied by observed per-call p95 latency, and cost from those pinned usage
+totals and the selected model's price. No fixed dollar or ETA claim is valid before `model_id` and
+observed latency are known.
 
 ```bash
 uv run python scripts/llm_skill_extraction_pipeline.py prepare \
   --jobs-csv /data/jobs.csv \
   --split-manifest artifacts/evaluations/split.json \
-  --output artifacts/input/skill-extraction-prepared/<dataset-sha256>
+  --output artifacts/input/skill-extraction-prepared/<dataset-sha256> \
+  --max-records 5000
 
 AWS_PROFILE=competition uv run python scripts/llm_skill_extraction_pipeline.py extract \
   --prepared artifacts/input/skill-extraction-prepared/<dataset-sha256> \

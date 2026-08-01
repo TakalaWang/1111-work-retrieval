@@ -11,8 +11,9 @@ flowchart TD
     A["POST /api/v1/jobs/search"] --> B["Validate query and filter codes"]
     B --> C["Resolve request-time as_of"]
     C --> D["Compile lower bound: as_of - 180 days"]
-    D --> E["Train-JD-only query correction; preserve original query"]
-    E --> F0["Resolve location/duty taxonomy codes"]
+    D --> E{"Promoted correction attestation enabled?"}
+    E -->|"No: exact identity compiler"| F0["Resolve location/duty taxonomy codes"]
+    E -->|"Yes: preserve original + approved rewrite"| F0
     F0 --> F["Tantivy full-JD BM25 incumbent"]
     F0 -. "optional shadow flag" .-> G["Bounded eligible-row set"]
     G --> H["SageMaker Qwen query embedding"]
@@ -25,7 +26,10 @@ flowchart TD
     M --> N["Top 10 + audit trace"]
 ```
 
-Tantivy BM25 是唯一已升版的 production Top-10 incumbent。Dense 預設關閉；顯式開啟時只提供 shadow/tail
+Tantivy BM25 是唯一已升版的 production Top-10 incumbent。BM25 component 預設明確關閉 query correction，
+因此可在沒有 LLM/Graph artifact 的情況下獨立建置、評估與服務；只有 train-only candidate 通過 organizer
+fixed-input NDCG@10 正向顯著性驗證並提供 SHA-pinned attestation 時才允許重建成 enabled component。Dense
+預設關閉；顯式開啟時只提供 shadow/tail
 evidence，不能改排 BM25 Top-10，失敗也不影響 incumbent。Graph、multi-view MaxSim、reranker、LTR 與
 guardrail 預設關閉，且 manifest 若宣稱啟用尚無 production adapter 的模組會直接拒絕啟動。Freshness
 只留在 audit 與未來 LTR shadow feature；離線 rank-decay ablation 為負向，因此不拿來重排 relevance。
@@ -96,7 +100,8 @@ Production container 啟動順序：
    `.partial`，驗證 size 與 SHA 後 atomic rename。
 6. 既有檔案也重新驗證；不覆寫 corrupted local artifact，不載入 mutable/latest path。
 7. Component manifest 再驗證 vector build lineage、job IDs、Tantivy files、實際 `meta.json` schema/tokenizers、
-   lexical source mapping、corpus-safe correction cutoff 與 taxonomy。
+   lexical source mapping、taxonomy，以及 query correction 的 exact disabled branch 或 candidate + positive
+   promotion attestation；不允許缺件後降級。
 8. 建立必要 adapters；若 dense shadow 開啟，還要先完成 SageMaker model identity readback；全部成功後
    `/readyz` 才 ready。
 
@@ -139,6 +144,8 @@ returned job. It does not expose invented skill explanations.
 
 Graph remains a challenger because competition evidence must demonstrate causality, not merely architecture. A graph
 artifact may only use train-period JDs, must pin cutoff and maximum source timestamp, and must ship traversal traces.
+LLM extraction uses a deterministic duty-stratified sample (default 5,000, hard cap 10,000) rather than sending the
+entire 1.2M-row corpus to a model; its manifest pins the eligible population, per-duty quotas and stable-hash sample.
 Promotion requires a one-command time-split ablation in which graph-on materially improves the agreed primary metric;
 otherwise graph stays off while its experiment remains reproducible.
 

@@ -9,7 +9,6 @@ import hashlib
 import json
 import os
 import shutil
-from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -30,7 +29,6 @@ from pipeline_contract import (
     verify_s3_inventory,
     verify_s3_object,
 )
-from skill_graph_pipeline import _load_extraction, load_split_manifest
 from work_retrieval_core.adapters import (
     FIELD_BOOSTS,
     JOB_INDEX_FIELD,
@@ -41,6 +39,7 @@ from work_retrieval_core.adapters import (
     TOKENIZERS,
     UPDATED_AT_FIELD,
     VISIBILITY_FIELD,
+    CorpusQueryCompiler,
     lexical_policy_sha256,
     lexical_tokens,
 )
@@ -57,8 +56,7 @@ DEFAULT_ARTIFACT_PREFIX = "indexes/tantivy-bm25-temporal-v2"
 ENGINE = "tantivy v0.26.0, index_format v7"
 FILTER_SEMANTICS = "visibility AND (location OR) AND (duty OR), applied before Top-K"
 TEMPORAL_SEMANTICS = (
-    "updated_at >= as_of - 180 days, applied before Top-K; future rows retained and assigned "
-    "zero freshness by downstream ranking"
+    "updated_at >= as_of - 180 days before Top-K; updated_at > as_of retained with freshness=0"
 )
 SCHEMA_FIELDS = [
     *TEXT_FIELDS,
@@ -77,7 +75,7 @@ COMPONENT_KEYS = {
     "index_files",
     "taxonomy_path",
     "job_ids_path",
-    "query_corrections_path",
+    "query_corrections",
     "build_manifest_path",
     "build_manifest_sha256",
     "schema_fields",
@@ -102,9 +100,7 @@ BUILD_KEYS = {
     "index_sha256",
     "index_tree",
     "taxonomy_sha256",
-    "query_corrections_sha256",
-    "corrections_source_manifest_sha256",
-    "split_manifest_sha256",
+    "query_corrections",
     "lexical_policy_version",
     "lexical_policy_sha256",
     "tokenizers",
@@ -138,40 +134,6 @@ def _serialized(values: Mapping[str, str | None], fields: Sequence[str]) -> str:
             seen.add(identity)
             lines.append(f"{labels[field]}: {value}")
     return "\n".join(lines)
-
-
-def _corrections(
-    *,
-    evidence_path: Path,
-    extraction_manifest_path: Path,
-    split_manifest_path: Path,
-    minimum_support: int,
-) -> dict[str, object]:
-    if minimum_support < 1:
-        raise ValueError("correction minimum support must be positive")
-    _split, cutoff = load_split_manifest(split_manifest_path)
-    extraction, records = _load_extraction(evidence_path, extraction_manifest_path, cutoff)
-    pairs: Counter[tuple[str, str]] = Counter()
-    targets: dict[str, set[str]] = defaultdict(set)
-    for record in records:
-        for canonical, evidence in record["skills"].items():
-            surface = canonical_code(evidence["surface"])
-            target = canonical_code(canonical)
-            if surface and target and surface != target:
-                pairs[(surface, target)] += 1
-                targets[surface].add(target)
-    corrections = {
-        source: target
-        for (source, target), support in sorted(pairs.items())
-        if support >= minimum_support and len(targets[source]) == 1
-    }
-    return {
-        "schema_version": 1,
-        "source_policy": "train_jd_only",
-        "train_cutoff_exclusive": extraction["train_cutoff_exclusive"],
-        "max_source_timestamp": extraction["max_source_timestamp"],
-        "corrections": corrections,
-    }
 
 
 def _taxonomy_add(mapping: dict[str, set[str]], code: str, term: str, name: str) -> None:
@@ -212,9 +174,6 @@ def _schema() -> tantivy.Schema:
 def build_tantivy(
     *,
     jobs_csv: Path,
-    evidence_path: Path,
-    extraction_manifest_path: Path,
-    split_manifest_path: Path,
     output: Path,
     artifact_prefix: str,
     location_code_field: str,
@@ -223,7 +182,8 @@ def build_tantivy(
     duty_term_field: str,
     visibility_field: str,
     modified_at_field: str,
-    correction_minimum_support: int,
+    correction_candidate_path: Path | None,
+    correction_attestation_path: Path | None,
 ) -> dict[str, object]:
     if output.exists():
         raise RuntimeError("Tantivy output already exists; builds never overwrite")
@@ -316,16 +276,28 @@ def build_tantivy(
                 },
             },
         )
-        corrections_path = partial / "query-corrections.json"
-        atomic_json(
-            corrections_path,
-            _corrections(
-                evidence_path=evidence_path,
-                extraction_manifest_path=extraction_manifest_path,
-                split_manifest_path=split_manifest_path,
-                minimum_support=correction_minimum_support,
-            ),
-        )
+        prefix = clean_prefix.as_posix()
+        if correction_candidate_path is None and correction_attestation_path is None:
+            query_corrections: dict[str, object] = {"enabled": False}
+        elif correction_candidate_path is None or correction_attestation_path is None:
+            raise RuntimeError(
+                "enabled query corrections require both candidate and promotion attestation"
+            )
+        else:
+            CorpusQueryCompiler.from_promoted_paths(
+                correction_candidate_path, correction_attestation_path
+            )
+            corrections_path = partial / "query-corrections.json"
+            attestation_path = partial / "query-corrections.attestation.json"
+            shutil.copyfile(correction_candidate_path, corrections_path)
+            shutil.copyfile(correction_attestation_path, attestation_path)
+            query_corrections = {
+                "enabled": True,
+                "artifact_path": f"{prefix}/{corrections_path.name}",
+                "artifact_sha256": sha256_file(corrections_path),
+                "promotion_attestation_path": f"{prefix}/{attestation_path.name}",
+                "promotion_attestation_sha256": sha256_file(attestation_path),
+            }
         tree = _tree(index_directory)
         tree_sha256 = _tree_sha256(tree)
         build_manifest = {
@@ -340,9 +312,7 @@ def build_tantivy(
             "index_sha256": tree_sha256,
             "index_tree": tree,
             "taxonomy_sha256": sha256_file(taxonomy_path),
-            "query_corrections_sha256": sha256_file(corrections_path),
-            "corrections_source_manifest_sha256": sha256_file(extraction_manifest_path),
-            "split_manifest_sha256": sha256_file(split_manifest_path),
+            "query_corrections": query_corrections,
             "lexical_policy_version": LEXICAL_POLICY_VERSION,
             "lexical_policy_sha256": lexical_policy_sha256(),
             "tokenizers": TOKENIZERS,
@@ -351,7 +321,6 @@ def build_tantivy(
         }
         build_manifest_path = partial / "build-manifest.json"
         atomic_json(build_manifest_path, build_manifest)
-        prefix = clean_prefix.as_posix()
         component = {
             "schema_version": 1,
             "complete": True,
@@ -363,7 +332,7 @@ def build_tantivy(
             "index_files": [f"{prefix}/index/{item['path']}" for item in tree],
             "taxonomy_path": f"{prefix}/{taxonomy_path.name}",
             "job_ids_path": f"{prefix}/{job_ids_path.name}",
-            "query_corrections_path": f"{prefix}/{corrections_path.name}",
+            "query_corrections": query_corrections,
             "build_manifest_path": f"{prefix}/{build_manifest_path.name}",
             "build_manifest_sha256": sha256_file(build_manifest_path),
             "schema_fields": SCHEMA_FIELDS,
@@ -406,16 +375,29 @@ def _inventory(
             _local(output, manifest["job_ids_path"], prefix), relative_to=output, kind="index"
         ),
         artifact_entry(
-            _local(output, manifest["query_corrections_path"], prefix),
-            relative_to=output,
-            kind="index",
-        ),
-        artifact_entry(
             _local(output, manifest["build_manifest_path"], prefix),
             relative_to=output,
             kind="evidence",
         ),
     ]
+    correction = manifest["query_corrections"]
+    if not isinstance(correction, dict):
+        raise RuntimeError("Tantivy query correction mode must be an object")
+    if correction != {"enabled": False}:
+        values.extend(
+            (
+                artifact_entry(
+                    _local(output, correction["artifact_path"], prefix),
+                    relative_to=output,
+                    kind="index",
+                ),
+                artifact_entry(
+                    _local(output, correction["promotion_attestation_path"], prefix),
+                    relative_to=output,
+                    kind="evidence",
+                ),
+            )
+        )
     files = manifest["index_files"]
     if not isinstance(files, list):
         raise RuntimeError("Tantivy index files must be an array")
@@ -439,6 +421,7 @@ def validate_tantivy(output: Path, *, jobs_csv: Path, artifact_prefix: str) -> d
         "lexical_policy_sha256": lexical_policy_sha256(),
         "tokenizers": TOKENIZERS,
         "source_fields": SOURCE_FIELDS,
+        "query_corrections": manifest["query_corrections"],
         "filter_semantics": FILTER_SEMANTICS,
         "updated_at_field": UPDATED_AT_FIELD,
         "temporal_filter_semantics": TEMPORAL_SEMANTICS,
@@ -500,20 +483,10 @@ def validate_tantivy(output: Path, *, jobs_csv: Path, artifact_prefix: str) -> d
     }
     if any(build[name] != value for name, value in build_expected.items()):
         raise RuntimeError("Tantivy build lineage differs")
-    for name in (
-        "taxonomy_sha256",
-        "query_corrections_sha256",
-        "corrections_source_manifest_sha256",
-        "split_manifest_sha256",
-    ):
-        require_sha256(build[name], f"Tantivy build {name}")
+    require_sha256(build["taxonomy_sha256"], "Tantivy build taxonomy SHA-256")
     taxonomy_path = _local(output, manifest["taxonomy_path"], prefix)
-    corrections_path = _local(output, manifest["query_corrections_path"], prefix)
-    if (
-        sha256_file(taxonomy_path) != build["taxonomy_sha256"]
-        or sha256_file(corrections_path) != build["query_corrections_sha256"]
-    ):
-        raise RuntimeError("Tantivy taxonomy or correction bytes differ")
+    if sha256_file(taxonomy_path) != build["taxonomy_sha256"]:
+        raise RuntimeError("Tantivy taxonomy bytes differ")
     taxonomy = read_json_object(taxonomy_path, "Tantivy filter taxonomy")
     exact_keys(
         taxonomy,
@@ -526,24 +499,31 @@ def validate_tantivy(output: Path, *, jobs_csv: Path, artifact_prefix: str) -> d
         or not taxonomy["duty_code_to_terms"]
     ):
         raise RuntimeError("Tantivy filter taxonomy is empty")
-    corrections = read_json_object(corrections_path, "Tantivy query corrections")
-    exact_keys(
-        corrections,
-        {
-            "schema_version",
-            "source_policy",
-            "train_cutoff_exclusive",
-            "max_source_timestamp",
-            "corrections",
-        },
-        "Tantivy query corrections",
-    )
-    if corrections["schema_version"] != 1 or corrections["source_policy"] != "train_jd_only":
-        raise RuntimeError("Tantivy query corrections are not train-only")
-    if _timestamp(
-        cast(str, corrections["max_source_timestamp"]), "correction maximum"
-    ) >= _timestamp(cast(str, corrections["train_cutoff_exclusive"]), "correction cutoff"):
-        raise RuntimeError("Tantivy query corrections include test-period evidence")
+    correction = manifest["query_corrections"]
+    if not isinstance(correction, dict):
+        raise RuntimeError("Tantivy query correction mode must be an object")
+    if correction != {"enabled": False}:
+        exact_keys(
+            correction,
+            {
+                "enabled",
+                "artifact_path",
+                "artifact_sha256",
+                "promotion_attestation_path",
+                "promotion_attestation_sha256",
+            },
+            "enabled Tantivy query corrections",
+        )
+        if correction["enabled"] is not True:
+            raise RuntimeError("query correction enabled flag must be boolean")
+        corrections_path = _local(output, correction["artifact_path"], prefix)
+        attestation_path = _local(output, correction["promotion_attestation_path"], prefix)
+        if (
+            sha256_file(corrections_path) != correction["artifact_sha256"]
+            or sha256_file(attestation_path) != correction["promotion_attestation_sha256"]
+        ):
+            raise RuntimeError("enabled query correction bytes differ")
+        CorpusQueryCompiler.from_promoted_paths(corrections_path, attestation_path)
     tantivy.Index.open(str(index_directory)).searcher()
     return {
         "passed": True,
@@ -617,9 +597,6 @@ def main() -> None:
     commands = parser.add_subparsers(dest="command", required=True)
     build = commands.add_parser("build")
     build.add_argument("--jobs-csv", type=Path, required=True)
-    build.add_argument("--skill-evidence", type=Path, required=True)
-    build.add_argument("--skill-extraction-manifest", type=Path, required=True)
-    build.add_argument("--split-manifest", type=Path, required=True)
     build.add_argument("--output", type=Path, required=True)
     build.add_argument("--artifact-prefix", default=DEFAULT_ARTIFACT_PREFIX)
     build.add_argument("--location-code-field", default=DEFAULT_LOCATION_CODE_FIELD)
@@ -628,7 +605,8 @@ def main() -> None:
     build.add_argument("--duty-term-field", default=DEFAULT_DUTY_TERM_FIELD)
     build.add_argument("--visibility-field", default=DEFAULT_VISIBILITY_FIELD)
     build.add_argument("--modified-at-field", default=DEFAULT_MODIFIED_AT_FIELD)
-    build.add_argument("--correction-minimum-support", type=int, default=3)
+    build.add_argument("--query-correction-candidate", type=Path)
+    build.add_argument("--query-correction-attestation", type=Path)
     validate = commands.add_parser("validate")
     validate.add_argument("--output", type=Path, required=True)
     validate.add_argument("--jobs-csv", type=Path, required=True)
@@ -647,9 +625,6 @@ def main() -> None:
     if args.command == "build":
         result = build_tantivy(
             jobs_csv=args.jobs_csv,
-            evidence_path=args.skill_evidence,
-            extraction_manifest_path=args.skill_extraction_manifest,
-            split_manifest_path=args.split_manifest,
             output=args.output,
             artifact_prefix=args.artifact_prefix,
             location_code_field=args.location_code_field,
@@ -658,7 +633,8 @@ def main() -> None:
             duty_term_field=args.duty_term_field,
             visibility_field=args.visibility_field,
             modified_at_field=args.modified_at_field,
-            correction_minimum_support=args.correction_minimum_support,
+            correction_candidate_path=args.query_correction_candidate,
+            correction_attestation_path=args.query_correction_attestation,
         )
     elif args.command == "validate":
         result = validate_tantivy(

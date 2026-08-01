@@ -16,6 +16,7 @@ import graph_ablation_runner as ablation
 import llm_skill_extraction_pipeline as llm_extraction
 import multiview_embedding_pipeline as embeddings
 import pipeline_contract as contract
+import query_correction_pipeline as query_corrections
 import skill_graph_pipeline as graph
 import tantivy_index_pipeline as tantivy_pipeline
 import whole_embedding_pipeline as whole_embeddings
@@ -54,21 +55,23 @@ def _skill_evidence(tmp_path: Path) -> tuple[Path, Path, Path]:
     timestamps = ("2026-06-06T10:00:00+08:00", "2026-06-07T09:00:00+08:00")
     records: list[dict[str, object]] = []
     for index, timestamp in enumerate(timestamps, start=1):
-        source = "Python 與 SQL 是此職缺必要技能。"
+        source = "Pyhton 與 SQL 是此職缺必要技能。"
+        job_id = str(100 + index)
+        source_sha256 = hashlib.sha256(source.encode()).hexdigest()
         records.append(
             {
-                "record_id": f"record-{index}",
-                "job_id": str(100 + index),
+                "record_id": hashlib.sha256(f"{job_id}\0{source_sha256}".encode()).hexdigest(),
+                "job_id": job_id,
                 "duty": "data engineer",
                 "source_modified_at": timestamp,
                 "source_text": source,
-                "source_text_sha256": hashlib.sha256(source.encode()).hexdigest(),
+                "source_text_sha256": source_sha256,
                 "skills": [
                     {
                         "canonical_name": "python",
-                        "surface": "Python",
+                        "surface": "Pyhton",
                         "category": "programming language",
-                        "evidence_span": "Python",
+                        "evidence_span": "Pyhton",
                     },
                     {
                         "canonical_name": "sql",
@@ -82,7 +85,7 @@ def _skill_evidence(tmp_path: Path) -> tuple[Path, Path, Path]:
                         "source": "python",
                         "type": "USED_WITH",
                         "target": "sql",
-                        "evidence_span": "Python 與 SQL",
+                        "evidence_span": "Pyhton 與 SQL",
                     }
                 ],
                 "skill_rejection_count": 0,
@@ -111,6 +114,12 @@ def _skill_evidence(tmp_path: Path) -> tuple[Path, Path, Path]:
             "requests_sha256": "2" * 64,
             "responses_inventory_sha256": "3" * 64,
             "evidence_sha256": contract.sha256_file(evidence_path),
+            "sampling_policy": "duty_stratified_sqrt_support_stable_hash_v1",
+            "sample_limit": 2,
+            "eligible_train_records": 2,
+            "sampling_sha256": hashlib.sha256(
+                contract.canonical_json([record["record_id"] for record in records])
+            ).hexdigest(),
             "source_records": 2,
             "processed_records": 2,
             "input_tokens": 10,
@@ -139,13 +148,13 @@ def test_skill_graph_build_validate_and_trace(tmp_path: Path) -> None:
     assert manifest["graph_kind"] == "llm-evidence-locked-typed-entity-graph"
     assert validation["passed"] is True
     assert trace["jobs"] == [
-        {"job_id": "101", "evidence_span": "Python"},
-        {"job_id": "102", "evidence_span": "Python"},
+        {"job_id": "101", "evidence_span": "Pyhton"},
+        {"job_id": "102", "evidence_span": "Pyhton"},
     ]
     assert trace["relations"][0]["target"] == "sql"
     assert trace["relations"][0]["evidence"] == [
-        {"job_id": "101", "evidence_span": "Python 與 SQL"},
-        {"job_id": "102", "evidence_span": "Python 與 SQL"},
+        {"job_id": "101", "evidence_span": "Pyhton 與 SQL"},
+        {"job_id": "102", "evidence_span": "Pyhton 與 SQL"},
     ]
 
 
@@ -679,6 +688,7 @@ def test_llm_extraction_is_train_only_evidence_locked_and_resumable(tmp_path: Pa
         output=prepared,
         duty_field="職務小類",
         modified_at_field=tantivy_pipeline.DEFAULT_MODIFIED_AT_FIELD,
+        sample_limit=llm_extraction.DEFAULT_SAMPLE_LIMIT,
     )
     assert prepared_manifest["records"] == 1
     assert prepared_manifest["post_cutoff_skipped"] == 1
@@ -717,18 +727,22 @@ def test_llm_extraction_is_train_only_evidence_locked_and_resumable(tmp_path: Pa
     assert graph_manifest["source_records"] == 1
 
 
-def test_tantivy_builder_indexes_full_jd_filters_and_train_only_corrections(
+def test_graph_sampling_is_stratified_and_hard_capped() -> None:
+    quotas = llm_extraction._sample_quotas({"rare": 1, "common": 100}, 5)
+
+    assert quotas == {"rare": 1, "common": 4}
+    with pytest.raises(ValueError, match="between 1 and 10000"):
+        llm_extraction._sample_quotas({"common": 1}, 10_001)
+
+
+def test_tantivy_builder_is_independent_with_corrections_explicitly_disabled(
     tmp_path: Path,
 ) -> None:
     source = _full_jobs_csv(tmp_path)
-    evidence, extraction_manifest, split = _skill_evidence(tmp_path)
     output = tmp_path / "tantivy"
 
     component = tantivy_pipeline.build_tantivy(
         jobs_csv=source,
-        evidence_path=evidence,
-        extraction_manifest_path=extraction_manifest,
-        split_manifest_path=split,
         output=output,
         artifact_prefix=tantivy_pipeline.DEFAULT_ARTIFACT_PREFIX,
         location_code_field=tantivy_pipeline.DEFAULT_LOCATION_CODE_FIELD,
@@ -737,7 +751,8 @@ def test_tantivy_builder_indexes_full_jd_filters_and_train_only_corrections(
         duty_term_field=tantivy_pipeline.DEFAULT_DUTY_TERM_FIELD,
         visibility_field=tantivy_pipeline.DEFAULT_VISIBILITY_FIELD,
         modified_at_field=tantivy_pipeline.DEFAULT_MODIFIED_AT_FIELD,
-        correction_minimum_support=2,
+        correction_candidate_path=None,
+        correction_attestation_path=None,
     )
     validation = tantivy_pipeline.validate_tantivy(
         output,
@@ -749,5 +764,79 @@ def test_tantivy_builder_indexes_full_jd_filters_and_train_only_corrections(
     assert component["lexical_policy_sha256"] == tantivy_pipeline.lexical_policy_sha256()
     assert set(component["source_fields"]) == set(tantivy_pipeline.TEXT_FIELDS)
     assert component["build_manifest_path"].endswith("/build-manifest.json")
-    corrections = json.loads((output / "query-corrections.json").read_text(encoding="utf-8"))
-    assert corrections["source_policy"] == "train_jd_only"
+    assert component["query_corrections"] == {"enabled": False}
+    assert not (output / "query-corrections.json").exists()
+
+
+def test_query_corrections_require_positive_promotion_before_tantivy_enablement(
+    tmp_path: Path,
+) -> None:
+    source = _full_jobs_csv(tmp_path)
+    evidence, extraction_manifest, split = _skill_evidence(tmp_path)
+    candidate_path = tmp_path / "query-corrections.json"
+    candidate = query_corrections.build_candidate(
+        evidence_path=evidence,
+        extraction_manifest_path=extraction_manifest,
+        split_manifest_path=split,
+        minimum_support=2,
+        output=candidate_path,
+    )
+    assert candidate["corrections"] == {"pyhton": "python"}
+    candidate_sha256 = contract.sha256_file(candidate_path)
+    report_path = tmp_path / "query-correction-promotion.json"
+    _write_json(
+        report_path,
+        {
+            "schema_version": 1,
+            "complete": True,
+            "experiment": "query correction fixed-input ablation",
+            "candidate_sha256": candidate_sha256,
+            "primary_metric": "ndcg_at_10",
+            "absolute_delta": 0.001,
+            "evaluator_kind": "organizer",
+            "significant": True,
+            "evaluation_split_sha256": contract.sha256_file(split),
+            "baseline_run_sha256": "6" * 64,
+            "candidate_run_sha256": "7" * 64,
+        },
+    )
+    attestation_path = tmp_path / "query-corrections.attestation.json"
+    rejected = json.loads(report_path.read_text(encoding="utf-8"))
+    rejected["absolute_delta"] = 0.0
+    _write_json(report_path, rejected)
+    with pytest.raises(RuntimeError, match="did not pass"):
+        query_corrections.approve_candidate(
+            candidate_path=candidate_path,
+            split_manifest_path=split,
+            promotion_report_path=report_path,
+            promotion_report_sha256=contract.sha256_file(report_path),
+            attestation_path=attestation_path,
+        )
+    rejected["absolute_delta"] = 0.001
+    _write_json(report_path, rejected)
+    query_corrections.approve_candidate(
+        candidate_path=candidate_path,
+        split_manifest_path=split,
+        promotion_report_path=report_path,
+        promotion_report_sha256=contract.sha256_file(report_path),
+        attestation_path=attestation_path,
+    )
+    output = tmp_path / "tantivy-enabled"
+    component = tantivy_pipeline.build_tantivy(
+        jobs_csv=source,
+        output=output,
+        artifact_prefix=tantivy_pipeline.DEFAULT_ARTIFACT_PREFIX,
+        location_code_field=tantivy_pipeline.DEFAULT_LOCATION_CODE_FIELD,
+        location_term_field=tantivy_pipeline.DEFAULT_LOCATION_TERM_FIELD,
+        duty_code_field=tantivy_pipeline.DEFAULT_DUTY_CODE_FIELD,
+        duty_term_field=tantivy_pipeline.DEFAULT_DUTY_TERM_FIELD,
+        visibility_field=tantivy_pipeline.DEFAULT_VISIBILITY_FIELD,
+        modified_at_field=tantivy_pipeline.DEFAULT_MODIFIED_AT_FIELD,
+        correction_candidate_path=candidate_path,
+        correction_attestation_path=attestation_path,
+    )
+
+    correction = component["query_corrections"]
+    assert isinstance(correction, dict)
+    assert correction["enabled"] is True
+    assert (output / "query-corrections.attestation.json").is_file()

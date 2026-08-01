@@ -63,9 +63,19 @@ def create_production_ports(
     taxonomy = FilterTaxonomy.from_path(runtime_root / tantivy_layout.taxonomy_path)
     job_ids = load_job_ids(
         runtime_root / tantivy_layout.job_ids_path,
-        expected_rows=manifest.whole_embedding.rows,
+        expected_rows=manifest.whole_embedding.rows if enable_dense_shadow else None,
     )
-    compiler = CorpusQueryCompiler.from_path(runtime_root / tantivy_layout.query_corrections_path)
+    if tantivy_layout.query_corrections_path is None:
+        if tantivy_layout.query_corrections_attestation_path is not None:
+            raise RuntimeError("disabled query corrections cannot carry an attestation")
+        compiler = CorpusQueryCompiler.identity()
+    else:
+        if tantivy_layout.query_corrections_attestation_path is None:
+            raise RuntimeError("enabled query corrections require a promotion attestation")
+        compiler = CorpusQueryCompiler.from_promoted_paths(
+            runtime_root / tantivy_layout.query_corrections_path,
+            runtime_root / tantivy_layout.query_corrections_attestation_path,
+        )
     lexical = TantivyBm25Retriever(
         runtime_root / tantivy_layout.index_directory,
         job_ids,
