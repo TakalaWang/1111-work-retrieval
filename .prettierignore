@@ -1,6 +1,5 @@
 .venv
 .svelte-kit
-.superpowers
 build
 cdk.out
 node_modules

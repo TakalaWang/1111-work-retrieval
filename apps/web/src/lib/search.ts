@@ -2,16 +2,8 @@ import type { components } from '@1111-work-retrieval/contract';
 
 export type SearchRequest = components['schemas']['SearchRequest'];
 export type SearchResponse = components['schemas']['SearchResponse'];
-export type SearchResult = components['schemas']['SearchResultItem'];
-export type PullJobRequest = components['schemas']['PullJobRequest'];
 export type JobResponse = components['schemas']['JobResponse'];
 type ErrorResponse = components['schemas']['ErrorResponse'];
-
-export interface SearchForm {
-  query: string;
-  locationCodes: string;
-  dutyCodes: string;
-}
 
 export interface PresentedJob {
   jobId: string;
@@ -41,17 +33,6 @@ export class SearchApiError extends Error {
     super(message);
     this.name = 'SearchApiError';
   }
-}
-
-function parseCodes(value: string): string[] {
-  return [
-    ...new Set(
-      value
-        .split(/[\s,，]+/u)
-        .map((code) => code.trim())
-        .filter(Boolean)
-    )
-  ];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -103,8 +84,19 @@ function isErrorResponse(value: unknown): value is ErrorResponse {
 }
 
 function usefulDetail(details: JobResponse['details'], key: string) {
-  const value = details[key]?.replace(/<br\s*\/?\s*>/giu, ' ').trim();
+  const value = details[key]?.replace(/<br(?:\s*\/)?\s*>/giu, ' ').trim();
   return value ? value.replace(/\s+/gu, ' ') : undefined;
+}
+
+async function jsonPayload(
+  response: Response,
+  invalidMessage: string
+): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch {
+    throw new SearchApiError(invalidMessage);
+  }
 }
 
 export function presentJob(response: JobResponse, rank: number): PresentedJob {
@@ -127,14 +119,6 @@ export function presentJob(response: JobResponse, rank: number): PresentedJob {
   };
 }
 
-export function serializeSearch(form: SearchForm): SearchRequest {
-  return {
-    query: form.query.trim(),
-    location_code: parseCodes(form.locationCodes),
-    duty_code: parseCodes(form.dutyCodes)
-  };
-}
-
 export async function searchJobs(
   request: SearchRequest,
   fetcher: typeof fetch = fetch
@@ -144,7 +128,12 @@ export async function searchJobs(
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(request)
   });
-  const payload: unknown = await response.json();
+  const payload = await jsonPayload(
+    response,
+    response.ok
+      ? '搜尋服務回傳了無法辨識的內容。'
+      : '搜尋服務回傳了無法辨識的錯誤。'
+  );
 
   if (!response.ok) {
     if (isErrorResponse(payload))
@@ -156,24 +145,26 @@ export async function searchJobs(
   return payload;
 }
 
-export async function pullJob(
+export async function getJob(
   jobId: string,
   fetcher: typeof fetch = fetch
 ): Promise<JobResponse> {
-  const request = { job_id: jobId } satisfies PullJobRequest;
-  const response = await fetcher('/api/v1/jobs/pull', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(request)
-  });
-  const payload: unknown = await response.json();
+  const response = await fetcher(
+    `/api/v1/job-details/${encodeURIComponent(jobId)}`
+  );
+  const payload = await jsonPayload(
+    response,
+    response.ok
+      ? '職缺資料服務回傳了無法辨識的內容。'
+      : '職缺資料服務回傳了無法辨識的錯誤。'
+  );
 
   if (!response.ok) {
     if (isErrorResponse(payload))
       throw new SearchApiError(payload.error.message, payload.request_id);
     throw new SearchApiError('職缺資料服務回傳了無法辨識的錯誤。');
   }
-  if (!isJobResponse(payload))
+  if (!isJobResponse(payload) || payload.job_id !== jobId)
     throw new SearchApiError('職缺資料服務回傳了無法辨識的內容。');
   return payload;
 }
@@ -186,15 +177,15 @@ export async function searchJobDetails(
     { query: query.trim(), location_code: [], duty_code: [] },
     fetcher
   );
-  const pulled = await Promise.allSettled(
+  const settled = await Promise.allSettled(
     search.result.map(async ({ job_id, rank }) =>
-      presentJob(await pullJob(job_id, fetcher), rank)
+      presentJob(await getJob(job_id, fetcher), rank)
     )
   );
-  const jobs = pulled.flatMap((result) =>
+  const jobs = settled.flatMap((result) =>
     result.status === 'fulfilled' ? [result.value] : []
   );
-  const failedCount = pulled.filter(
+  const failedCount = settled.filter(
     (result) => result.status === 'rejected'
   ).length;
 

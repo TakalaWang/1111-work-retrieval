@@ -59,6 +59,7 @@
         type="search"
         name="query"
         required
+        disabled={loading}
         maxlength="512"
         autocomplete="off"
         placeholder="輸入職務、技能或工作地點"
@@ -513,7 +514,7 @@
     }
 
     .spinner {
-      animation-duration: 1.5s;
+      animation: none;
     }
   }
 </style>
