@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build, validate, and trace a leakage-safe LLM evidence skill graph."""
+"""Reference-build, validate, and trace a leakage-safe LLM evidence graph."""
 
 from __future__ import annotations
 
@@ -13,31 +13,43 @@ import unicodedata
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+import boto3  # type: ignore[import-untyped]
 from pipeline_contract import (
     artifact_entry,
     atomic_json,
     exact_keys,
+    publish_s3_directory,
     read_json_object,
     require_sha256,
     sha256_file,
     verify_local_inventory,
+    verify_s3_inventory,
+    verify_s3_object,
 )
 
-TRAIN_CUTOFF = datetime.fromisoformat("2026-06-08T00:00:00+08:00")
 RELATION_TYPES = {
-    "ALTERNATIVE_TO",
-    "PREREQUISITE_OF",
-    "REQUIRES",
     "SPECIALIZATION_OF",
+    "RELATED_TO",
     "USED_WITH",
+}
+SPLIT_MANIFEST_KEYS = {
+    "schema_version",
+    "split_id",
+    "train_cutoff_exclusive",
+    "evaluation_start_inclusive",
+    "evaluation_end_exclusive",
+    "qrels_sha256",
 }
 EXTRACTION_MANIFEST_KEYS = {
     "schema_version",
     "complete",
     "model_id",
     "prompt_version",
+    "prompt_sha256",
+    "canonicalization_policy",
+    "oov_policy",
     "source_policy",
     "test_jd_used",
     "uses_ground_truth",
@@ -45,7 +57,15 @@ EXTRACTION_MANIFEST_KEYS = {
     "train_cutoff_exclusive",
     "max_source_timestamp",
     "source_jd_sha256",
+    "requests_sha256",
+    "responses_inventory_sha256",
     "evidence_sha256",
+    "source_records",
+    "processed_records",
+    "input_tokens",
+    "output_tokens",
+    "skill_rejections",
+    "relation_rejections",
 }
 EVIDENCE_KEYS = {
     "record_id",
@@ -56,6 +76,8 @@ EVIDENCE_KEYS = {
     "source_text_sha256",
     "skills",
     "relations",
+    "skill_rejection_count",
+    "relation_rejection_count",
 }
 GRAPH_FILES = {
     "jobs": "jobs.jsonl",
@@ -126,8 +148,26 @@ def _timestamp(value: object, name: str) -> datetime:
     return parsed
 
 
+def load_split_manifest(path: Path) -> tuple[dict[str, object], datetime]:
+    manifest = read_json_object(path, "evaluation split manifest")
+    exact_keys(manifest, SPLIT_MANIFEST_KEYS, "evaluation split manifest")
+    cutoff = _timestamp(manifest["train_cutoff_exclusive"], "train cutoff")
+    evaluation_start = _timestamp(manifest["evaluation_start_inclusive"], "evaluation start")
+    evaluation_end = _timestamp(manifest["evaluation_end_exclusive"], "evaluation end")
+    if (
+        manifest["schema_version"] != 1
+        or not isinstance(manifest["split_id"], str)
+        or not manifest["split_id"].strip()
+        or cutoff != evaluation_start
+        or evaluation_end <= evaluation_start
+    ):
+        raise RuntimeError("evaluation split time contract differs")
+    require_sha256(manifest["qrels_sha256"], "evaluation qrels SHA-256")
+    return manifest, cutoff
+
+
 def _load_extraction(
-    evidence_path: Path, manifest_path: Path
+    evidence_path: Path, manifest_path: Path, train_cutoff: datetime
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     manifest = read_json_object(manifest_path, "LLM extraction manifest")
     exact_keys(manifest, EXTRACTION_MANIFEST_KEYS, "LLM extraction manifest")
@@ -138,15 +178,28 @@ def _load_extraction(
         or manifest["test_jd_used"] is not False
         or manifest["uses_ground_truth"] is not False
         or manifest["uses_behavior_logs"] is not False
-        or manifest["train_cutoff_exclusive"] != TRAIN_CUTOFF.isoformat()
+        or _timestamp(manifest["train_cutoff_exclusive"], "extraction train cutoff") != train_cutoff
     ):
         raise RuntimeError("LLM extraction leakage policy is incompatible")
     for name in ("source_jd_sha256", "evidence_sha256"):
         require_sha256(manifest[name], name)
+    for name in ("prompt_sha256", "requests_sha256", "responses_inventory_sha256"):
+        require_sha256(manifest[name], name)
+    if (
+        manifest["canonicalization_policy"] != "open_surface_per_jd_llm_canonicalization_v1"
+        or manifest["oov_policy"] != "accept_open_surface_with_exact_train_jd_evidence"
+    ):
+        raise RuntimeError("LLM extraction OOV/canonicalization policy is incompatible")
+    for name in ("source_records", "processed_records", "input_tokens", "output_tokens"):
+        value = manifest[name]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise RuntimeError(f"{name} must be a non-negative integer")
+    if manifest["source_records"] != manifest["processed_records"]:
+        raise RuntimeError("LLM extraction is incomplete")
     if sha256_file(evidence_path) != manifest["evidence_sha256"]:
         raise RuntimeError("LLM evidence bytes differ from extraction manifest")
     maximum = _timestamp(manifest["max_source_timestamp"], "maximum source timestamp")
-    if maximum >= TRAIN_CUTOFF:
+    if maximum >= train_cutoff:
         raise RuntimeError("LLM evidence contains test-period JD data")
     if not isinstance(manifest["model_id"], str) or not manifest["model_id"].strip():
         raise RuntimeError("LLM extraction model_id is missing")
@@ -175,7 +228,7 @@ def _load_extraction(
             seen_records.add(record_id)
             seen_jobs.add(job_id)
             modified_at = _timestamp(raw["source_modified_at"], "source_modified_at")
-            if modified_at >= TRAIN_CUTOFF or modified_at > maximum:
+            if modified_at >= train_cutoff or modified_at > maximum:
                 raise RuntimeError("evidence row exceeds the train-only time boundary")
             observed_maximum = (
                 max(observed_maximum, modified_at) if observed_maximum else modified_at
@@ -188,6 +241,12 @@ def _load_extraction(
                 raise RuntimeError("evidence source_text SHA-256 differs")
             skills = _skills(raw["skills"], source_text)
             relations = _relations(raw["relations"], source_text, set(skills))
+            rejection_counts: dict[str, int] = {}
+            for name in ("skill_rejection_count", "relation_rejection_count"):
+                value = raw[name]
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise RuntimeError(f"{name} must be a non-negative integer")
+                rejection_counts[name] = value
             records.append(
                 {
                     "record_id": record_id,
@@ -197,16 +256,25 @@ def _load_extraction(
                     "source_text_sha256": expected_source_sha,
                     "skills": skills,
                     "relations": relations,
+                    **rejection_counts,
                 }
             )
     if not records or observed_maximum != maximum:
         raise RuntimeError("evidence is empty or maximum source timestamp differs")
+    rejection_totals = {
+        "skill_rejections": sum(record["skill_rejection_count"] for record in records),
+        "relation_rejections": sum(record["relation_rejection_count"] for record in records),
+    }
+    for name, total in rejection_totals.items():
+        declared = manifest[name]
+        if isinstance(declared, bool) or not isinstance(declared, int) or declared != total:
+            raise RuntimeError(f"{name} differs from evidence records")
     return manifest, records
 
 
 def _skills(value: object, source_text: str) -> dict[str, dict[str, str]]:
-    if not isinstance(value, list) or not value:
-        raise RuntimeError("evidence skills must be a non-empty array")
+    if not isinstance(value, list):
+        raise RuntimeError("evidence skills must be an array")
     parsed: dict[str, dict[str, str]] = {}
     for position, raw in enumerate(value):
         if not isinstance(raw, dict):
@@ -217,10 +285,20 @@ def _skills(value: object, source_text: str) -> dict[str, dict[str, str]]:
             f"skill {position}",
         )
         skill = _normalize(raw["canonical_name"], "canonical skill")
-        surface = _normalize(raw["surface"], "skill surface")
+        surface_value = raw["surface"]
+        surface = _normalize(surface_value, "skill surface")
         category = _normalize(raw["category"], "skill category")
         span = raw["evidence_span"]
-        if not isinstance(span, str) or not span or span not in source_text or skill in parsed:
+        if (
+            not isinstance(surface_value, str)
+            or not surface_value
+            or surface_value not in source_text
+            or not isinstance(span, str)
+            or not span
+            or span not in source_text
+            or surface_value not in span
+            or skill in parsed
+        ):
             raise RuntimeError("skill evidence is absent from source text or duplicated")
         parsed[skill] = {"surface": surface, "category": category, "evidence_span": span}
     return parsed
@@ -266,12 +344,14 @@ def build_graph(
     *,
     evidence_path: Path,
     extraction_manifest_path: Path,
+    split_manifest_path: Path,
     output: Path,
     minimum_support: int,
 ) -> dict[str, object]:
     if minimum_support < 1:
         raise ValueError("minimum_support must be positive")
-    extraction, records = _load_extraction(evidence_path, extraction_manifest_path)
+    split, train_cutoff = load_split_manifest(split_manifest_path)
+    extraction, records = _load_extraction(evidence_path, extraction_manifest_path, train_cutoff)
     if output.exists():
         raise RuntimeError("graph output already exists; builds never overwrite artifacts")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -377,18 +457,33 @@ def build_graph(
     report: dict[str, object] = {
         "schema_version": 1,
         "complete": True,
+        "publication_allowed": False,
+        "publication_gate": "pending_fixed_input_graph_ablation",
         "graph_schema_version": 1,
         "graph_kind": "llm-evidence-locked-typed-entity-graph",
         "source_policy": "train_jd_only",
         "test_jd_used": False,
         "uses_ground_truth": False,
         "uses_behavior_logs": False,
-        "train_cutoff_exclusive": TRAIN_CUTOFF.isoformat(),
+        "split_id": split["split_id"],
+        "split_manifest_sha256": sha256_file(split_manifest_path),
+        "train_cutoff_exclusive": train_cutoff.isoformat(),
         "max_source_timestamp": extraction["max_source_timestamp"],
         "source_jd_sha256": extraction["source_jd_sha256"],
         "evidence_sha256": extraction["evidence_sha256"],
         "model_id": extraction["model_id"],
         "prompt_version": extraction["prompt_version"],
+        "prompt_sha256": extraction["prompt_sha256"],
+        "canonicalization_policy": extraction["canonicalization_policy"],
+        "oov_policy": extraction["oov_policy"],
+        "requests_sha256": extraction["requests_sha256"],
+        "responses_inventory_sha256": extraction["responses_inventory_sha256"],
+        "source_records": extraction["source_records"],
+        "processed_records": extraction["processed_records"],
+        "input_tokens": extraction["input_tokens"],
+        "output_tokens": extraction["output_tokens"],
+        "skill_rejections": extraction["skill_rejections"],
+        "relation_rejections": extraction["relation_rejections"],
         "minimum_support": minimum_support,
         "maximum_traversal_hops": 1,
         "counts": counts,
@@ -402,7 +497,7 @@ def build_graph(
             for name in sorted(graph_paths)
         ]
         atomic_json(manifest_path, report)
-        validate_graph(build_root)
+        validate_graph(build_root, split_manifest_path)
         build_root.replace(output)
     except BaseException:
         shutil.rmtree(build_root, ignore_errors=True)
@@ -410,23 +505,39 @@ def build_graph(
     return report
 
 
-def validate_graph(output: Path) -> dict[str, object]:
+def validate_graph(output: Path, split_manifest_path: Path) -> dict[str, object]:
+    split, train_cutoff = load_split_manifest(split_manifest_path)
     manifest = read_json_object(output / "manifest.json", "skill graph manifest")
     expected_keys = {
         "schema_version",
         "complete",
+        "publication_allowed",
+        "publication_gate",
         "graph_schema_version",
         "graph_kind",
         "source_policy",
         "test_jd_used",
         "uses_ground_truth",
         "uses_behavior_logs",
+        "split_id",
+        "split_manifest_sha256",
         "train_cutoff_exclusive",
         "max_source_timestamp",
         "source_jd_sha256",
         "evidence_sha256",
         "model_id",
         "prompt_version",
+        "prompt_sha256",
+        "canonicalization_policy",
+        "oov_policy",
+        "requests_sha256",
+        "responses_inventory_sha256",
+        "source_records",
+        "processed_records",
+        "input_tokens",
+        "output_tokens",
+        "skill_rejections",
+        "relation_rejections",
         "minimum_support",
         "maximum_traversal_hops",
         "counts",
@@ -436,13 +547,23 @@ def validate_graph(output: Path) -> dict[str, object]:
     if (
         manifest["schema_version"] != 1
         or manifest["complete"] is not True
+        or manifest["publication_allowed"] is not False
+        or manifest["publication_gate"] != "pending_fixed_input_graph_ablation"
         or manifest["source_policy"] != "train_jd_only"
         or manifest["test_jd_used"] is not False
         or manifest["uses_ground_truth"] is not False
         or manifest["uses_behavior_logs"] is not False
-        or manifest["train_cutoff_exclusive"] != TRAIN_CUTOFF.isoformat()
-        or _timestamp(manifest["max_source_timestamp"], "max_source_timestamp") >= TRAIN_CUTOFF
+        or manifest["split_id"] != split["split_id"]
+        or manifest["split_manifest_sha256"] != sha256_file(split_manifest_path)
+        or _timestamp(manifest["train_cutoff_exclusive"], "graph train cutoff") != train_cutoff
+        or _timestamp(manifest["max_source_timestamp"], "max_source_timestamp") >= train_cutoff
         or manifest["maximum_traversal_hops"] != 1
+        or any(
+            isinstance(manifest[name], bool)
+            or not isinstance(manifest[name], int)
+            or manifest[name] < 0
+            for name in ("skill_rejections", "relation_rejections")
+        )
     ):
         raise RuntimeError("skill graph manifest policy differs")
     artifacts = verify_local_inventory(output, manifest["artifacts"])
@@ -502,10 +623,12 @@ def validate_graph(output: Path) -> dict[str, object]:
     }
 
 
-def trace_skill(output: Path, skill: str, limit: int) -> dict[str, object]:
+def trace_skill(
+    output: Path, split_manifest_path: Path, skill: str, limit: int
+) -> dict[str, object]:
     if not 1 <= limit <= 100:
         raise ValueError("trace limit must be between 1 and 100")
-    validate_graph(output)
+    validate_graph(output, split_manifest_path)
     canonical = _normalize(skill, "trace skill")
     job_edges = _read_jsonl(output / GRAPH_FILES["job_skills"], "job_skills")
     duty_edges = _read_jsonl(output / GRAPH_FILES["duty_skills"], "duty_skills")
@@ -514,12 +637,12 @@ def trace_skill(output: Path, skill: str, limit: int) -> dict[str, object]:
     jobs = [row for row in job_edges if row["skill"] == canonical][:limit]
     duties = sorted(
         (row for row in duty_edges if row["skill"] == canonical),
-        key=lambda row: (-float(row["weight"]), str(row["duty"])),
+        key=lambda row: (-cast(float, row["weight"]), str(row["duty"])),
     )[:limit]
     relations = sorted(
         (row for row in relation_edges if row["source"] == canonical or row["target"] == canonical),
         key=lambda row: (
-            -float(row["weight"]),
+            -cast(float, row["weight"]),
             str(row["source"]),
             str(row["type"]),
             str(row["target"]),
@@ -559,32 +682,114 @@ def trace_skill(output: Path, skill: str, limit: int) -> dict[str, object]:
     }
 
 
+def _graph_s3(
+    output: Path,
+    split_manifest_path: Path,
+    *,
+    bucket: str,
+    prefix: str,
+    expected_owner: str,
+    profile: str | None,
+    region: str,
+    publish: bool,
+) -> dict[str, object]:
+    validation = validate_graph(output, split_manifest_path)
+    if region != "us-west-2":
+        raise RuntimeError("skill graph S3 publication is pinned to us-west-2")
+    session = boto3.Session(profile_name=profile, region_name=region)
+    identity = session.client("sts").get_caller_identity()
+    if identity.get("Account") != expected_owner:
+        raise RuntimeError("AWS caller identity differs from expected S3 owner")
+    manifest_path = output / "manifest.json"
+    manifest_sha256 = sha256_file(manifest_path)
+    manifest = read_json_object(manifest_path, "skill graph manifest")
+    clean_prefix = prefix.strip("/")
+    if not clean_prefix or clean_prefix.rsplit("/", 1)[-1] != manifest_sha256:
+        raise RuntimeError("S3 prefix must end with the manifest SHA-256")
+    s3 = session.client("s3")
+    if publish:
+        return publish_s3_directory(
+            root=output,
+            bucket=bucket,
+            prefix=prefix,
+            expected_owner=expected_owner,
+            artifacts=manifest["artifacts"],
+            s3=s3,
+        )
+    artifacts = verify_local_inventory(output, manifest["artifacts"])
+    verify_s3_inventory(
+        bucket=bucket,
+        prefix=prefix,
+        expected_owner=expected_owner,
+        artifacts=artifacts,
+        s3=s3,
+    )
+    verify_s3_object(
+        bucket=bucket,
+        key=f"{clean_prefix}/manifest.json",
+        expected_owner=expected_owner,
+        expected_sha256=manifest_sha256,
+        expected_size=manifest_path.stat().st_size,
+        s3=s3,
+    )
+    return {
+        "passed": True,
+        "graph_sha256": validation["graph_sha256"],
+        "manifest_sha256": manifest_sha256,
+        "s3_prefix": f"s3://{bucket}/{clean_prefix}/",
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest="command", required=True)
     build = commands.add_parser("build")
     build.add_argument("--evidence", type=Path, required=True)
     build.add_argument("--extraction-manifest", type=Path, required=True)
+    build.add_argument("--split-manifest", type=Path, required=True)
     build.add_argument("--output", type=Path, required=True)
     build.add_argument("--minimum-support", type=int, default=20)
     verify = commands.add_parser("validate")
     verify.add_argument("--output", type=Path, required=True)
+    verify.add_argument("--split-manifest", type=Path, required=True)
     trace = commands.add_parser("trace")
     trace.add_argument("--output", type=Path, required=True)
+    trace.add_argument("--split-manifest", type=Path, required=True)
     trace.add_argument("--skill", required=True)
     trace.add_argument("--limit", type=int, default=20)
+    for name in ("publish-s3", "verify-s3"):
+        command = commands.add_parser(name)
+        command.add_argument("--output", type=Path, required=True)
+        command.add_argument("--split-manifest", type=Path, required=True)
+        command.add_argument("--bucket", required=True)
+        command.add_argument("--prefix", required=True)
+        command.add_argument("--expected-owner", default="378849533305")
+        command.add_argument("--profile")
+        command.add_argument("--region", default="us-west-2")
     args = parser.parse_args()
     if args.command == "build":
         result = build_graph(
             evidence_path=args.evidence,
             extraction_manifest_path=args.extraction_manifest,
+            split_manifest_path=args.split_manifest,
             output=args.output,
             minimum_support=args.minimum_support,
         )
     elif args.command == "validate":
-        result = validate_graph(args.output)
+        result = validate_graph(args.output, args.split_manifest)
+    elif args.command == "trace":
+        result = trace_skill(args.output, args.split_manifest, args.skill, args.limit)
     else:
-        result = trace_skill(args.output, args.skill, args.limit)
+        result = _graph_s3(
+            args.output,
+            args.split_manifest,
+            bucket=args.bucket,
+            prefix=args.prefix,
+            expected_owner=args.expected_owner,
+            profile=args.profile,
+            region=args.region,
+            publish=args.command == "publish-s3",
+        )
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
 
 

@@ -3,9 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from base64 import b64encode
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any, Protocol
+
+from botocore.exceptions import ClientError  # type: ignore[import-untyped]
 
 
 class StreamingBody(Protocol):
@@ -14,6 +17,10 @@ class StreamingBody(Protocol):
 
 class S3Reader(Protocol):
     def get_object(self, **kwargs: object) -> Mapping[str, object]: ...
+
+
+class S3Writer(S3Reader, Protocol):
+    def put_object(self, **kwargs: object) -> Mapping[str, object]: ...
 
 
 def sha256_file(path: Path) -> str:
@@ -142,7 +149,7 @@ def verify_s3_inventory(
         if body is None or not hasattr(body, "read"):
             raise RuntimeError(f"S3 artifact body is missing: {path}")
         digest = hashlib.sha256()
-        while chunk := body.read(8 * 1024 * 1024):  # type: ignore[union-attr]
+        while chunk := body.read(8 * 1024 * 1024):
             digest.update(chunk)
         if digest.hexdigest() != expected_sha:
             raise RuntimeError(f"S3 artifact SHA-256 differs: {path}")
@@ -177,7 +184,88 @@ def verify_s3_object(
     if body is None or not hasattr(body, "read"):
         raise RuntimeError(f"S3 artifact body is missing: {key}")
     digest = hashlib.sha256()
-    while chunk := body.read(8 * 1024 * 1024):  # type: ignore[union-attr]
+    while chunk := body.read(8 * 1024 * 1024):
         digest.update(chunk)
     if digest.hexdigest() != expected_sha256:
         raise RuntimeError(f"S3 artifact SHA-256 differs: {key}")
+
+
+def _put_immutable_file(
+    *,
+    path: Path,
+    bucket: str,
+    key: str,
+    expected_owner: str,
+    sha256: str,
+    s3: S3Writer,
+) -> None:
+    checksum = b64encode(bytes.fromhex(require_sha256(sha256, "upload SHA-256"))).decode()
+    try:
+        with path.open("rb") as body:
+            s3.put_object(
+                Bucket=bucket,
+                Key=key,
+                Body=body,
+                ExpectedBucketOwner=expected_owner,
+                IfNoneMatch="*",
+                ChecksumAlgorithm="SHA256",
+                ChecksumSHA256=checksum,
+                Metadata={"sha256": sha256},
+            )
+    except ClientError as error:
+        code = str(error.response.get("Error", {}).get("Code", ""))
+        if code not in {"PreconditionFailed", "412"}:
+            raise
+    verify_s3_object(
+        bucket=bucket,
+        key=key,
+        expected_owner=expected_owner,
+        expected_sha256=sha256,
+        expected_size=path.stat().st_size,
+        s3=s3,
+    )
+
+
+def publish_s3_directory(
+    *,
+    root: Path,
+    bucket: str,
+    prefix: str,
+    expected_owner: str,
+    artifacts: object,
+    s3: S3Writer,
+) -> dict[str, object]:
+    parsed = verify_local_inventory(root, artifacts)
+    manifest_path = root / "manifest.json"
+    if not manifest_path.is_file():
+        raise RuntimeError("publication requires manifest.json")
+    manifest_sha256 = sha256_file(manifest_path)
+    clean_prefix = prefix.strip("/")
+    if not clean_prefix or clean_prefix.rsplit("/", 1)[-1] != manifest_sha256:
+        raise RuntimeError("S3 prefix must end with the manifest SHA-256")
+    for artifact in parsed:
+        relative = artifact["path"]
+        if not isinstance(relative, str):
+            raise RuntimeError("artifact path is invalid")
+        _put_immutable_file(
+            path=root / relative,
+            bucket=bucket,
+            key=f"{clean_prefix}/{relative}",
+            expected_owner=expected_owner,
+            sha256=str(artifact["sha256"]),
+            s3=s3,
+        )
+    # The manifest is the commit marker and is intentionally uploaded last.
+    _put_immutable_file(
+        path=manifest_path,
+        bucket=bucket,
+        key=f"{clean_prefix}/manifest.json",
+        expected_owner=expected_owner,
+        sha256=manifest_sha256,
+        s3=s3,
+    )
+    return {
+        "manifest_sha256": manifest_sha256,
+        "object_count": len(parsed) + 1,
+        "s3_prefix": f"s3://{bucket}/{clean_prefix}/",
+    }
