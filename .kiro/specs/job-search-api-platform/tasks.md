@@ -39,8 +39,6 @@ These are intentionally not part of the scaffold and require their own approved 
       model, index, and runtime manifest exist; publish no retrieval metrics before then.
 - [ ] Configure GitHub production reviewers and repository variables, then perform and verify the
       first controlled rollout.
-- [ ] Resolve the external SonarCloud New Code Security Rating failure before declaring the
-      repository-wide quality gate complete.
 
 Do not satisfy these tasks with SQLite, test doubles in runtime code, legacy request aliases,
 experimental code copied from another repository, or an unverified fallback path.

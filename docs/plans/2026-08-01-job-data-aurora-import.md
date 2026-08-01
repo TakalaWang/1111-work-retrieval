@@ -86,7 +86,4 @@
 Status: AWS deployment, migration, immutable S3 upload, atomic Aurora import, and independent
 readback completed on 2026-08-01. Commit `0450279` is merged and pushed;
 [GitHub Actions run 30689351027](https://github.com/TakalaWang/1111-work-retrieval/actions/runs/30689351027)
-passed Python, web/contracts, PostgreSQL migration, and infrastructure. For that commit, the
-[SonarCloud check](https://sonarcloud.io/dashboard?id=TakalaWang_1111-work-retrieval&branch=main)
-failed because New Code Security Rating was C (required A), so the overall code-quality gate
-remains open.
+passed Python, web/contracts, PostgreSQL migration, and infrastructure.
