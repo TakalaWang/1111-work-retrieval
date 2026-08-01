@@ -74,8 +74,8 @@ jobs:
         run: |
           S3_PREFIX_LIST_IDS="$(aws ec2 describe-managed-prefix-lists \
             --filters \
-              "Name=owner-id,Values=AWS" \
-              "Name=prefix-list-name,Values=com.amazonaws.${AWS_REGION}.s3" \
+              Name=owner-id,Values=AWS \
+              Name=prefix-list-name,Values="com.amazonaws.${AWS_REGION}.s3" \
             --query 'PrefixLists[].PrefixListId' \
             --output json)"
           jq -e 'length == 1' <<<"$S3_PREFIX_LIST_IDS"
