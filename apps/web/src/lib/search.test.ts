@@ -4,6 +4,7 @@ import {
   presentJob,
   pullJob,
   SearchApiError,
+  searchJobDetails,
   searchJobs,
   serializeSearch
 } from './search';
@@ -164,5 +165,89 @@ describe('search API boundary', () => {
       skills: undefined,
       updatedAt: undefined
     });
+  });
+
+  it('keeps ranked jobs ordered when one pull request fails', async () => {
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      if (input === '/api/v1/jobs/search') {
+        return new Response(
+          JSON.stringify({
+            request_id: 'req_1',
+            result: [
+              { job_id: '20', rank: 1 },
+              { job_id: '10', rank: 2 },
+              { job_id: '30', rank: 3 }
+            ]
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+
+      const request = JSON.parse(String(init?.body)) as { job_id: string };
+      if (request.job_id === '10') {
+        return new Response(
+          JSON.stringify({
+            request_id: 'req_pull_failed',
+            error: {
+              code: 'job_not_found',
+              message: '找不到職缺。',
+              details: []
+            }
+          }),
+          { status: 404, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          job_id: request.job_id,
+          details: { 職務名稱: request.job_id === '20' ? '第一筆' : '第三筆' }
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    });
+
+    await expect(searchJobDetails(' 工程師 ', fetcher)).resolves.toEqual({
+      requestId: 'req_1',
+      failedCount: 1,
+      jobs: [
+        expect.objectContaining({ jobId: '20', rank: 1, title: '第一筆' }),
+        expect.objectContaining({ jobId: '30', rank: 3, title: '第三筆' })
+      ]
+    });
+  });
+
+  it('reports an error when every job detail request fails', async () => {
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      if (input === '/api/v1/jobs/search') {
+        return new Response(
+          JSON.stringify({
+            request_id: 'req_all_failed',
+            result: [
+              { job_id: '20', rank: 1 },
+              { job_id: '10', rank: 2 }
+            ]
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          request_id: 'req_pull_failed',
+          error: {
+            code: 'job_not_found',
+            message: '找不到職缺。',
+            details: []
+          }
+        }),
+        { status: 404, headers: { 'content-type': 'application/json' } }
+      );
+    });
+
+    await expect(searchJobDetails('工程師', fetcher)).rejects.toEqual(
+      new SearchApiError(
+        '找到職缺，但詳細資料目前無法載入。',
+        'req_all_failed'
+      )
+    );
   });
 });

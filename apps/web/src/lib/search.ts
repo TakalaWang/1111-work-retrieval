@@ -27,6 +27,12 @@ export interface PresentedJob {
   updatedAt?: string;
 }
 
+export interface JobSearchOutcome {
+  requestId: string;
+  jobs: PresentedJob[];
+  failedCount: number;
+}
+
 export class SearchApiError extends Error {
   constructor(
     message: string,
@@ -170,4 +176,38 @@ export async function pullJob(
   if (!isJobResponse(payload))
     throw new SearchApiError('職缺資料服務回傳了無法辨識的內容。');
   return payload;
+}
+
+export async function searchJobDetails(
+  query: string,
+  fetcher: typeof fetch = fetch
+): Promise<JobSearchOutcome> {
+  const search = await searchJobs(
+    { query: query.trim(), location_code: [], duty_code: [] },
+    fetcher
+  );
+  const pulled = await Promise.allSettled(
+    search.result.map(async ({ job_id, rank }) =>
+      presentJob(await pullJob(job_id, fetcher), rank)
+    )
+  );
+  const jobs = pulled.flatMap((result) =>
+    result.status === 'fulfilled' ? [result.value] : []
+  );
+  const failedCount = pulled.filter(
+    (result) => result.status === 'rejected'
+  ).length;
+
+  if (search.result.length > 0 && jobs.length === 0) {
+    throw new SearchApiError(
+      '找到職缺，但詳細資料目前無法載入。',
+      search.request_id
+    );
+  }
+
+  return {
+    requestId: search.request_id,
+    jobs,
+    failedCount
+  };
 }
