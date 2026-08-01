@@ -210,7 +210,7 @@ describe('platform stack', () => {
       '.logs',
       '.secretsmanager',
       '.sagemaker.runtime',
-      '.api.sagemaker',
+      '.sagemaker.api',
       '.ecs',
       '.ecs-agent',
       '.ecs-telemetry'
