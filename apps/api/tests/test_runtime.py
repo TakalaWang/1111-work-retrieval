@@ -1,99 +1,136 @@
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+
 import pytest
-from work_retrieval_api import runtime as runtime_module
-from work_retrieval_api.runtime import (
-    DeterministicSearchEngine,
-    runtime_from_environment,
+from work_retrieval_api.runtime import runtime_from_environment
+from work_retrieval_core import (
+    CandidateEvidence,
+    CandidateRequest,
+    RetrievalPorts,
+    RuntimeManifest,
+    SearchEngine,
+    SearchQuery,
 )
-from work_retrieval_core import SearchEngine, SearchQuery, SearchUnavailableError
-from work_retrieval_database import DatabaseSettings
 
 
-class StubJobReader:
-    def __init__(self, job_ids: tuple[str, ...]) -> None:
-        self.job_ids = job_ids
-        self.limits: list[int] = []
+class StubRetriever:
+    def __init__(self) -> None:
+        self.requests: list[CandidateRequest] = []
         self.closed = False
 
-    def first_job_ids(self, *, limit: int) -> tuple[str, ...]:
-        self.limits.append(limit)
-        return self.job_ids[:limit]
+    def retrieve(self, request: CandidateRequest, *, limit: int) -> tuple[CandidateEvidence, ...]:
+        del limit
+        self.requests.append(request)
+        return ()
 
     def close(self) -> None:
         self.closed = True
 
 
-def _job_ids(count: int = 10) -> tuple[str, ...]:
-    return tuple(str(index + 1) for index in range(count))
+def _manifest() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "artifacts": {
+            "embeddings/whole-qwen.f16": {
+                "kind": "embedding",
+                "sha256": "a" * 64,
+                "size_bytes": 42,
+            }
+        },
+    }
 
 
-def test_deterministic_search_returns_the_same_stable_slice() -> None:
-    engine = DeterministicSearchEngine(_job_ids())
+def _write_manifest(path: Path) -> None:
+    path.write_text(json.dumps(_manifest()), encoding="utf-8")
 
-    first = engine.search(SearchQuery("backend"), limit=3)
-    second = engine.search(
-        SearchQuery("different", location_codes=("taipei",), duty_codes=("engineering",)),
-        limit=3,
+
+def test_environment_runtime_uses_manifest_ports_and_demo_fixture(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "runtime.json"
+    _write_manifest(manifest_path)
+    lexical = StubRetriever()
+    dense = StubRetriever()
+    received: list[tuple[RuntimeManifest, bool]] = []
+
+    def port_factory(manifest: RuntimeManifest, enable_multiview: bool) -> RetrievalPorts:
+        received.append((manifest, enable_multiview))
+        return RetrievalPorts(lexical, dense)
+
+    engine = runtime_from_environment(
+        {
+            "SEARCH_RUNTIME_MANIFEST_PATH": str(manifest_path),
+            "SEARCH_DEMO_AS_OF": "2026-06-08",
+        },
+        port_factory=port_factory,
     )
-
-    assert first == second == ("1", "2", "3")
-
-
-def test_deterministic_search_rejects_invalid_seed_and_closed_use() -> None:
-    with pytest.raises(RuntimeError, match="exactly 10"):
-        DeterministicSearchEngine(_job_ids(9))
-    with pytest.raises(RuntimeError, match="non-empty and unique"):
-        DeterministicSearchEngine((*_job_ids(9), "1"))
-
-    engine = DeterministicSearchEngine(_job_ids())
-    engine.close()
-    engine.close()
-    with pytest.raises(SearchUnavailableError, match="closed"):
-        engine.search(SearchQuery("backend"), limit=10)
-
-
-def test_environment_runtime_uses_real_job_ids_and_owns_reader(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    settings = DatabaseSettings("db.internal", 5432, "work_retrieval", "service", "secret")
-    jobs = StubJobReader(_job_ids())
-    monkeypatch.setattr(
-        runtime_module.DatabaseSettings,
-        "from_environment",
-        classmethod(lambda cls: settings),
-    )
-    monkeypatch.setattr(
-        runtime_module.SqlAlchemyJobReader,
-        "from_settings",
-        classmethod(lambda cls, actual: jobs if actual is settings else None),
-    )
-
-    engine = runtime_from_environment()
+    result = engine.search(SearchQuery("工程師"), limit=10)
 
     assert isinstance(engine, SearchEngine)
-    assert jobs.limits == [10]
-    assert jobs.closed
-    assert engine.search(SearchQuery("ignored"), limit=10) == _job_ids()
+    assert len(received) == 1 and not received[0][1]
+    assert result.trace.as_of == datetime(2026, 6, 7, 16, tzinfo=UTC)
+    assert lexical.requests[0].minimum_updated_at == datetime(2025, 12, 9, 16, tzinfo=UTC)
+    engine.close()
+    assert lexical.closed and dense.closed
 
 
-def test_environment_runtime_fails_closed_and_closes_reader(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    settings = DatabaseSettings("db.internal", 5432, "work_retrieval", "service", "secret")
-    jobs = StubJobReader(_job_ids(9))
-    monkeypatch.setattr(
-        runtime_module.DatabaseSettings,
-        "from_environment",
-        classmethod(lambda cls: settings),
-    )
-    monkeypatch.setattr(
-        runtime_module.SqlAlchemyJobReader,
-        "from_settings",
-        classmethod(lambda cls, actual: jobs if actual is settings else None),
-    )
+def test_environment_runtime_requires_explicit_manifest_and_port_factory(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="SEARCH_RUNTIME_MANIFEST_PATH"):
+        runtime_from_environment({})
 
-    with pytest.raises(RuntimeError, match="exactly 10"):
-        runtime_from_environment()
+    manifest_path = tmp_path / "runtime.json"
+    _write_manifest(manifest_path)
+    with pytest.raises(RuntimeError, match="SEARCH_PORT_FACTORY"):
+        runtime_from_environment({"SEARCH_RUNTIME_MANIFEST_PATH": str(manifest_path)})
 
-    assert jobs.closed
+
+@pytest.mark.parametrize(
+    "value",
+    ["not-a-date", "2026-06-08T12:30:00", "2026-06-08 12:30:00"],
+)
+def test_demo_as_of_rejects_ambiguous_values(tmp_path: Path, value: str) -> None:
+    manifest_path = tmp_path / "runtime.json"
+    _write_manifest(manifest_path)
+    with pytest.raises(RuntimeError, match="SEARCH_DEMO_AS_OF"):
+        runtime_from_environment(
+            {
+                "SEARCH_RUNTIME_MANIFEST_PATH": str(manifest_path),
+                "SEARCH_DEMO_AS_OF": value,
+            },
+            port_factory=lambda manifest, enabled: RetrievalPorts(StubRetriever(), StubRetriever()),
+        )
+
+
+def test_multiview_feature_flag_is_strict(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "runtime.json"
+    _write_manifest(manifest_path)
+
+    def factory(manifest: RuntimeManifest, enabled: bool) -> RetrievalPorts:
+        del manifest, enabled
+        return RetrievalPorts(StubRetriever(), StubRetriever())
+
+    with pytest.raises(RuntimeError, match="must be true or false"):
+        runtime_from_environment(
+            {
+                "SEARCH_RUNTIME_MANIFEST_PATH": str(manifest_path),
+                "SEARCH_ENABLE_MULTIVIEW_MAXSIM": "1",
+            },
+            port_factory=factory,
+        )
+    with pytest.raises(RuntimeError, match="requires MaxSim"):
+        runtime_from_environment(
+            {
+                "SEARCH_RUNTIME_MANIFEST_PATH": str(manifest_path),
+                "SEARCH_MULTIVIEW_ARTIFACT_KEY": "indexes/maxsim.bin",
+            },
+            port_factory=factory,
+        )
+    with pytest.raises(RuntimeError, match="SEARCH_MULTIVIEW_ARTIFACT_KEY"):
+        runtime_from_environment(
+            {
+                "SEARCH_RUNTIME_MANIFEST_PATH": str(manifest_path),
+                "SEARCH_ENABLE_MULTIVIEW_MAXSIM": "true",
+            },
+            port_factory=factory,
+        )

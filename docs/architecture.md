@@ -1,7 +1,7 @@
 # System Architecture and Data Flow
 
-本文件描述 repository 現有的程式責任邊界與已部署 production flow。它不把暫時的 deterministic
-search engine 描述為正式 retrieval implementation。
+本文件分開描述 repository 的 search-core v2 source contract 與目前已部署 production flow；source
+完成不代表 image、GitOps rollout 或 live traffic 已更新。
 
 ## Delivery status
 
@@ -10,15 +10,15 @@ search engine 描述為正式 retrieval implementation。
 | Data plane               | `WorkRetrievalData` 已部署；Aurora 與完整職缺快照已完成 readback                                           |
 | Application plane        | `WorkRetrievalPlatform` 已部署；CloudFront、Web、ALB 與 CPU Fargate API 已通過 public smoke                |
 | Model plane              | Embedding 與 reranker SageMaker endpoints 均為 `InService`，runtime artifacts 已提升到 immutable S3 prefix |
-| Retrieval implementation | API 暫時固定回傳 Aurora 前十個 job ID；正式 normalization、ranking 與 model integration 尚未提供           |
+| Retrieval implementation | source 已提供 manifest-driven search-core v2；目前已部署 API 仍是舊 deterministic runtime，尚未 rollout 新 adapters |
 
 ## Source modules
 
 | Module                          | 唯一責任                                                               | 不負責                                   |
 | ------------------------------- | ---------------------------------------------------------------------- | ---------------------------------------- |
-| `apps/api`                      | HTTP validation、error envelope、lifecycle、request ID、OpenAPI        | ranking、database model、fallback engine |
+| `apps/api`                      | HTTP validation、runtime wiring、lifecycle、request ID、OpenAPI、audit header | ranking、database model、fallback engine |
 | `apps/web`                      | 呼叫相對 API path、顯示狀態、驗證不可信 response JSON                  | ranking 或 server-side data access       |
-| `packages/search-core`          | immutable query type 與 `SearchEngine` protocol                        | 具體 retrieval algorithm                 |
+| `packages/search-core`          | temporal eligibility、candidate ports、RRF fusion、freshness 與 audit trace | HTTP、artifact 下載、adapter 實作         |
 | `packages/database`             | authoritative SQLAlchemy `Job` model 與 PostgreSQL read repository     | HTTP schema                              |
 | `packages/contract`             | committed OpenAPI、generated TypeScript types、runtime manifest schema | runtime artifacts                        |
 | `database`                      | forward-only Alembic migration history                                 | application query logic                  |
@@ -49,12 +49,63 @@ GPU ECS capacity provider 與 service 已建立，但 capacity 與 desired count
 CPU Fargate service。S3 artifacts、embedding 與 reranker 已可用，但暫時 engine 尚未呼叫它們。正式
 `SearchEngine` 必須顯式整合 normalization、retrieval、reranking 與 lineage，不得靜默 fallback。
 
+## Search-core v2 source flow
+
+```mermaid
+flowchart TD
+    Request["Validated search request"] --> Clock["Resolve request-time as_of"]
+    Clock --> Eligible["Compile eligible_from = as_of - 180 days"]
+    Eligible --> Filters["Location, duty, temporal filters before each lane Top-K"]
+    Filters --> BM25["Tantivy BM25 over title + full JD description"]
+    Filters --> Dense["Qwen whole-document dense retrieval"]
+    Filters --> Multi{"Multi-view MaxSim explicitly enabled?"}
+    Multi -->|"Yes, artifact and port both present"| MaxSim["Qwen multi-view MaxSim"]
+    Multi -->|"No"| Disabled["Trace disabled reason"]
+    BM25 --> Fusion["Bounded reciprocal-rank fusion"]
+    Dense --> Fusion
+    MaxSim --> Fusion
+    Fusion --> Freshness["Freshness tie-break; future rows retained with score 0"]
+    Freshness --> Validate["Fail-closed result and trace validation"]
+    Disabled --> Validate
+    Validate --> Response["Top 10 + X-Search-Audit JSON"]
+```
+
+`as_of` 每次 request 才解析；production 未設定 override 時使用當下 UTC。Competition Demo 可明確設定
+`SEARCH_DEMO_AS_OF=2026-06-08`，date-only 值以 `Asia/Taipei` 當日 00:00 解讀。時間 eligibility 只設定
+下界，不設定上界，因此 `source_modified_at > as_of` 的資料仍可被召回，但 freshness 必須是 `0`。
+
+每個 candidate adapter 都收到同一個 `CandidateRequest`，其中包含 `minimum_updated_at`、location 與 duty
+codes，且正式 ports 明確命名為 `lexical_full_jd` 與 `dense_whole_jd`。Adapter 必須在 Top-K 前套用三種
+filters；engine 在 fusion 前再拒絕任何早於時間下界的 evidence。BM25 view 必須包含 `title`、`description`
+與其餘可檢索 JD 欄位，dense view 則以完整 JD 建立單一 Qwen whole-document embedding。
+
+Lexical 與 whole-document dense 是必要 lane，request-time 平行執行；任一 lane 失敗就回傳 503，不會只用
+另一 lane 產生看似成功的結果。融合只使用 bounded RRF，freshness 只在相同融合分數時決定順序，不覆蓋
+query relevance。
+
+Multi-view MaxSim 必須同時滿足明確 environment feature flag、immutable manifest artifact entry 與 runtime
+port 三個條件；缺少任一項會在 startup fail closed。Graph、reranker、LTR 與 guardrail 尚未取得可發布
+calibration，正式 source 沒有啟用入口，實際 disabled reason 會保留在每次 audit trace。
+
+Runtime 啟動需要：
+
+- `SEARCH_RUNTIME_MANIFEST_PATH`：local immutable manifest path，沿用 committed schema version `1`。
+- `SEARCH_PORT_FACTORY=module:callable`：建立 Tantivy/Qwen ports 的 deployment-owned factory。
+- `SEARCH_ENABLE_MULTIVIEW_MAXSIM=true|false`：唯一的 MaxSim 開關，預設 `false`。
+- `SEARCH_MULTIVIEW_ARTIFACT_KEY`：只在 MaxSim 開啟時必填，且必須存在於 manifest。
+- `SEARCH_DEMO_AS_OF`：只供固定 Demo / fixture 使用；production 應省略。
+
+Repository 不攜帶 1.2M 職缺、embedding 或 model。Adapter 與 artifacts 由 deployment 提供；環境缺少
+manifest/factory、manifest 含未知欄位、artifact 不一致或 port output 違約，都會停止服務而非 fallback。
+API JSON body 維持既有 `request_id + result` contract，逐職缺的 lane rank、RRF contribution、freshness、
+source timestamp 與所有 lane 狀態放在 `X-Search-Audit` JSON header；header 超過 7 KiB 會 fail closed。
+
 ### API lifecycle
 
-1. Application startup 初始化 PostgreSQL repository 與暫時 engine；任一失敗就中止，不選替代 engine。
+1. Application startup 驗證 runtime manifest 並由指定 factory 建立 retrieval ports；任一失敗就中止。
 2. FastAPI 在 trust boundary 驗證 body 大小、media type、query 與 filters。
 3. Async route 透過 worker thread 呼叫同步 `SearchEngine.search(query, limit=10)`。
-4. API 再驗證結果最多十筆、job ID 為 ASCII decimal、沒有重複且 rank 連續。
+4. API 驗證結果最多十筆、job ID 為 ASCII decimal、沒有重複、trace 對應相同排序且大小受限。
 5. Browser 對 response JSON 執行相同的不可信邊界驗證。
 6. Shutdown 只關閉該 engine 一次。
 
