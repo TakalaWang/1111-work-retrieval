@@ -11,7 +11,7 @@ from work_retrieval_core import SearchQuery, SearchUnavailableError
 
 
 class FakeEngine:
-    def __init__(self, result: tuple[str, ...] = ("job-2", "job-1")) -> None:
+    def __init__(self, result: tuple[str, ...] = ("2", "1")) -> None:
         self.result = result
         self.queries: list[tuple[SearchQuery, int]] = []
         self.closed = False
@@ -58,8 +58,8 @@ def test_valid_request_maps_to_engine_and_returns_closed_shape(
     assert set(body) == {"request_id", "result"}
     assert body["request_id"].startswith("req_")
     assert body["result"] == [
-        {"job_id": "job-2", "rank": 1},
-        {"job_id": "job-1", "rank": 2},
+        {"job_id": "2", "rank": 1},
+        {"job_id": "1", "rank": 2},
     ]
     assert response.headers["X-Request-Id"] == body["request_id"]
     assert engine.queries == [(SearchQuery("後端工程師", ("100100",), ("140200",)), 10)]
@@ -168,7 +168,7 @@ def test_unavailable_and_contract_violations_fail_closed(
     )
 
     engine.error = None
-    engine.result = ("duplicate", "duplicate")
+    engine.result = ("1", "1")
     with client() as http:
         invalid = http.post("/api/v1/jobs/search", json={"query": "工程師"})
     assert invalid.status_code == 500
@@ -178,9 +178,11 @@ def test_unavailable_and_contract_violations_fail_closed(
 @pytest.mark.parametrize(
     "invalid_result",
     [
-        ["job-1"],
-        tuple(f"job-{index}" for index in range(11)),
+        ["1"],
+        tuple(str(index) for index in range(11)),
         ("",),
+        ("job-1",),
+        ("\uff11\uff12\uff13",),
         (1,),
     ],
 )

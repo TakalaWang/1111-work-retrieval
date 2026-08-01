@@ -34,6 +34,7 @@ standard library, platform, or an existing dependency already covers the require
 
 ```bash
 uv run ruff check .
+uv run ruff format --check .
 uv run mypy
 uv run pytest
 uv run python -m work_retrieval_api.export_openapi packages/contract/openapi.json --check

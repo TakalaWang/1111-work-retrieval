@@ -2,6 +2,7 @@ import {
   Aws,
   CfnOutput,
   CfnParameter,
+  DefaultStackSynthesizer,
   RemovalPolicy,
   Stack,
   type StackProps
@@ -335,7 +336,15 @@ export class PlatformStack extends Stack {
     githubRole.addToPolicy(
       new iam.PolicyStatement({
         actions: ['sts:AssumeRole'],
-        resources: [`arn:${Aws.PARTITION}:iam::${Aws.ACCOUNT_ID}:role/cdk-*`]
+        resources: [
+          'deploy-role',
+          'file-publishing-role',
+          'image-publishing-role',
+          'lookup-role'
+        ].map(
+          (role) =>
+            `arn:${Aws.PARTITION}:iam::${Aws.ACCOUNT_ID}:role/cdk-${DefaultStackSynthesizer.DEFAULT_QUALIFIER}-${role}-${Aws.ACCOUNT_ID}-${Aws.REGION}`
+        )
       })
     );
     githubRole.addToPolicy(

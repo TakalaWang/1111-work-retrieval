@@ -138,5 +138,14 @@ describe('platform stack', () => {
     const policies = JSON.stringify(template.findResources('AWS::IAM::Policy'));
     expect(policies).toContain('s3:DeleteObject');
     expect(policies).toContain('cloudfront:CreateInvalidation');
+    expect(policies).not.toContain('role/cdk-*');
+    for (const role of [
+      'deploy-role',
+      'file-publishing-role',
+      'image-publishing-role',
+      'lookup-role'
+    ]) {
+      expect(policies).toContain(`cdk-hnb659fds-${role}`);
+    }
   });
 });

@@ -19,7 +19,8 @@ out of scope until it is promoted through a separate, evidence-backed change.
   values are trimmed, non-empty, de-duplicated, and retain first-seen order.
 - Unknown fields and legacy aliases are rejected. JSON bodies are limited to 16 KiB and other
   media types return `415`.
-- Successful responses contain `request_id` and at most ten unique, consecutively ranked job IDs.
+- Successful responses contain `request_id` and at most ten unique, consecutively ranked ASCII
+  decimal job IDs from the authoritative snapshot.
 - Every failure uses the shared error envelope and does not expose exceptions, SQL, or paths.
 - Access logs record metadata and latency, never query text.
 - `GET /healthz`, `GET /readyz`, and `GET /openapi.json` remain available.

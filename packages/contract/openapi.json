@@ -113,6 +113,7 @@
             "items": {
               "$ref": "#/components/schemas/SearchResultItem"
             },
+            "maxItems": 10,
             "title": "Result",
             "type": "array"
           }
@@ -128,6 +129,7 @@
         "additionalProperties": false,
         "properties": {
           "job_id": {
+            "pattern": "^[0-9]+$",
             "title": "Job Id",
             "type": "string"
           },

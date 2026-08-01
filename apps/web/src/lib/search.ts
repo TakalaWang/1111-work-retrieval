@@ -37,18 +37,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isSearchResponse(value: unknown): value is SearchResponse {
-  return (
-    isRecord(value) &&
-    typeof value.request_id === 'string' &&
-    Array.isArray(value.result) &&
-    value.result.every(
-      (item) =>
-        isRecord(item) &&
-        typeof item.job_id === 'string' &&
-        typeof item.rank === 'number' &&
-        Number.isInteger(item.rank)
+  if (
+    !isRecord(value) ||
+    typeof value.request_id !== 'string' ||
+    !Array.isArray(value.result) ||
+    value.result.length > 10
+  )
+    return false;
+
+  const jobIds = new Set<string>();
+  return value.result.every((item, index) => {
+    if (
+      !isRecord(item) ||
+      typeof item.job_id !== 'string' ||
+      !/^[0-9]+$/u.test(item.job_id) ||
+      item.rank !== index + 1 ||
+      jobIds.has(item.job_id)
     )
-  );
+      return false;
+    jobIds.add(item.job_id);
+    return true;
+  });
 }
 
 function isErrorResponse(value: unknown): value is ErrorResponse {
@@ -77,6 +86,17 @@ export function serializeSearch(form: SearchForm): SearchRequest {
   };
 }
 
+async function jsonPayload(
+  response: Response,
+  invalidMessage: string
+): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch {
+    throw new SearchApiError(invalidMessage);
+  }
+}
+
 export async function searchJobs(
   request: SearchRequest,
   fetcher: typeof fetch = fetch
@@ -86,7 +106,12 @@ export async function searchJobs(
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(request)
   });
-  const payload: unknown = await response.json();
+  const payload = await jsonPayload(
+    response,
+    response.ok
+      ? '搜尋服務回傳了無法辨識的內容。'
+      : '搜尋服務回傳了無法辨識的錯誤。'
+  );
 
   if (!response.ok) {
     if (isErrorResponse(payload))
