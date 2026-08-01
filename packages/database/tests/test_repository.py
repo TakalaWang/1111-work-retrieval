@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import datetime
 from unittest.mock import MagicMock
 
 import pytest
@@ -95,57 +95,42 @@ def test_reader_connections_use_null_pool_require_tls_and_bound_query_time(
     assert create_engine.call_args.kwargs["poolclass"] is NullPool
 
 
-def test_reader_uses_one_session_per_call_and_orders_seed_ids_by_lineage() -> None:
+def test_reader_fetches_exact_metadata_for_batch_revalidation() -> None:
     engine = MagicMock(spec=Engine)
     session = _session()
-    session.scalars.return_value.all.return_value = ["job-1", "job-2"]
+    timestamp = datetime(2026, 6, 8, 12, 30)
+    session.execute.return_value.all.return_value = [
+        ("1", "台北市", "資訊", "軟體", "後端", timestamp)
+    ]
     reader = SqlAlchemyJobReader(engine, session_factory=lambda: session)
 
-    assert reader.eligible_job_ids(search_date=date(2026, 6, 8), limit=2) == (
-        "job-1",
-        "job-2",
-    )
-    statement = session.scalars.call_args.args[0]
-    compiled = statement.compile(compile_kwargs={"literal_binds": True})
-    assert "jobs.source_modified_at >= '2025-12-08 00:00:00'" in str(compiled)
-    assert "jobs.source_modified_at < '2026-06-09 00:00:00'" in str(compiled)
-    assert "ORDER BY jobs.source_row" in str(statement)
-    assert "LIMIT" in str(statement)
+    records = reader.metadata_for_job_ids(("1", "2"))
+
+    assert len(records) == 1
+    assert records[0].job_id == "1"
+    assert records[0].source_modified_at == timestamp
+    statement = session.execute.call_args.args[0]
+    assert "jobs.work_city" in str(statement)
+    assert "jobs.source_modified_at" in str(statement)
 
 
-@pytest.mark.parametrize(
-    ("search_date", "expected_start"),
-    [
-        (date(2024, 8, 31), datetime(2024, 2, 29)),
-        (date(2025, 8, 31), datetime(2025, 2, 28)),
-        (date(2026, 6, 8), datetime(2025, 12, 8)),
-    ],
-)
-def test_calendar_month_window_clamps_month_end(
-    search_date: date, expected_start: datetime
-) -> None:
-    assert repository.search_window(search_date) == (
-        expected_start,
-        datetime.combine(search_date, datetime.min.time()) + repository.ONE_DAY,
-    )
+def test_metadata_batch_rejects_invalid_identifiers_before_querying() -> None:
+    engine = MagicMock(spec=Engine)
+    session_factory = MagicMock()
+    reader = SqlAlchemyJobReader(engine, session_factory=session_factory)
 
+    for job_ids in (("1", "1"), ("job-1",), ("\uff11\uff12",)):
+        with pytest.raises(ValueError, match="ASCII decimal"):
+            reader.metadata_for_job_ids(job_ids)
 
-def test_search_window_accepts_supported_date_boundaries() -> None:
-    assert repository.search_window(date(1, 7, 1)) == (
-        datetime(1, 1, 1),
-        datetime(1, 7, 2),
-    )
-    assert repository.search_window(date(9999, 12, 30)) == (
-        datetime(9999, 6, 30),
-        datetime(9999, 12, 31),
-    )
+    assert reader.metadata_for_job_ids(()) == ()
+    session_factory.assert_not_called()
 
 
 def test_reader_returns_exact_job_details_or_none() -> None:
     engine = MagicMock(spec=Engine)
     session = _session()
     job = MagicMock()
-    job.job_id = "53256270"
     job.title = "後端工程師"
     job.work_city = "台北市"
     job.salary_text = "月薪 55,000 元"
@@ -179,22 +164,14 @@ def test_reader_returns_exact_job_details_or_none() -> None:
 def test_reader_wraps_database_errors_and_disposes_its_engine() -> None:
     engine = MagicMock(spec=Engine)
     session = _session()
-    session.scalars.side_effect = OperationalError("private SQL", {}, RuntimeError("secret"))
+    session.execute.side_effect = OperationalError("private SQL", {}, RuntimeError("secret"))
     reader = SqlAlchemyJobReader(engine, session_factory=lambda: session)
 
-    with pytest.raises(JobStoreUnavailableError, match="PostgreSQL job lookup failed") as caught:
-        reader.eligible_job_ids(search_date=date(2026, 6, 8), limit=10)
+    with pytest.raises(
+        JobStoreUnavailableError, match="PostgreSQL job metadata lookup failed"
+    ) as caught:
+        reader.metadata_for_job_ids(("1",))
     assert "private SQL" not in str(caught.value)
 
     reader.close()
     engine.dispose.assert_called_once_with()
-
-
-def test_reader_rejects_non_positive_limits_without_querying() -> None:
-    engine = MagicMock(spec=Engine)
-    session_factory = MagicMock()
-    reader = SqlAlchemyJobReader(engine, session_factory=session_factory)
-
-    with pytest.raises(ValueError, match="positive integer"):
-        reader.eligible_job_ids(search_date=date(2026, 6, 8), limit=0)
-    session_factory.assert_not_called()

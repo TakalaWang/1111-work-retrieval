@@ -2,7 +2,7 @@
   import { ApiError, searchJobDetails } from '$lib/search';
 
   let query = $state('');
-  let searchDate = $state('');
+  let searchDate = $state('2026-06-08');
   let loading = $state(false);
   let searched = $state(false);
   /** @type {import('$lib/search').PresentedJob[]} */
@@ -82,7 +82,7 @@
       </button>
     </form>
     <div class="controls">
-      <label for="search-date">搜尋日期</label>
+      <label for="search-date">搜尋日期（競賽 Demo）</label>
       <input
         id="search-date"
         bind:value={searchDate}

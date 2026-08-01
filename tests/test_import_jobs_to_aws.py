@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -25,6 +26,7 @@ def test_import_contract_is_fixed_to_the_verified_snapshot() -> None:
     assert importer.SOURCE_BYTES == 1_285_945_103
     assert importer.SOURCE_ROWS == 1_218_635
     assert importer.SOURCE_CHECKSUM_SHA256 == ("U5N/e/B2eJxM1+O+NPuJh1M2EI1XcHtakxghgeEIcIk=")
+    assert int(importer.SOURCE_SHA256[:16], 16) == importer.IMPORT_ADVISORY_LOCK_ID
     assert len(importer.SOURCE_HEADER) == 39
     assert importer.SOURCE_HEADER[0] == "職缺編號"
     assert importer.SOURCE_HEADER[-1] == "職缺最後修改時間"
@@ -82,20 +84,32 @@ def test_validate_source_rejects_bad_rows(
         importer.validate_source(source)
 
 
-def test_import_and_replace_sql_are_bulk_atomic_and_lossless() -> None:
-    import_sql = importer.import_sql("private-bucket")
-    replace_sql = importer.replace_sql()
+def test_import_and_replace_sql_is_advisory_locked_atomic_and_lossless() -> None:
+    sql = importer.import_and_replace_sql("private-bucket")
 
-    assert "aws_s3.table_import_from_s3" in import_sql
-    assert importer.object_key() in import_sql
-    assert "jobs_import" in import_sql
-    assert "HEADER true" in import_sql
-    assert "TRUNCATE jobs" in replace_sql
-    assert "INSERT INTO jobs" in replace_sql
-    assert "DROP TABLE jobs_import" in replace_sql
-    assert "::numeric(12, 2)" in replace_sql
-    assert "::timestamp without time zone" in replace_sql
-    assert "NULLIF(NULLIF(" in replace_sql
+    assert "aws_s3.table_import_from_s3" in sql
+    assert importer.object_key() in sql
+    assert "jobs_import" in sql
+    assert "HEADER true" in sql
+    assert "TRUNCATE jobs" in sql
+    assert "INSERT INTO jobs" in sql
+    assert "DROP TABLE jobs_import" in sql
+    assert "COMMENT ON TABLE jobs IS" in sql
+    assert "jobs_invalidate_source_identity" in sql
+    assert "COMMENT ON TABLE public.jobs IS NULL" in sql
+    assert "AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE" in sql
+    assert f"pg_try_advisory_xact_lock({importer.IMPORT_ADVISORY_LOCK_ID})" in sql
+    assert sql.index("pg_try_advisory_xact_lock") < sql.index("DROP TABLE IF EXISTS jobs_import")
+    assert "another verified jobs import already holds the advisory lock" in sql
+    function_body = re.search(r"AS \$function\$(.*?)\$function\$", sql, re.DOTALL)
+    assert function_body is not None
+    assert function_body.group(1) == importer.INTEGRITY_GUARD_BODY
+    assert importer.INTEGRITY_GUARD_BODY in importer.final_stats_sql()
+    assert importer.SOURCE_IDENTITY in sql
+    assert "::numeric(12, 2)" in sql
+    assert "::timestamp without time zone" in sql
+    assert "NULLIF(NULLIF(" in sql
+    assert sql.count("inserted_count bigint;") == 1
 
 
 @pytest.mark.parametrize("stored_checksum", [None, "forged-checksum"])
@@ -236,3 +250,150 @@ def test_polling_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
         )
 
     assert attempts == 2
+
+
+def test_matching_database_snapshot_skips_destructive_reimport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "jobs.csv"
+    source.write_bytes(b"verified")
+    executed: list[str] = []
+
+    monkeypatch.setattr(importer, "validate_source", lambda _: None)
+    monkeypatch.setattr(importer, "verify_account", lambda: None)
+    monkeypatch.setattr(
+        importer,
+        "stack_outputs",
+        lambda: ("bucket", "cluster", "secret"),
+    )
+    monkeypatch.setattr(importer, "ensure_source_object", lambda *_: None)
+    monkeypatch.setattr(
+        importer,
+        "query_one",
+        lambda _cluster, _secret, sql: (
+            {"version_num": importer.ALEMBIC_REVISION}
+            if "alembic_version" in sql
+            else {
+                "row_count": importer.SOURCE_ROWS,
+                "distinct_job_ids": importer.SOURCE_ROWS,
+                "min_source_row": 0,
+                "max_source_row": importer.SOURCE_ROWS - 1,
+                "source_identity": importer.SOURCE_IDENTITY,
+                "integrity_guard": True,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        importer,
+        "execute_sql",
+        lambda _cluster, _secret, sql, **_: executed.append(sql),
+    )
+
+    importer.run(source)
+
+    assert executed == []
+
+
+def test_same_shape_database_with_different_source_is_reimported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "jobs.csv"
+    source.write_bytes(b"verified")
+    executed: list[str] = []
+    queries = 0
+
+    monkeypatch.setattr(importer, "validate_source", lambda _: None)
+    monkeypatch.setattr(importer, "verify_account", lambda: None)
+    monkeypatch.setattr(importer, "stack_outputs", lambda: ("bucket", "cluster", "secret"))
+    monkeypatch.setattr(importer, "ensure_source_object", lambda *_: None)
+
+    def fake_query(_cluster: str, _secret: str, sql: str) -> dict[str, object]:
+        nonlocal queries
+        queries += 1
+        if "alembic_version" in sql:
+            return {"version_num": importer.ALEMBIC_REVISION}
+        return {
+            "row_count": importer.SOURCE_ROWS,
+            "distinct_job_ids": importer.SOURCE_ROWS,
+            "min_source_row": 0,
+            "max_source_row": importer.SOURCE_ROWS - 1,
+            "source_identity": ("sha256:different" if queries == 2 else importer.SOURCE_IDENTITY),
+            "integrity_guard": True,
+        }
+
+    monkeypatch.setattr(importer, "query_one", fake_query)
+    monkeypatch.setattr(
+        importer,
+        "execute_sql",
+        lambda _cluster, _secret, sql, **_: executed.append(sql),
+    )
+    monkeypatch.setattr(
+        importer,
+        "wait_for",
+        lambda _cluster, _secret, _sql, _accepted, _operation: {
+            "row_count": importer.SOURCE_ROWS,
+            "distinct_job_ids": importer.SOURCE_ROWS,
+            "min_source_row": 0,
+            "max_source_row": importer.SOURCE_ROWS - 1,
+            "source_identity": importer.SOURCE_IDENTITY,
+            "integrity_guard": True,
+        },
+    )
+
+    importer.run(source)
+
+    assert any("TRUNCATE jobs" in sql for sql in executed)
+    imports = [sql for sql in executed if "aws_s3.table_import_from_s3" in sql]
+    assert len(imports) == 1
+    assert "pg_try_advisory_xact_lock" in imports[0]
+
+
+def test_matching_marker_without_integrity_guard_is_reimported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "jobs.csv"
+    source.write_bytes(b"verified")
+    executed: list[str] = []
+    final_checks = 0
+
+    monkeypatch.setattr(importer, "validate_source", lambda _: None)
+    monkeypatch.setattr(importer, "verify_account", lambda: None)
+    monkeypatch.setattr(importer, "stack_outputs", lambda: ("bucket", "cluster", "secret"))
+    monkeypatch.setattr(importer, "ensure_source_object", lambda *_: None)
+
+    def fake_query(_cluster: str, _secret: str, sql: str) -> dict[str, object]:
+        nonlocal final_checks
+        if "alembic_version" in sql:
+            return {"version_num": importer.ALEMBIC_REVISION}
+        final_checks += 1
+        return {
+            "row_count": importer.SOURCE_ROWS,
+            "distinct_job_ids": importer.SOURCE_ROWS,
+            "min_source_row": 0,
+            "max_source_row": importer.SOURCE_ROWS - 1,
+            "source_identity": importer.SOURCE_IDENTITY,
+            "integrity_guard": final_checks > 1,
+        }
+
+    monkeypatch.setattr(importer, "query_one", fake_query)
+    monkeypatch.setattr(
+        importer,
+        "execute_sql",
+        lambda _cluster, _secret, sql, **_: executed.append(sql),
+    )
+    monkeypatch.setattr(
+        importer,
+        "wait_for",
+        lambda _cluster, _secret, _sql, _accepted, _operation: {
+            "row_count": importer.SOURCE_ROWS,
+            "distinct_job_ids": importer.SOURCE_ROWS,
+            "min_source_row": 0,
+            "max_source_row": importer.SOURCE_ROWS - 1,
+            "source_identity": importer.SOURCE_IDENTITY,
+            "integrity_guard": True,
+        },
+    )
+
+    importer.run(source)
+
+    assert any("TRUNCATE jobs" in sql for sql in executed)

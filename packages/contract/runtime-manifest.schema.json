@@ -4,44 +4,391 @@
   "title": "Work Retrieval Runtime Manifest",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "artifacts"],
+  "required": [
+    "schema_version",
+    "release",
+    "retrieval_policy",
+    "incumbents",
+    "challengers",
+    "artifacts"
+  ],
   "properties": {
-    "schema_version": {
-      "const": 1
+    "schema_version": { "const": 2 },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "complete",
+        "publication_allowed",
+        "release_spec_sha256",
+        "source_manifest_sha256",
+        "selected_inventory_sha256",
+        "artifact_inventory_sha256",
+        "object_count",
+        "size_bytes"
+      ],
+      "properties": {
+        "complete": { "const": true },
+        "publication_allowed": { "const": true },
+        "release_spec_sha256": { "$ref": "#/$defs/sha256" },
+        "source_manifest_sha256": { "$ref": "#/$defs/sha256" },
+        "selected_inventory_sha256": { "$ref": "#/$defs/sha256" },
+        "artifact_inventory_sha256": { "$ref": "#/$defs/sha256" },
+        "object_count": { "type": "integer", "minimum": 1 },
+        "size_bytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "retrieval_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["as_of", "eligibility"],
+      "properties": {
+        "as_of": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["production_mode", "demo_reference"],
+          "properties": {
+            "production_mode": { "const": "request_time" },
+            "demo_reference": {
+              "const": "2026-06-08T23:59:59.999+08:00"
+            }
+          }
+        },
+        "eligibility": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "updated_within_days",
+            "future_jobs",
+            "stale_jobs",
+            "applied_before_retrieval"
+          ],
+          "properties": {
+            "updated_within_days": { "const": 180 },
+            "future_jobs": { "const": "retained_with_zero_freshness" },
+            "stale_jobs": { "const": "exclude" },
+            "applied_before_retrieval": { "const": true }
+          }
+        }
+      }
+    },
+    "incumbents": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["whole_embedding", "temporal_tantivy"],
+      "properties": {
+        "whole_embedding": { "$ref": "#/$defs/wholeEmbedding" },
+        "temporal_tantivy": { "$ref": "#/$defs/temporalTantivy" }
+      }
+    },
+    "challengers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "multiview_embedding",
+        "skill_graph",
+        "semantic_reranker",
+        "learning_to_rank",
+        "guardrails"
+      ],
+      "properties": {
+        "multiview_embedding": { "$ref": "#/$defs/multiviewEmbedding" },
+        "skill_graph": { "$ref": "#/$defs/disabled" },
+        "semantic_reranker": { "$ref": "#/$defs/disabled" },
+        "learning_to_rank": { "$ref": "#/$defs/disabled" },
+        "guardrails": { "$ref": "#/$defs/disabled" }
+      }
     },
     "artifacts": {
       "type": "object",
       "minProperties": 1,
-      "propertyNames": {
-        "allOf": [
-          {
-            "pattern": "^(embeddings|models|indexes)/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+$"
-          },
-          {
-            "not": {
-              "pattern": "(^|/)\\.{1,2}(/|$)"
-            }
-          }
-        ]
-      },
-      "additionalProperties": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["kind", "sha256", "size_bytes"],
-        "properties": {
-          "kind": {
-            "enum": ["embedding", "model", "index"]
-          },
-          "sha256": {
-            "type": "string",
-            "pattern": "^[a-f0-9]{64}$"
-          },
-          "size_bytes": {
-            "type": "integer",
-            "minimum": 0
-          }
+      "propertyNames": { "$ref": "#/$defs/runtimePath" },
+      "additionalProperties": { "$ref": "#/$defs/artifact" }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "runtimePath": {
+      "type": "string",
+      "allOf": [
+        {
+          "pattern": "^(embeddings|models|indexes|graphs|rankers|evidence)/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+$"
+        },
+        { "not": { "pattern": "(^|/)\\.{1,2}(/|$)" } }
+      ]
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "sha256", "size_bytes"],
+      "properties": {
+        "kind": {
+          "enum": ["embedding", "model", "index", "graph", "ranker", "evidence"]
+        },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "size_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "wholeEmbedding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "manifest_path",
+        "manifest_sha256",
+        "complete",
+        "model",
+        "revision",
+        "source_dimension",
+        "dimension",
+        "projection",
+        "dtype",
+        "normalized",
+        "rows",
+        "dataset_sha256",
+        "jobs_sha256",
+        "job_row_order_sha256",
+        "document_policy_version",
+        "document_template_sha256"
+      ],
+      "properties": {
+        "manifest_path": { "$ref": "#/$defs/runtimePath" },
+        "manifest_sha256": { "$ref": "#/$defs/sha256" },
+        "complete": { "const": true },
+        "model": { "const": "Qwen/Qwen3-Embedding-8B" },
+        "revision": {
+          "const": "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"
+        },
+        "source_dimension": { "const": 4096 },
+        "dimension": { "const": 1024 },
+        "projection": { "const": "mrl_prefix_then_l2_normalize" },
+        "dtype": { "const": "float16" },
+        "normalized": { "const": true },
+        "rows": { "type": "integer", "minimum": 1 },
+        "dataset_sha256": { "$ref": "#/$defs/sha256" },
+        "jobs_sha256": { "$ref": "#/$defs/sha256" },
+        "job_row_order_sha256": { "$ref": "#/$defs/sha256" },
+        "document_policy_version": { "const": "2026-07-24-clean-v1" },
+        "document_template_sha256": {
+          "const": "3275f93ade6c4f043084e36303d38b33443858546a80104840f0e2b9468d2abb"
         }
       }
+    },
+    "temporalTantivy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "manifest_path",
+        "manifest_sha256",
+        "complete",
+        "index_sha256",
+        "engine",
+        "jobs_sha256",
+        "job_row_order_sha256",
+        "updated_at_field",
+        "hard_filters",
+        "temporal_filter_semantics"
+      ],
+      "properties": {
+        "manifest_path": { "$ref": "#/$defs/runtimePath" },
+        "manifest_sha256": { "$ref": "#/$defs/sha256" },
+        "complete": { "const": true },
+        "index_sha256": { "$ref": "#/$defs/sha256" },
+        "engine": { "type": "string", "minLength": 1 },
+        "jobs_sha256": { "$ref": "#/$defs/sha256" },
+        "job_row_order_sha256": { "$ref": "#/$defs/sha256" },
+        "updated_at_field": { "const": "updated_at_epoch_ms" },
+        "hard_filters": { "const": true },
+        "temporal_filter_semantics": {
+          "const": "updated_at >= as_of - 180 days before Top-K; updated_at > as_of retained with freshness=0"
+        }
+      }
+    },
+    "disabled": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": { "enabled": { "const": false } }
+    },
+    "mrlEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision",
+        "report_path",
+        "report_sha256",
+        "stable_result_sha256",
+        "selected_dimension",
+        "reference_dimension"
+      ],
+      "properties": {
+        "decision": { "const": "accepted" },
+        "report_path": {
+          "type": "string",
+          "pattern": "^evidence/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\\.json$"
+        },
+        "report_sha256": { "$ref": "#/$defs/sha256" },
+        "stable_result_sha256": { "$ref": "#/$defs/sha256" },
+        "selected_dimension": { "const": 1024 },
+        "reference_dimension": { "const": 4096 }
+      }
+    },
+    "multiviewEmbedding": {
+      "oneOf": [
+        { "$ref": "#/$defs/disabled" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "complete",
+            "publication_allowed",
+            "manifest_path",
+            "manifest_sha256",
+            "model",
+            "revision",
+            "model_contract_sha256",
+            "tokenizer_sha256",
+            "view_policy_sha256",
+            "dataset_sha256",
+            "output_dimension",
+            "dtype",
+            "normalized",
+            "view_kinds",
+            "mrl_evidence",
+            "promotion_evidence"
+          ],
+          "properties": {
+            "enabled": { "const": true },
+            "complete": { "const": true },
+            "publication_allowed": { "const": true },
+            "manifest_path": { "$ref": "#/$defs/runtimePath" },
+            "manifest_sha256": { "$ref": "#/$defs/sha256" },
+            "model": { "const": "Qwen/Qwen3-Embedding-8B" },
+            "revision": {
+              "const": "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"
+            },
+            "model_contract_sha256": { "$ref": "#/$defs/sha256" },
+            "tokenizer_sha256": { "$ref": "#/$defs/sha256" },
+            "view_policy_sha256": { "$ref": "#/$defs/sha256" },
+            "dataset_sha256": { "$ref": "#/$defs/sha256" },
+            "output_dimension": { "const": 1024 },
+            "dtype": { "const": "float16" },
+            "normalized": { "const": true },
+            "view_kinds": {
+              "type": "array",
+              "prefixItems": [
+                { "const": "occupation" },
+                { "const": "skill" },
+                { "const": "requirement" },
+                { "const": "content" }
+              ],
+              "items": false,
+              "minItems": 4,
+              "maxItems": 4
+            },
+            "mrl_evidence": { "$ref": "#/$defs/mrlEvidence" },
+            "promotion_evidence": { "$ref": "#/$defs/promotionEvidence" }
+          }
+        }
+      ]
+    },
+    "promotionEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision",
+        "report_path",
+        "report_sha256",
+        "evaluation_split_sha256",
+        "baseline_run_sha256",
+        "candidate_run_sha256",
+        "primary_metric",
+        "absolute_delta"
+      ],
+      "properties": {
+        "decision": { "const": "accepted" },
+        "report_path": {
+          "type": "string",
+          "pattern": "^evidence/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\\.json$"
+        },
+        "report_sha256": { "$ref": "#/$defs/sha256" },
+        "evaluation_split_sha256": { "$ref": "#/$defs/sha256" },
+        "baseline_run_sha256": { "$ref": "#/$defs/sha256" },
+        "candidate_run_sha256": { "$ref": "#/$defs/sha256" },
+        "primary_metric": { "const": "ndcg_at_10" },
+        "absolute_delta": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "skillGraph": {
+      "oneOf": [
+        { "$ref": "#/$defs/disabled" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "complete",
+            "publication_allowed",
+            "manifest_path",
+            "manifest_sha256",
+            "schema_version",
+            "train_cutoff_exclusive",
+            "max_source_timestamp",
+            "source_jd_sha256",
+            "source_policy",
+            "test_jd_used",
+            "promotion_evidence"
+          ],
+          "properties": {
+            "enabled": { "const": true },
+            "complete": { "const": true },
+            "publication_allowed": { "const": true },
+            "manifest_path": { "$ref": "#/$defs/runtimePath" },
+            "manifest_sha256": { "$ref": "#/$defs/sha256" },
+            "schema_version": { "type": "integer", "minimum": 1 },
+            "train_cutoff_exclusive": {
+              "const": "2026-06-08T00:00:00+08:00"
+            },
+            "max_source_timestamp": {
+              "const": "2026-06-07T23:51:07.143000+08:00"
+            },
+            "source_jd_sha256": {
+              "const": "53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089"
+            },
+            "source_policy": { "const": "train_jd_only" },
+            "test_jd_used": { "const": false },
+            "promotion_evidence": { "$ref": "#/$defs/promotionEvidence" }
+          }
+        }
+      ]
+    },
+    "genericChallenger": {
+      "oneOf": [
+        { "$ref": "#/$defs/disabled" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "complete",
+            "publication_allowed",
+            "manifest_path",
+            "manifest_sha256",
+            "promotion_evidence"
+          ],
+          "properties": {
+            "enabled": { "const": true },
+            "complete": { "const": true },
+            "publication_allowed": { "const": true },
+            "manifest_path": { "$ref": "#/$defs/runtimePath" },
+            "manifest_sha256": { "$ref": "#/$defs/sha256" },
+            "promotion_evidence": { "$ref": "#/$defs/promotionEvidence" }
+          }
+        }
+      ]
     }
   }
 }

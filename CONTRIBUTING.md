@@ -17,19 +17,19 @@ standard library, platform, or an existing dependency already covers the require
 ## Architecture rules
 
 - Keep HTTP concerns in `apps/api` and retrieval contracts in `packages/search-core`.
-- Inject `SearchEngine` explicitly. The documented temporary DB-backed fake is the only approved
-  production double; it must never become a fallback for the future evaluated engine.
+- Inject `SearchEngine` explicitly. Production has no DB-seed, single-lane, mock, or legacy
+  fallback.
 - Keep search results to at most ten unique, consecutively ranked ASCII-decimal job IDs. Preserve
   fail-closed validation at both the API and browser boundaries.
 - Use PostgreSQL/Aurora only. Do not introduce SQLite code, files, migrations, or CI paths.
 - Define PostgreSQL domain models with SQLAlchemy in `packages/database`; manage schema changes
   with Alembic and HTTP contracts with Pydantic. Do not reuse one layer's classes in another.
-- Keep database engine/session ownership inside `SqlAlchemyJobReader`; use `NullPool` and close it
-  immediately after the startup seed-ID query. Do not construct it per request.
+- Keep database engine/session ownership inside `SqlAlchemyJobReader`; use `NullPool`, bounded
+  statements, and batch metadata reads for candidate revalidation.
 - Keep models, embeddings, and large indexes in the versioned S3 runtime prefix, never in Git or
   PostgreSQL.
-- Keep experiments, ablations, evaluators, and unfinished ranking implementations outside this
-  production repository.
+- Keep only reproducible, promotion-gated pipeline entrypoints in this repository; unfinished
+  ranking implementations must not enter the serving path.
 - Do not add legacy request aliases (`ks`, `c0`, `d0`, or `empStr`) or compatibility shims.
 
 ## Before opening a pull request

@@ -11,28 +11,29 @@
   同源存取。
 - Qwen3 Embedding endpoint `qwen3-embedding-8b-20260801-031826` 與 reranker endpoint
   `work-retrieval-qwen3-reranker-8b` 均為 `InService`。
-- 現行搜尋仍是明確標示的暫時實作：每個合法 query 固定回傳 Aurora 中前十個真實 job ID；這不是
-  production retrieval algorithm，也不是 retrieval benchmark。職缺詳情 API 尚未實作。
-- Embedding／reranker endpoint 已上線不代表它們已整合成正式 `SearchEngine`，也不代表任何 retrieval
-  品質指標已發布。
+- repository source 已包含 fail-closed search-core v2；目前 public deployment 是否仍為舊 deterministic
+  runtime，必須以實際 ECS image digest 與 public audit header 重新確認，不能由 source 推論。
+- Embedding／reranker endpoint 已上線不代表對應 challenger 已通過 promotion，也不代表任何 retrieval
+  品質指標已發布；正式 runtime 仍依 manifest 開關與 live readback 判定。
 
 以上是 2026-08-01 的部署 readback。進行操作或宣稱目前線上狀態前，仍應重新讀取 AWS stack、endpoint、
 Git commit 與 public smoke 結果；各層狀態必須分別確認。
 
 ## 原始碼與文件
 
-| 路徑                                           | 內容                                                 |
-| ---------------------------------------------- | ---------------------------------------------------- |
-| [`apps/api`](apps/api)                         | FastAPI request validation、lifecycle 與 OpenAPI     |
-| [`apps/web`](apps/web)                         | SvelteKit 搜尋介面                                   |
-| [`packages/search-core`](packages/search-core) | `SearchEngine` contract 與 search types              |
-| [`packages/database`](packages/database)       | SQLAlchemy `Job` model 與 PostgreSQL read repository |
-| [`packages/contract`](packages/contract)       | OpenAPI、TypeScript types 與 runtime manifest schema |
-| [`database`](database)                         | PostgreSQL Alembic migrations                        |
-| [`infra`](infra)                               | AWS CDK infrastructure                               |
-| [`scripts`](scripts)                           | 職缺資料驗證、AWS importer 與 artifact promotion     |
-| [`docs/architecture.md`](docs/architecture.md) | 系統架構與資料流程                                   |
-| [`docs/benchmark.md`](docs/benchmark.md)       | Benchmark 重現範圍與版本證據要求                     |
+| 路徑                                                         | 內容                                                 |
+| ------------------------------------------------------------ | ---------------------------------------------------- |
+| [`apps/api`](apps/api)                                       | FastAPI request validation、lifecycle 與 OpenAPI     |
+| [`apps/web`](apps/web)                                       | SvelteKit 搜尋介面                                   |
+| [`packages/search-core`](packages/search-core)               | Tantivy、Qwen、artifact bootstrap、fusion 與 audit   |
+| [`packages/database`](packages/database)                     | SQLAlchemy `Job` model 與 PostgreSQL read repository |
+| [`packages/contract`](packages/contract)                     | OpenAPI、TypeScript types 與 runtime manifest schema |
+| [`database`](database)                                       | PostgreSQL Alembic migrations                        |
+| [`infra`](infra)                                             | AWS CDK infrastructure                               |
+| [`scripts`](scripts)                                         | 職缺資料驗證、檢索 artifact 建置／消融與 promotion   |
+| [`docs/architecture.md`](docs/architecture.md)               | 系統架構與資料流程                                   |
+| [`docs/benchmark.md`](docs/benchmark.md)                     | Benchmark 重現範圍與版本證據要求                     |
+| [`docs/retrieval-pipelines.md`](docs/retrieval-pipelines.md) | Graph 與 multi-view embedding 重現、驗證及 AWS 契約  |
 
 PostgreSQL／Aurora 是唯一 relational database；不支援 SQLite。SQLAlchemy、Alembic 與 Pydantic
 分別負責 persistence model、schema migration 與 HTTP contract。Runtime model、embedding 與大型 index
@@ -62,6 +63,50 @@ set +a
 
 依賴版本由 [`uv.lock`](uv.lock) 與 [`pnpm-lock.yaml`](pnpm-lock.yaml) 鎖定；`.env.example` 只有本機設定名稱，
 不含 production secret。
+
+## 從競賽 ZIP 一鍵部署
+
+把主辦方下載的 ZIP 放在 repository 的 `inputs/`（此目錄內的 ZIP 已由 Git 忽略），例如：
+
+```bash
+mkdir -p inputs
+cp ~/Downloads/1111-competition-data.zip inputs/competition.zip
+```
+
+這個命令以競賽既有的 `WorkRetrievalData` AWS stack 與 Alembic `0002_create_jobs` 為前提；它不是空 AWS
+account 的 infrastructure bootstrap。先確認目前是已拉到最新的 `main`、worktree 無修改，且
+`competition` AWS profile 與 `gh auth status` 都已登入。接著執行唯一的 production release bootstrap：
+
+```bash
+scripts/bootstrap_competition_release.sh \
+  inputs/competition.zip \
+  artifacts/bootstrap-$(date +%Y%m%d-%H%M%S) \
+  DEPLOY \
+  your-alert-email@example.com
+```
+
+最後一個 email 可省略；若有填寫，AWS SNS 會寄出 subscription confirmation，必須點擊信中的確認連結後，
+5xx 與 unhealthy-host alarms 才會寄信。要更換 email，使用新值重新執行 deployment workflow；不要把 email
+或 AWS credentials 寫入 `.env`、commit 或 artifact manifest。
+
+這個命令會依序且 fail-closed 地：
+
+1. 不使用 `extractall`，只從 ZIP 安全取出唯一的 `職缺.csv`、`城市對照表.csv`、`職務對照表.csv`；
+2. 驗證 1,218,635 筆固定 snapshot 的 bytes、SHA-256、39 欄 schema 與 taxonomy；
+3. 從 content-addressed S3 prefix 下載並逐檔驗證既有 sealed Whole-JD Qwen cache，不重算 embedding；
+4. 將 CSV idempotently 匯入 Aurora PostgreSQL；單一 transaction 先取得固定 advisory lock，取不到即
+   fail closed，再完成 staging、replacement 與 source SHA marker；statement trigger 會在任何 DML 後使
+   marker 失效，只有 rows／ID／source-row 邊界、marker 與 guard 全部相符才回報 `unchanged`；
+5. 由官方 CSV 建 temporal-v2 full-JD Tantivy（含 numeric location/duty hard filters 與 180 天時序欄位）；
+6. materialize、dry-run，將 content-addressed source bundle 逐檔 SHA-256 上傳且 manifest 最後寫入，
+   再發布並 read-back immutable runtime bundle；
+7. 以 GitHub OIDC 觸發 `main` 的 production workflow，等待 image scan、CDK/ECS/CloudFront 與 public smoke
+   全部成功才結束。
+
+`NEW_WORK_ROOT` 必須不存在；中途失敗時保留該目錄供稽核，不會偷偷沿用 partial output。這個 production
+bootstrap 只發布已核准的 temporal BM25 incumbent；Whole-Dense serving adapter 預設關閉，Graph、multi-view、
+LTR 與 reranker 目前沒有 production serving adapter。它們的建置與 Graph-on/off 實驗是下方獨立的 offline
+流程，不會由這個命令產生，也不能只靠 feature flag 開進 Top-10。
 
 ## 本機驗證
 
@@ -109,31 +154,99 @@ git diff -- packages/contract/openapi.json packages/contract/types.d.ts
 
 ## Runtime contract
 
-Container entrypoint 是 `work_retrieval_api.main:app`。啟動時必須提供以下五個 database settings；
-PostgreSQL 無法連線或可用職缺少於十筆時會 fail closed：
+Container entrypoint 是 `work_retrieval_api.main:app`。啟動時必須提供 PostgreSQL 與 immutable S3 runtime；
+只有顯式啟用 dense shadow 時才要求 SageMaker query encoder settings。任何啟用中的 artifact、容量、
+database 或 endpoint 契約不成立都 fail closed：
 
 ```text
 DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
+ARTIFACT_BUCKET, ARTIFACT_MANIFEST_SHA256, AWS_REGION
+SEARCH_RUNTIME_ROOT, SEARCH_RUNTIME_MANIFEST_PATH, SEARCH_PORT_FACTORY
+SEARCH_ENABLE_DENSE_SHADOW, SEARCH_ENABLE_MULTIVIEW_MAXSIM
+EMBEDDING_ENDPOINT_NAME, EMBEDDING_ENDPOINT_CONFIG_NAME, EMBEDDING_MODEL_NAME
 ```
 
 公開路徑：
 
-- `POST /api/v1/jobs/search`：暫時的 deterministic 十筆結果。
-- `GET /healthz` 與 `GET /readyz`：process 與 initialized-runtime health。
+- `POST /api/v1/jobs/search`：Tantivy full-JD BM25 incumbent Top 10；whole-Qwen dense 預設關閉，啟用時僅作
+  shadow/tail evidence，不得改排 incumbent Top 10。
+- `GET /healthz`：process health；`GET /readyz`：initialized-runtime health 與實際載入的 root manifest SHA-256。
 
 Aurora credentials 由 ECS 經 Secrets Manager 注入，不保存於 image、Git 或 workflow。
 
+BM25 index、whole-JD embedding、LLM extraction、skill Graph、query-correction promotion 與 graph-on/off
+ablation 的可重現命令都保留在 [`scripts`](scripts)，完整契約見
+[`docs/retrieval-pipelines.md`](docs/retrieval-pipelines.md)。BM25 預設不依賴 LLM；Graph extraction 使用
+職務分層的 deterministic 5,000 筆代表樣本（hard cap 10,000），Graph 與 query correction 都必須經
+fixed-input NDCG@10 正向驗證才可啟用。
+
 ## 資料與 runtime artifacts
 
-| 項目                    | 已驗證版本                                                                                           |
-| ----------------------- | ---------------------------------------------------------------------------------------------------- |
-| Source code             | 每次交付以 Git commit SHA 固定                                                                       |
-| Job dataset             | 1,218,635 rows；SHA-256 `53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089`           |
-| Database schema         | Alembic `0002_create_jobs`；Aurora PostgreSQL 16                                                     |
-| Runtime manifest format | [`runtime-manifest.schema.json`](packages/contract/runtime-manifest.schema.json)，schema version `1` |
-| Embedding endpoint      | `qwen3-embedding-8b-20260801-031826`；`InService`                                                    |
-| Reranker endpoint       | `work-retrieval-qwen3-reranker-8b`；`InService`                                                      |
-| Production retrieval    | 尚未整合或發布                                                                                       |
+| 項目                      | 已驗證版本                                                                                                                                                                               |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Source code               | 每次交付以 Git commit SHA 固定                                                                                                                                                           |
+| Job dataset               | 1,218,635 rows；SHA-256 `53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089`                                                                                               |
+| Database schema           | Alembic `0002_create_jobs`；Aurora PostgreSQL 16                                                                                                                                         |
+| Runtime manifest contract | [`runtime-manifest.schema.json`](packages/contract/runtime-manifest.schema.json)，repository schema version `2`；promotion tooling 已完成，正式 release 仍需明確 spec 與人工 `--execute` |
+| Embedding endpoint        | `qwen3-embedding-8b-20260801-031826`；`InService`                                                                                                                                        |
+| Reranker endpoint         | `work-retrieval-qwen3-reranker-8b`；`InService`                                                                                                                                          |
+| Production retrieval      | source 已整合；artifact promotion、image rollout 與 live readback 仍須各自驗證                                                                                                           |
+
+Runtime v2 promotion 只接受一份已固定 source manifest SHA、selected inventory SHA、component
+manifest SHA 與 challenger promotion evidence 的 release spec。Dry-run 會執行完整 contract 與 component
+manifest 驗證，但不寫入 AWS：
+
+正式路徑重用 sealed EVA whole-job cache，不重新呼叫 embedding model。Materializer 驗證 source manifest、
+source inventory、122 個 4096d shards 與 global job order，然後只衍生 first-1024 + float32 L2 normalize +
+float16 serving shards；source bytes 永不覆寫。Tantivy 必須是已核准的 temporal-v2 build，query correction
+預設關閉，只有帶 organizer 正向 NDCG@10 attestation 才可啟用。
+
+一鍵、離線、無 AWS 寫入的 materialize + promotion dry-run：
+
+```bash
+scripts/reproduce_runtime_release.sh \
+  artifacts/experiments/qwen3-8b/full \
+  artifacts/evidence/sealed-whole-source-inventory.json \
+  artifacts/experiments/tantivy-bm25-temporal-v2 \
+  artifacts/runtime-source \
+  <approved-tantivy-component-sha256> \
+  <approved-tantivy-build-sha256> \
+  <approved-tantivy-index-sha256>
+```
+
+`output-root` 必須不存在，避免混入舊 artifact。Wrapper 只產生 immutable local bundle 並執行完整 dry-run；
+不會上傳 S3、切換 runtime 或重算 embedding。若只重跑 promotion validation：
+
+```bash
+uv run python scripts/promote_runtime_artifacts.py \
+  --release-spec artifacts/runtime-source/runtime-release-spec.json \
+  --source-manifest-file artifacts/runtime-source/manifest.json \
+  --source-root artifacts/runtime-source \
+  --approved-tantivy-build-sha256 <approved-tantivy-build-sha256> \
+  --approved-tantivy-index-sha256 <approved-tantivy-index-sha256>
+```
+
+只有 dry-run 完整通過後，才使用已登入的 `competition` profile 在 `us-west-2` 明確發布：
+
+```bash
+uv run python scripts/promote_runtime_artifacts.py \
+  --release-spec artifacts/runtime-source/runtime-release-spec.json \
+  --source-manifest-file artifacts/runtime-source/manifest.json \
+  --source-root artifacts/runtime-source \
+  --approved-tantivy-build-sha256 <approved-tantivy-build-sha256> \
+  --approved-tantivy-index-sha256 <approved-tantivy-index-sha256> \
+  --stage-source \
+  --execute
+```
+
+發布順序固定為 content-addressed source 逐物件 checksum upload/readback、source `manifest.json` 最後寫入，
+再逐物件 copy/readback、完整且分頁的 runtime data-only inventory audit、runtime `manifest.json`
+最後寫入與完整 prefix readback。component manifests 使用 serving parser 的 exact-key
+路徑 contract；root inventory 以 path、SHA-256、size 完整固定 whole-Qwen layout/job IDs/shards、Tantivy
+taxonomy/index files 與任何啟用 challenger，且不得含 query history、GT/qrels/judgments、test JD、raw logs
+或 secrets。任何 incomplete、
+`publication_allowed=false`、未通過正向 NDCG@10 promotion evidence、非 temporal
+Tantivy、Graph cutoff 越界或 object inventory drift 都會 fail closed；不會自動發布部分 release。
 
 職缺 snapshot 的 authoritative S3 object：
 
@@ -141,29 +254,37 @@ Aurora credentials 由 ECS 經 Secrets Manager 注入，不保存於 image、Git
 s3://workretrievaldata-runtimebucket404c5ee4-hkvrjx5fbkij/data/jobs/53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089/jobs.csv
 ```
 
-AWS readback 已驗證 1,218,635 rows、1,218,635 distinct job IDs、source rows `0..1218634`，以及
-`alembic_version`、`jobs` 兩張 public tables。固定資料匯入命令為：
+AWS readback 已驗證 1,218,635 rows、1,218,635 distinct job IDs、source rows `0..1218634`、exact source
+marker 與會在任何 `INSERT`／`UPDATE`／`DELETE`／`TRUNCATE` 後使 marker 失效的 statement trigger，以及
+`alembic_version`、`jobs` 兩張 public tables。若只需重跑 importer，`WORK_ROOT` 指向前述 bootstrap
+建立的工作目錄：
 
 ```bash
+WORK_ROOT=artifacts/bootstrap-YYYYMMDD-HHMMSS
 AWS_PROFILE=competition AWS_DEFAULT_REGION=us-west-2 \
   uv run python scripts/import_jobs_to_aws.py \
-  "/Users/takala/code/1111 work retrieval/dataset/職缺.csv"
-```
-
-Runtime artifact promotion 預設只做 dry-run：
-
-```bash
-uv run python scripts/promote_runtime_artifacts.py
-uv run python scripts/promote_runtime_artifacts.py --execute
+  "$WORK_ROOT/dataset/職缺.csv"
 ```
 
 Importer 與 promotion script 都固定 account、region、來源 identity 與完整性檢查；不要繞過其驗證。
 
 ## Benchmark 重現
 
-目前沒有可發布的 retrieval benchmark，因為正式 `SearchEngine`、versioned evaluation queries／qrels 與
-單一 committed benchmark runner 尚未齊備。Repository tests、migration checks、contract checks、CDK
+Repository 已提供單一 committed Graph-on/off runner；目前仍沒有可發布的 retrieval benchmark，因為
+主辦方 versioned evaluation queries／qrels／evaluator 尚未提供。Repository tests、migration checks、contract checks、CDK
 synth 與 endpoint smoke 都是 acceptance evidence，不是 Recall、MRR、nDCG 或 latency benchmark。
+
+Graph-on/off 的正式單一入口是 `scripts/run_graph_ablation.sh`：它只接受 exact-key canonical query
+JSONL（`qid`、`query`、含 timezone 的 `as_of`、`location_codes`、`duty_codes`），先由已驗證的 temporal-v2
+Tantivy 重建 `graph_off`，再由 train-only Graph 產生 bounded typed bridge terms，以相同時間、地區、職務、
+可見性與 180-day freshness 邊界回查該 Tantivy eligible universe；因此 `graph_on` 可納入不在 baseline
+或歷史 Graph Job 節點中的新職缺，但不能沿 train Job edge 直接回傳舊職缺。兩者最後交給外部 evaluator，
+runner 同時強制讀取 pinned extraction evidence 與 extraction manifest，重建並逐 bytes 驗證六張 Graph 表，
+不接受只在 Graph 內部自洽的預建 artifact。
+manifest 的 canonical qid universe 必須一致；off／on TREC 可省略各自 manifest 明確宣告的 zero-result
+qid，且 on 可救回 off 的 zero-result query，evaluator 仍須以完整 canonical query count 計分。Repository 不猜主辦方 query CSV
+schema；organizer-specific adapter 必須先把官方 CSV 轉成 canonical JSONL，完整命令與契約見
+[`docs/retrieval-pipelines.md`](docs/retrieval-pipelines.md)。預先算好的 `graph_off` 不是此入口的輸入。
 
 可重現的 acceptance commands 與未來 benchmark 所需的 artifact、provenance、metrics 見
 [`docs/benchmark.md`](docs/benchmark.md)。
@@ -177,12 +298,14 @@ environment 執行。它同時要求：
 - environment variable `AWS_DEPLOY_ROLE_ARN`
 - confirmation input 必須精確等於 `DEPLOY`
 - 64-character lowercase artifact manifest SHA-256
-- CPU desired count 至少為 `1`
-- GPU min／max／desired 目前必須全部為 `0`
+- alarm email 可省略；若有填寫，收件者必須完成 AWS SNS subscription confirmation
+- CPU desired count 必須為 `0`
+- GPU min／max／desired 必須至少為 `1`，且 `min <= desired <= max`
 
 流程依序執行 frozen installs、static web build、OIDC authentication、DataStack deploy、runtime manifest
 驗證、`linux/amd64` API image build／push、ECR scan、digest-pinned PlatformStack deploy、web sync、等待
-CloudFront invalidation，最後才執行 public health、readiness、web 與 search smoke。
+CloudFront invalidation，最後才執行 public health、web 與 search smoke；public readiness 回傳的
+`artifact_manifest_sha256` 必須精確等於本次 workflow input，舊 runtime 健康不能通過 deployment gate。
 
 Workflow 自行 build image，不接受 caller-supplied image URI；CDK 只接收 ECR digest URI。任何 push 或
 merge 都不會自動部署。ECR scan、stack deployment、CloudFront publication 與 public smoke 是彼此獨立的

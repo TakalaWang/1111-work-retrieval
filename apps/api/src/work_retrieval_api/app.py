@@ -17,7 +17,13 @@ from starlette.datastructures import Headers, MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
-from work_retrieval_core import SearchEngine, SearchQuery, SearchUnavailableError
+from work_retrieval_core import (
+    SearchAuditTrace,
+    SearchEngine,
+    SearchQuery,
+    SearchResult,
+    SearchUnavailableError,
+)
 
 from work_retrieval_api.models import (
     ErrorBody,
@@ -34,7 +40,9 @@ from work_retrieval_api.runtime import RetrievalRuntime, RuntimeFactory
 
 MAX_BODY_BYTES = 16 * 1024
 MAX_RESULTS = 10
+MAX_AUDIT_HEADER_BYTES = 7 * 1024
 SEARCH_PATH = "/api/v1/jobs/search"
+SEARCH_AUDIT_HEADER = "X-Search-Audit"
 logger = logging.getLogger("work_retrieval.access")
 internal_logger = logging.getLogger("work_retrieval.internal")
 
@@ -45,6 +53,17 @@ class EngineContractError(RuntimeError):
 
 def _request_id(request: Request) -> str:
     return cast(str, request.state.request_id)
+
+
+def _artifact_manifest_sha256(engine: RetrievalRuntime) -> str:
+    value = engine.artifact_manifest_sha256
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise TypeError("runtime must expose a lowercase artifact manifest SHA-256")
+    return value
 
 
 def _error(
@@ -61,9 +80,12 @@ def _error(
     return JSONResponse(status_code=status, content=payload.model_dump())
 
 
-def _validate_engine_output(job_ids: object) -> tuple[str, ...]:
+def _validate_engine_output(result: object) -> tuple[tuple[str, ...], str]:
+    if not isinstance(result, SearchResult):
+        raise EngineContractError("engine result must be SearchResult")
+    job_ids = result.job_ids
     if not isinstance(job_ids, tuple):
-        raise EngineContractError("engine result must be a tuple")
+        raise EngineContractError("engine job_ids must be a tuple")
     if len(job_ids) > MAX_RESULTS:
         raise EngineContractError("engine returned too many jobs")
     if any(
@@ -73,7 +95,14 @@ def _validate_engine_output(job_ids: object) -> tuple[str, ...]:
         raise EngineContractError("engine returned an invalid job_id")
     if len(job_ids) != len(set(job_ids)):
         raise EngineContractError("engine returned duplicate job_id")
-    return job_ids
+    if not isinstance(result.trace, SearchAuditTrace):
+        raise EngineContractError("engine returned an invalid audit trace")
+    if tuple(item.job_id for item in result.trace.results) != job_ids:
+        raise EngineContractError("audit result order does not match engine job_ids")
+    audit_json = result.trace.to_json()
+    if len(audit_json.encode("ascii")) > MAX_AUDIT_HEADER_BYTES:
+        raise EngineContractError("audit trace exceeds the response header budget")
+    return job_ids, audit_json
 
 
 class RequestContextMiddleware:
@@ -195,8 +224,9 @@ def create_app(runtime_factory: RuntimeFactory) -> FastAPI:
         engine = runtime_factory()
         if not isinstance(engine, RetrievalRuntime):
             raise TypeError("runtime_factory must return a RetrievalRuntime")
-        app.state.engine = engine
         try:
+            app.state.artifact_manifest_sha256 = _artifact_manifest_sha256(engine)
+            app.state.engine = engine
             yield
         finally:
             engine.close()
@@ -246,7 +276,10 @@ def create_app(runtime_factory: RuntimeFactory) -> FastAPI:
     async def readyz(request: Request) -> dict[str, str]:
         if not hasattr(request.app.state, "engine"):
             raise SearchUnavailableError("engine was not initialized")
-        return {"status": "ready"}
+        return {
+            "status": "ready",
+            "artifact_manifest_sha256": cast(str, request.app.state.artifact_manifest_sha256),
+        }
 
     @app.post(
         SEARCH_PATH,
@@ -259,7 +292,9 @@ def create_app(runtime_factory: RuntimeFactory) -> FastAPI:
             503: {"model": ErrorResponse},
         },
     )
-    async def search(payload: SearchRequest, request: Request) -> SearchResponse:
+    async def search(
+        payload: SearchRequest, request: Request, response: Response
+    ) -> SearchResponse:
         request.state.query_len = len(payload.query)
         request.state.location_code_count = len(payload.location_code)
         request.state.duty_code_count = len(payload.duty_code)
@@ -270,8 +305,9 @@ def create_app(runtime_factory: RuntimeFactory) -> FastAPI:
             duty_codes=tuple(payload.duty_code),
         )
         engine = cast(SearchEngine, request.app.state.engine)
-        raw_job_ids = await run_in_threadpool(engine.search, query, limit=MAX_RESULTS)
-        job_ids = _validate_engine_output(raw_job_ids)
+        raw_result = await run_in_threadpool(engine.search, query, limit=MAX_RESULTS)
+        job_ids, audit_json = _validate_engine_output(raw_result)
+        response.headers[SEARCH_AUDIT_HEADER] = audit_json
         request.state.result_count = len(job_ids)
         return SearchResponse(
             request_id=_request_id(request),

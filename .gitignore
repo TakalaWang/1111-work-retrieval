@@ -15,3 +15,5 @@ platform-outputs.json
 *.pyc
 *.log
 .env
+artifacts/
+inputs/*.zip

@@ -2,15 +2,15 @@
 
 ## Current status
 
-本 repository **目前無法重現 retrieval benchmark**，也沒有可發布的 retrieval 指標。原因是以下四個
-必要 inputs 尚未同時存在：
+本 branch 已實作 production `SearchEngine` 與 reference adapters，但 **不能只靠此 branch 發布 retrieval
+分數**。以下 inputs 必須在同一份 immutable release 中同時存在：
 
-| Required input                       | Current state |
-| ------------------------------------ | ------------- |
-| Production `SearchEngine`            | 未實作        |
-| Versioned evaluation queries / qrels | 未提供        |
-| Immutable model artifacts            | 未發布        |
-| Immutable index / embeddings         | 未發布        |
+| Required input                       | Current state                                             |
+| ------------------------------------ | --------------------------------------------------------- |
+| Production `SearchEngine`            | 已實作                                                    |
+| Versioned evaluation queries / qrels | 未提供                                                    |
+| Immutable model artifacts            | 由 artifact promotion branch 管理，尚未在此文件宣稱已發布 |
+| Immutable index / embeddings         | 由 artifact promotion branch 管理，尚未在此文件宣稱已發布 |
 
 因此目前沒有官方 benchmark command。Repository tests、migration checks、contract checks 與 CDK synth
 是 acceptance evidence，不是 Recall、MRR、nDCG 或 latency benchmark。
@@ -90,13 +90,19 @@ sha256: 53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089
 | Execution        | single committed command、seed、warm-up、repetitions                         |
 | Environment      | CPU/GPU model、RAM/VRAM、OS、driver 與 relevant runtime versions             |
 
-至少報告：
+競賽主指標至少報告：
 
-- `Recall@10`
-- `MRR@10`
-- `nDCG@10`
+- `NDCG@10`
+- `Precision@10`
+- `Top-1`
+- `MRR`
 - p50 / p95 latency
 - failed-query count 與 total-query count
+
+Graph 的擴張性分析可額外報告 `Recall@100`、`Precision@100`、`Recall@1000` 與 `Precision@1000`，但不能
+用這些 diagnostic metrics 取代競賽 Top-10 主指標。正式報告必須以同一 time split、candidate budget 與
+seed 提供 `graph_on` / `graph_off` 雙重 ablation；Graph 若沒有正向且可重現的主指標差異，就維持 production
+off，而不是用架構敘事掩蓋負增益。
 
 結果應輸出 machine-readable JSON，包含上述 provenance、metric definitions 與 raw aggregate counts。
 在 engine、evaluation set、runtime manifest 與單一 committed runner 都加入前，不新增手寫 benchmark 數字或
