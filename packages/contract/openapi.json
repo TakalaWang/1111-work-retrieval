@@ -127,6 +127,7 @@
           },
           "search_date": {
             "default": "2026-06-08",
+            "description": "ISO date from 0001-07-01 through 9999-12-30 inclusive.",
             "format": "date",
             "title": "Search Date",
             "type": "string"

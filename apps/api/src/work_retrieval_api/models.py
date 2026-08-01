@@ -11,7 +11,17 @@ Query = Annotated[
     StringConstraints(strict=True, strip_whitespace=True, min_length=1, max_length=512),
 ]
 JobId = Annotated[str, StringConstraints(strict=True, pattern=r"^[0-9]+$")]
-SearchDate = Annotated[date, Field(strict=True)]
+MIN_SEARCH_DATE = date(1, 7, 1)
+MAX_SEARCH_DATE = date(9999, 12, 30)
+SearchDate = Annotated[
+    date,
+    Field(
+        strict=True,
+        ge=MIN_SEARCH_DATE,
+        le=MAX_SEARCH_DATE,
+        description="ISO date from 0001-07-01 through 9999-12-30 inclusive.",
+    ),
+]
 
 
 class SearchRequest(BaseModel):

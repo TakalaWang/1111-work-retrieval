@@ -94,6 +94,8 @@ def test_more_than_fifty_codes_are_accepted(client: Callable[[], TestClient]) ->
         {},
         {"query": "工程師", "search_date": "2026-02-30"},
         {"query": "工程師", "search_date": "2026-06-08T00:00:00"},
+        {"query": "工程師", "search_date": "0001-06-30"},
+        {"query": "工程師", "search_date": "9999-12-31"},
         {"query": " "},
         {"query": "x" * 513, "search_date": "2026-06-08"},
         {"query": "工程師", "search_date": "2026-06-08", "location_code": None},
@@ -136,6 +138,20 @@ def test_invalid_json_wrong_media_type_and_oversize_body(
     assert invalid_json.status_code == 422
     assert wrong_type.status_code == 415
     assert oversized.status_code == 413
+
+
+@pytest.mark.parametrize("search_date", ["0001-07-01", "9999-12-30"])
+def test_search_date_valid_boundaries_reach_engine(
+    client: Callable[[], TestClient], engine: FakeEngine, search_date: str
+) -> None:
+    with client() as http:
+        response = http.post(
+            "/api/v1/jobs/search",
+            json={"query": "工程師", "search_date": search_date},
+        )
+
+    assert response.status_code == 200
+    assert engine.queries == [(SearchQuery("工程師", date.fromisoformat(search_date)), 10)]
 
 
 def test_chunked_body_is_rejected_before_unbounded_buffering(

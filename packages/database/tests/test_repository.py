@@ -130,6 +130,17 @@ def test_calendar_month_window_clamps_month_end(
     )
 
 
+def test_search_window_accepts_supported_date_boundaries() -> None:
+    assert repository.search_window(date(1, 7, 1)) == (
+        datetime(1, 1, 1),
+        datetime(1, 7, 2),
+    )
+    assert repository.search_window(date(9999, 12, 30)) == (
+        datetime(9999, 6, 30),
+        datetime(9999, 12, 31),
+    )
+
+
 def test_reader_returns_exact_job_details_or_none() -> None:
     engine = MagicMock(spec=Engine)
     session = _session()

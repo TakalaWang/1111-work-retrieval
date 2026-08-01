@@ -86,6 +86,7 @@ export interface components {
             /**
              * Search Date
              * Format: date
+             * @description ISO date from 0001-07-01 through 9999-12-30 inclusive.
              * @default 2026-06-08
              */
             search_date?: string;
