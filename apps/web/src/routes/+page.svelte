@@ -79,9 +79,7 @@
         type="date"
         name="search_date"
         disabled={loading}
-        aria-describedby="search-date-default"
       />
-      <small id="search-date-default">留空使用 2026-06-08</small>
     </div>
   </section>
 
