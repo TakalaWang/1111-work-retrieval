@@ -280,6 +280,8 @@ Importer 與 promotion script 都固定 account、region、來源 identity 與�
 Repository 已提供單一 committed Graph-on/off runner；目前仍沒有可發布的 retrieval benchmark，因為
 主辦方 versioned evaluation queries／qrels／evaluator 尚未提供。Repository tests、migration checks、contract checks、CDK
 synth 與 endpoint smoke 都是 acceptance evidence，不是 Recall、MRR、nDCG 或 latency benchmark。
+339-context 的非官方 development proxy、六指標 paired delta、H>1000 診斷與 promotion 決策另見
+[`docs/development-graph-ablation-report.md`](docs/development-graph-ablation-report.md)。
 
 Graph-on/off 的正式單一入口是 `scripts/run_graph_ablation.sh`：它只接受 exact-key canonical query
 JSONL（`qid`、`query`、含 timezone 的 `as_of`、`location_codes`、`duty_codes`），先由已驗證的 temporal-v2

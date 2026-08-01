@@ -15,6 +15,10 @@
 因此目前沒有官方 benchmark command。Repository tests、migration checks、contract checks 與 CDK synth
 是 acceptance evidence，不是 Recall、MRR、nDCG 或 latency benchmark。
 
+已完成的 339-context 非 organizer development proxy 與其 promotion=false 決策，獨立記錄於
+[`development-graph-ablation-report.md`](development-graph-ablation-report.md)；不得把該報告當成官方
+holdout 結果。
+
 ## What can be reproduced now
 
 ### 1. Pin source and dependencies
