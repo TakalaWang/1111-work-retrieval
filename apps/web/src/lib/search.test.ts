@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { SearchApiError, searchJobs, serializeSearch } from './search';
+import {
+  presentJob,
+  pullJob,
+  SearchApiError,
+  searchJobs,
+  serializeSearch
+} from './search';
 
 describe('search API boundary', () => {
   it('trims the query and serializes deduplicated code lists', () => {
@@ -87,5 +93,76 @@ describe('search API boundary', () => {
     await expect(
       searchJobs({ query: '工程師', location_code: [], duty_code: [] }, fetcher)
     ).rejects.toEqual(new SearchApiError('搜尋服務回傳了無法辨識的錯誤。'));
+  });
+
+  it('posts one job id to the pull endpoint', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          job_id: '53256270',
+          details: { 職務名稱: '口譯人員' }
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      )
+    );
+
+    await expect(pullJob('53256270', fetcher)).resolves.toEqual({
+      job_id: '53256270',
+      details: { 職務名稱: '口譯人員' }
+    });
+    expect(fetcher).toHaveBeenCalledWith('/api/v1/jobs/pull', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ job_id: '53256270' })
+    });
+  });
+
+  it('rejects malformed pull details', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          job_id: '53256270',
+          details: { 職務名稱: 7 }
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      )
+    );
+
+    await expect(pullJob('53256270', fetcher)).rejects.toEqual(
+      new SearchApiError('職缺資料服務回傳了無法辨識的內容。')
+    );
+  });
+
+  it('selects useful populated CSV fields for presentation', () => {
+    expect(
+      presentJob(
+        {
+          job_id: '53256270',
+          details: {
+            職務名稱: '後端工程師',
+            工作城市: '台北市',
+            薪資: '月薪 55,000 元',
+            職務小類: '後端開發',
+            職務中類: '軟體工程',
+            職務內容: '開發 API<br>維護服務',
+            工作技能: null,
+            廠商編號: '123'
+          }
+        },
+        1
+      )
+    ).toEqual({
+      jobId: '53256270',
+      rank: 1,
+      title: '後端工程師',
+      city: '台北市',
+      salary: '月薪 55,000 元',
+      category: '後端開發',
+      description: '開發 API 維護服務',
+      experience: undefined,
+      education: undefined,
+      skills: undefined,
+      updatedAt: undefined
+    });
   });
 });
