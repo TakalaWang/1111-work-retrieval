@@ -1,55 +1,114 @@
-# 1111-work-retrieval
+# 1111 Work Retrieval
 
-Production platform scaffold for 1111 job retrieval. This repository defines the stable
-interfaces, HTTP contract, web shell, PostgreSQL job schema, and AWS infrastructure
-needed for teams to work in parallel.
+1111 職缺搜尋平台的 production scaffold。此 repository 已包含可審查的完整原始碼、API
+contract、Web UI、PostgreSQL schema、AWS CDK infrastructure 與資料匯入工具；production
+retrieval engine、模型、索引與應用服務尚未交付。
 
-The repository does **not** contain a production search implementation. Its persistent data
-plane and complete job snapshot are deployed, but the application plane and API are not. The API
-can only start when a `SearchEngine` factory is supplied explicitly.
+**Repository:** [github.com/TakalaWang/1111-work-retrieval](https://github.com/TakalaWang/1111-work-retrieval)
 
-## Boundaries
+## 目前狀態
 
-- PostgreSQL/Aurora is the only relational database. SQLite is not supported.
-- SQLAlchemy owns PostgreSQL domain models, Alembic owns migrations, and Pydantic owns the HTTP
-  contract. These layers do not share model classes.
-- SQLAlchemy defines the authoritative `Job` model, and Alembic revisions `0001_baseline` and
-  `0002_create_jobs` create its PostgreSQL `jobs` table. No runtime engine/session factory exists.
-- The complete verified job snapshot is stored in Aurora. A job-detail API does not exist.
-- Search responses contain at most ten unique, consecutively ranked ASCII-decimal job IDs. The API
-  and browser both reject malformed engine or response data instead of degrading silently.
-- Runtime models, embeddings, and indexes live in private S3 objects under
-  `runtime/<manifest-sha256>/...`; they are not committed to Git.
-- There is no in-memory retriever, experimental ranking path, mock runtime, or automatic
-  fallback.
-- The GPU ECS service is provisioned with desired capacity `0` until a production image and
-  immutable artifact manifest are approved.
+| 交付項目                  | 狀態       | 依據                                                                                                                |
+| ------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------- |
+| 完整原始碼與測試          | 已提供     | [`apps`](apps)、[`packages`](packages)、[`infra`](infra)、[`tests`](tests)                                          |
+| Python / Node 依賴鎖定    | 已提供     | [`uv.lock`](uv.lock)、[`pnpm-lock.yaml`](pnpm-lock.yaml)                                                            |
+| API 與前端 contract       | 已提供     | [`openapi.json`](packages/contract/openapi.json)、[`types.d.ts`](packages/contract/types.d.ts)                      |
+| 完整職缺資料快照          | 已匯入     | Aurora PostgreSQL，1,218,635 筆                                                                                     |
+| Data plane                | 已部署     | `WorkRetrievalData`，AWS `us-west-2`                                                                                |
+| Production `SearchEngine` | 未提供     | repository 目前只有明確的 [`SearchEngine` protocol](packages/search-core/src/work_retrieval_core/engine.py)         |
+| 模型與索引                | 未發布     | 只有 [`runtime manifest schema`](packages/contract/runtime-manifest.schema.json)，沒有 runtime manifest 或 artifact |
+| Retrieval benchmark       | 尚不可重現 | 缺少 engine、evaluation set、模型與索引；詳見 [`docs/benchmark.md`](docs/benchmark.md)                              |
+| Application plane / API   | 未部署     | GPU capacity 預設為 `0`，且沒有 production image                                                                    |
 
-## Repository layout
+> CI、測試與 CDK synth 只證明 repository acceptance，不等於 retrieval benchmark，也不等於已部署。
 
-| Path                   | Responsibility                                                                      |
-| ---------------------- | ----------------------------------------------------------------------------------- |
-| `apps/api`             | FastAPI request validation, error envelopes, health endpoints, and OpenAPI          |
-| `apps/web`             | Thin SvelteKit search UI                                                            |
-| `packages/search-core` | Immutable search types and the `SearchEngine` protocol                              |
-| `packages/database`    | SQLAlchemy declarative base and authoritative `Job` model                           |
-| `packages/contract`    | Committed OpenAPI, generated TypeScript types, and artifact manifest schema         |
-| `database`             | Alembic configuration, baseline, and `jobs` table migration                         |
-| `infra`                | AWS CDK stack for Aurora, S3, ECR, GPU ECS, ALB, CloudFront, WAF, and observability |
+## 快速導覽
 
-## Prerequisites
+| 文件／路徑                                                                   | 用途                                                       |
+| ---------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| [`docs/architecture.md`](docs/architecture.md)                               | 系統架構、module 邊界、runtime 與資料匯入流程              |
+| [`docs/benchmark.md`](docs/benchmark.md)                                     | 可重現範圍、benchmark 缺口與未來結果證據格式               |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md)                                         | 開發規則、schema 變更與 PR 檢查                            |
+| [`.kiro/specs/job-search-api-platform`](.kiro/specs/job-search-api-platform) | 平台 requirements、design 與待辦狀態                       |
+| [`scripts/import_jobs_to_aws.py`](scripts/import_jobs_to_aws.py)             | 固定帳號、區域、checksum 與筆數的 fail-closed AWS importer |
 
-- Python 3.12 and [uv](https://docs.astral.sh/uv/)
-- Node.js 24 and pnpm 10.28.0
-- PostgreSQL 16 for migration verification
+## 環境設定
 
-## Local checks
+需求：
 
-Copy `.env.example` to `.env` and export it in your shell when running Alembic against the
-standard local PostgreSQL database. The file contains no AWS credentials or production
-configuration.
+- Python `3.12.x` 與 [uv](https://docs.astral.sh/uv/)
+- Node.js `24.x` 與 pnpm `10.28.0`
+- PostgreSQL `16`（migration 驗證需要）
 
 ```bash
+git clone https://github.com/TakalaWang/1111-work-retrieval.git
+cd 1111-work-retrieval
+
+uv sync --frozen --all-packages
+pnpm install --frozen-lockfile
+
+cp .env.example .env
+set -a
+source .env
+set +a
+```
+
+`.env.example` 只包含本機 PostgreSQL URL，不含 AWS credential 或 production secret。
+
+## 執行範例
+
+### Web UI
+
+```bash
+pnpm --dir apps/web dev
+```
+
+Vite 預設提供 `http://localhost:5173`。UI 可單獨檢視，但搜尋會呼叫相對路徑
+`/api/v1/jobs/search`；在 production API 尚未部署前不會得到真實結果。
+
+### API contract
+
+驗證 committed OpenAPI 是否與 FastAPI schema 一致：
+
+```bash
+uv run python -m work_retrieval_api.export_openapi packages/contract/openapi.json --check
+pnpm --dir packages/contract generate:check
+```
+
+production engine 與 API 部署完成後，搜尋 request contract 為：
+
+```bash
+curl -fsS https://<deployment-host>/api/v1/jobs/search \
+  -H 'content-type: application/json' \
+  --data '{"query":"後端工程師","location_code":["1001001001"]}'
+```
+
+目前不可用假的 engine 或 fallback 把這個 request 描述成 production 搜尋結果。
+
+### PostgreSQL migration
+
+先建立 `work_retrieval` database，再執行：
+
+```bash
+uv run alembic -c database/alembic.ini upgrade head
+uv run alembic -c database/alembic.ini upgrade head
+uv run alembic -c database/alembic.ini check
+```
+
+第二次 upgrade 驗證 migration 可重複執行；`alembic check` 驗證 SQLAlchemy metadata 沒有未提交的
+schema drift。
+
+## Benchmark 重現
+
+目前沒有可誠實重現的 retrieval benchmark：repository 尚未包含 production `SearchEngine`、固定的
+evaluation queries/qrels、模型 artifact 或索引 artifact。因此也沒有官方 benchmark command 或可發布的
+Recall、MRR、nDCG、latency 數字。
+
+現階段可以重現的是 repository acceptance suite：
+
+```bash
+git rev-parse HEAD
+
 uv sync --frozen --all-packages
 uv run ruff check .
 uv run ruff format --check .
@@ -69,59 +128,62 @@ pnpm --dir infra build
 pnpm --dir infra synth
 ```
 
-Run migrations twice and verify SQLAlchemy/Alembic drift against an explicit PostgreSQL database:
+完整的重現邊界、需要固定的 inputs 與未來 benchmark result 格式見
+[`docs/benchmark.md`](docs/benchmark.md)。在那些 artifact 交付前，本 repository **不宣稱**已滿足
+retrieval benchmark 重現要求。
 
-```bash
-export DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/work_retrieval
-uv run alembic -c database/alembic.ini upgrade head
-uv run alembic -c database/alembic.ini upgrade head
-uv run alembic -c database/alembic.ini check
-```
+## 資料、模型與索引版本
 
-To intentionally update the committed API contract after changing the FastAPI schema:
+| 類型                      | 目前版本／識別方式                                                                                              | 狀態                                 |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| Source code               | `git rev-parse HEAD`                                                                                            | 以 commit SHA 固定                   |
+| Python dependencies       | [`uv.lock`](uv.lock)                                                                                            | 鎖定                                 |
+| Node dependencies         | [`pnpm-lock.yaml`](pnpm-lock.yaml)；pnpm `10.28.0`                                                              | 鎖定                                 |
+| API contract              | [`packages/contract/openapi.json`](packages/contract/openapi.json)                                              | committed、CI 檢查 drift             |
+| Database schema           | Alembic `0002_create_jobs`；PostgreSQL 16                                                                       | 已匯入環境為 Aurora PostgreSQL 16.13 |
+| Job dataset               | SHA-256 `53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089`；1,218,635 rows；1,285,945,103 bytes | 已驗證並匯入                         |
+| Runtime manifest format   | schema version `1`                                                                                              | schema 已提交，manifest 未發布       |
+| Retrieval model           | 無                                                                                                              | 未發布                               |
+| Search index / embeddings | 無                                                                                                              | 未發布                               |
 
-```bash
-uv run python -m work_retrieval_api.export_openapi packages/contract/openapi.json
-pnpm --dir packages/contract generate
-```
-
-Commit both the OpenAPI document and generated TypeScript types. CI rejects drift.
-
-## Production data status
-
-The minimum data plane is deployed in competition account `378849533305`, region `us-west-2`,
-as CloudFormation stack `WorkRetrievalData`. It contains Aurora PostgreSQL 16.13 Serverless v2
-and a private, encrypted, versioned S3 bucket; it contains no ALB, CloudFront, WAF, ECS, ECR, or
-GPU capacity.
-
-The authoritative snapshot is stored at:
+資料物件使用 content-addressed key：
 
 ```text
 s3://workretrievaldata-runtimebucket404c5ee4-hkvrjx5fbkij/data/jobs/53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089/jobs.csv
 ```
 
-AWS readback on 2026-08-01 verified 1,218,635 rows, 1,218,635 distinct job IDs, source rows
-`0..1218634`, Alembic revision `0002_create_jobs`, and only `alembic_version` plus `jobs` in the
-public schema. The S3 object is 1,285,945,103 bytes and its SHA-256 metadata matches its prefix.
-The importer is intentionally pinned to the `competition` profile, account, region, source path,
-checksum, header, and row count:
+2026-08-01 的 AWS readback 驗證 1,218,635 rows、1,218,635 distinct job IDs、
+`source_row` 範圍 `0..1218634`、Alembic revision `0002_create_jobs`，以及 public schema 只有
+`alembic_version` 與 `jobs`。
 
-```bash
-AWS_PROFILE=competition AWS_DEFAULT_REGION=us-west-2 \
-  uv run python scripts/import_jobs_to_aws.py \
-  "/Users/takala/code/1111 work retrieval/dataset/職缺.csv"
+## 架構摘要
+
+```mermaid
+flowchart LR
+    Browser --> CF[CloudFront]
+    CF --> Web[S3 static web]
+    CF -->|/api/*| ALB
+    WAF[AWS WAF managed rules] --> ALB
+    ALB --> ECS[GPU ECS API]
+    ECS --> Engine[SearchEngine]
+    Engine --> Runtime[S3 immutable runtime artifacts]
+    Engine --> DB[(Aurora PostgreSQL jobs)]
 ```
 
-## Application deployment status
+這是 application plane 的目標架構；目前只部署 persistent data plane。完整的責任邊界、啟動流程、
+資料匯入與 deployment flow 見 [`docs/architecture.md`](docs/architecture.md)。
 
-Deployment is manual-only. The workflow requires the `production` GitHub environment,
-`DEPLOY_ENABLED=true`, an exact confirmation input, a prebuilt API image URI, and a SHA-256
-artifact manifest identifier. Configure required reviewers on the `production` environment
-and restrict that environment to `main` before enabling it. An operator must bootstrap the AWS
-account's GitHub OIDC provider and the first application stack deployment; that stack then owns the
-repository's deploy role. Later workflow runs deploy the application stack, publish the static web
-build to its private S3 bucket, and invalidate CloudFront. No push to `main` deploys this
-repository.
+## 部署邊界
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) and the authoritative platform specification in
-[`.kiro/specs/job-search-api-platform`](.kiro/specs/job-search-api-platform).
+`WorkRetrievalData` 已在 competition account `378849533305`、`us-west-2` 部署，包含共享 VPC、
+private/versioned S3 bucket 與 Aurora PostgreSQL 16.13 Serverless v2。它不包含 ALB、CloudFront、
+WAF、ECR、ECS 或 GPU capacity。
+
+完整平台只能透過 manual `workflow_dispatch` 部署，且需要 protected `production` environment、
+`DEPLOY_ENABLED=true`、精確確認字串、immutable API image digest 與 runtime manifest SHA-256。
+push 到 `main` 不會自動部署。
+
+## 參與開發
+
+請先閱讀 [`CONTRIBUTING.md`](CONTRIBUTING.md)。API schema 變更必須一併提交 OpenAPI 與生成的
+TypeScript types；database schema 變更必須新增 forward-only Alembic revision。

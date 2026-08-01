@@ -80,3 +80,17 @@ out of scope until it is promoted through a separate, evidence-backed change.
 - The full deployment workflow explicitly deploys `WorkRetrievalData` and then
   `WorkRetrievalPlatform`; application parameters are scoped only to `WorkRetrievalPlatform`.
 - A scaffold, successful build, CDK synthesis, or merged change must not be described as deployed.
+
+## R7. Repository documentation and reproducibility
+
+- `README.md` is the reviewer entry point and states environment setup, executable examples,
+  dependency lockfiles, delivery status, and data/model/index versions without implying absent
+  runtime capabilities.
+- `docs/architecture.md` is the canonical overview of module ownership, target request flow,
+  verified job import flow, contract generation, infrastructure ownership, and trust boundaries.
+- `docs/benchmark.md` separates reproducible repository acceptance from retrieval evaluation. It
+  must not publish a benchmark command or metrics until the production engine, versioned evaluation
+  set, model, index, runtime manifest, and committed runner exist.
+- Every future retrieval result records source commit, dependency locks, corpus and evaluation-set
+  checksums, runtime artifact checksums, retrieval configuration, execution parameters, hardware,
+  and metric definitions.

@@ -1,5 +1,10 @@
 # Job Search API Platform Design
 
+The reviewer-facing architecture and data-flow diagrams live in
+[`docs/architecture.md`](../../../docs/architecture.md). Benchmark reproducibility and its current
+artifact gaps live in [`docs/benchmark.md`](../../../docs/benchmark.md). This specification retains
+the normative design decisions behind those documents.
+
 ## Architecture
 
 ```text
@@ -74,3 +79,10 @@ disabled by default. The deploy role can assume only the four standard CDK boots
 default qualifier, account, and region. A full deployment names both stacks and scopes image
 and GPU parameters only to `WorkRetrievalPlatform`. Synthesis and tests prove configuration shape
 only, not live AWS state.
+
+## Documentation contract
+
+`README.md` is the single entry point for setup, examples, status, lockfiles, and artifact versions.
+The architecture document owns cross-module and data-flow explanations; the benchmark document owns
+evaluation provenance. Repository acceptance checks are never presented as retrieval metrics, and
+contracts or infrastructure definitions are never presented as deployed runtime evidence.

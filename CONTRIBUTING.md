@@ -67,6 +67,18 @@ profile in account `378849533305` and `us-west-2`. The script rejects any other 
 source checksum, header, or row count. Do not use Data API row-by-row inserts or bypass its staging
 validation and atomic replacement.
 
+## Documentation evidence
+
+- Keep `README.md` as the entry point and `docs/architecture.md` as the canonical system/data-flow
+  description. Update both when module ownership, runtime flow, data identity, or deployment status
+  changes.
+- Keep `docs/benchmark.md` aligned with executable repository capabilities. Acceptance tests must
+  never be labeled as retrieval quality or latency benchmarks.
+- Benchmark results require the exact Git commit, dependency locks, corpus checksum, evaluation-set
+  checksum, runtime manifest and artifact checksums, retrieval configuration, command, and hardware.
+- Use `not implemented`, `not published`, or `not deployed` when evidence is absent. Do not infer
+  runtime behavior from contracts, CDK synthesis, comments, or historical plans.
+
 ## Pull requests
 
 Keep each pull request within one responsibility boundary when possible. State the contract or
