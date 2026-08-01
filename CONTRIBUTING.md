@@ -17,15 +17,15 @@ standard library, platform, or an existing dependency already covers the require
 ## Architecture rules
 
 - Keep HTTP concerns in `apps/api` and retrieval contracts in `packages/search-core`.
-- Inject `SearchEngine` explicitly. Runtime fallback engines and production test doubles are
-  forbidden.
+- Inject `SearchEngine` explicitly. The documented temporary DB-backed fake is the only approved
+  production double; it must never become a fallback for the future evaluated engine.
 - Keep search results to at most ten unique, consecutively ranked ASCII-decimal job IDs. Preserve
   fail-closed validation at both the API and browser boundaries.
 - Use PostgreSQL/Aurora only. Do not introduce SQLite code, files, migrations, or CI paths.
 - Define PostgreSQL domain models with SQLAlchemy in `packages/database`; manage schema changes
   with Alembic and HTTP contracts with Pydantic. Do not reuse one layer's classes in another.
-- Keep database engine/session ownership inside `SqlAlchemyJobReader`; close it with the application
-  lifespan and do not construct it per request.
+- Keep database engine/session ownership inside `SqlAlchemyJobReader`; use `NullPool` and close it
+  immediately after the startup seed-ID query. Do not construct it per request.
 - Keep models, embeddings, and large indexes in the versioned S3 runtime prefix, never in Git or
   PostgreSQL.
 - Keep experiments, ablations, evaluators, and unfinished ranking implementations outside this
@@ -101,7 +101,7 @@ behavior data, rerankers, SQLite, or unrelated experiments.
 - DataStack deploys first and owns the retained ECR repository. PlatformStack receives the immutable
   image, artifact SHA, CPU desired count, GPU type, and explicit GPU `0/0/0` capacities.
 - Preserve the runtime-manifest existence and checksum check, ECR scan gate requiring zero critical
-  or high findings, CloudFront invalidation wait, and public health/readiness/web/search/detail smoke.
+  or high findings, CloudFront invalidation wait, and public health/readiness/web/search smoke.
 - ECR scan completion, stack deployment, web publication, endpoint availability, retrieval
   integration, and public smoke are separate evidence boundaries.
 - Never commit AWS credentials, database passwords, generated CDK outputs, or local `.env` files.
