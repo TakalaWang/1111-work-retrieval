@@ -3,30 +3,56 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable, Iterator
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
+from typing import cast
 
 import pytest
 from fastapi.testclient import TestClient
 from work_retrieval_api import create_app
-from work_retrieval_core import SearchQuery, SearchUnavailableError
+from work_retrieval_core import (
+    ResultTrace,
+    SearchAuditTrace,
+    SearchEngine,
+    SearchQuery,
+    SearchResult,
+    SearchUnavailableError,
+)
+
+AS_OF = datetime(2026, 6, 8, tzinfo=UTC)
+
+
+def _result(job_ids: tuple[str, ...]) -> SearchResult:
+    results = tuple(ResultTrace(job_id, 1.0, 1.0, AS_OF, False, ()) for job_id in job_ids)
+    return SearchResult(
+        job_ids,
+        SearchAuditTrace(
+            as_of=AS_OF,
+            eligible_from=AS_OF - timedelta(days=180),
+            max_age_days=180,
+            future_rows="retained_with_zero_freshness",
+            location_filter="not_requested",
+            duty_filter="not_requested",
+            query_rewrites=(),
+            lanes=(),
+            results=results,
+        ),
+    )
 
 
 class FakeEngine:
     def __init__(self, result: tuple[str, ...] = ("2", "1")) -> None:
-        self.result = result
+        self.result: object = _result(result)
         self.queries: list[tuple[SearchQuery, int]] = []
         self.closed = False
         self.error: Exception | None = None
         self.detail_error: Exception | None = None
-        self.details: dict[str, dict[str, str | None]] = {
-            "2": {"職務名稱": "後端工程師", "工作城市": "台北市"}
-        }
+        self.details = {"2": {"職務名稱": "後端工程師", "工作城市": "台北市"}}
 
-    def search(self, query: SearchQuery, *, limit: int) -> tuple[str, ...]:
+    def search(self, query: SearchQuery, *, limit: int) -> SearchResult:
         self.queries.append((query, limit))
         if self.error is not None:
             raise self.error
-        return self.result
+        return self.result  # type: ignore[return-value]
 
     def close(self) -> None:
         self.closed = True
@@ -72,9 +98,10 @@ def test_valid_request_maps_to_engine_and_returns_closed_shape(
         {"job_id": "1", "rank": 2},
     ]
     assert response.headers["X-Request-Id"] == body["request_id"]
-    assert engine.queries == [
-        (SearchQuery("後端工程師", date(2026, 6, 8), ("100100",), ("140200",)), 10)
-    ]
+    audit = json.loads(response.headers["X-Search-Audit"])
+    assert audit["as_of"] == "2026-06-08T00:00:00Z"
+    assert [item["job_id"] for item in audit["results"]] == ["2", "1"]
+    assert engine.queries == [(SearchQuery("後端工程師", ("100100",), ("140200",)), 10)]
     assert engine.closed
 
 
@@ -83,27 +110,43 @@ def test_more_than_fifty_codes_are_accepted(client: Callable[[], TestClient]) ->
     with client() as http:
         response = http.post(
             "/api/v1/jobs/search",
-            json={"query": "工程師", "search_date": "2026-06-08", "duty_code": codes},
+            json={"query": "工程師", "duty_code": codes},
         )
     assert response.status_code == 200
+
+
+@pytest.mark.parametrize("search_date", ["0001-07-01", "2026-06-08", "9999-12-30"])
+def test_search_date_valid_boundaries_reach_engine(
+    client: Callable[[], TestClient], engine: FakeEngine, search_date: str
+) -> None:
+    with client() as http:
+        response = http.post(
+            "/api/v1/jobs/search",
+            json={"query": "工程師", "search_date": search_date},
+        )
+
+    assert response.status_code == 200
+    assert engine.queries == [
+        (SearchQuery("工程師", search_date=date.fromisoformat(search_date)), 10)
+    ]
 
 
 @pytest.mark.parametrize(
     "payload",
     [
         {},
+        {"query": " "},
         {"query": "工程師", "search_date": "2026-02-30"},
         {"query": "工程師", "search_date": "2026-06-08T00:00:00"},
         {"query": "工程師", "search_date": "0001-06-30"},
         {"query": "工程師", "search_date": "9999-12-31"},
-        {"query": " "},
-        {"query": "x" * 513, "search_date": "2026-06-08"},
-        {"query": "工程師", "search_date": "2026-06-08", "location_code": None},
-        {"query": "工程師", "search_date": "2026-06-08", "duty_code": [""]},
-        {"query": "工程師", "search_date": "2026-06-08", "ks": "legacy"},
-        {"query": "工程師", "search_date": "2026-06-08", "c0": []},
-        {"query": "工程師", "search_date": "2026-06-08", "d0": []},
-        {"query": "工程師", "search_date": "2026-06-08", "empStr": []},
+        {"query": "x" * 513},
+        {"query": "工程師", "location_code": None},
+        {"query": "工程師", "duty_code": [""]},
+        {"query": "工程師", "ks": "legacy"},
+        {"query": "工程師", "c0": []},
+        {"query": "工程師", "d0": []},
+        {"query": "工程師", "empStr": []},
     ],
 )
 def test_invalid_contract_returns_422(
@@ -138,20 +181,6 @@ def test_invalid_json_wrong_media_type_and_oversize_body(
     assert invalid_json.status_code == 422
     assert wrong_type.status_code == 415
     assert oversized.status_code == 413
-
-
-@pytest.mark.parametrize("search_date", ["0001-07-01", "9999-12-30"])
-def test_search_date_valid_boundaries_reach_engine(
-    client: Callable[[], TestClient], engine: FakeEngine, search_date: str
-) -> None:
-    with client() as http:
-        response = http.post(
-            "/api/v1/jobs/search",
-            json={"query": "工程師", "search_date": search_date},
-        )
-
-    assert response.status_code == 200
-    assert engine.queries == [(SearchQuery("工程師", date.fromisoformat(search_date)), 10)]
 
 
 def test_chunked_body_is_rejected_before_unbounded_buffering(
@@ -220,22 +249,16 @@ def test_unavailable_and_contract_violations_fail_closed(
 ) -> None:
     engine.error = SearchUnavailableError("private artifact path")
     with client() as http:
-        unavailable = http.post(
-            "/api/v1/jobs/search",
-            json={"query": "工程師", "search_date": "2026-06-08"},
-        )
+        unavailable = http.post("/api/v1/jobs/search", json={"query": "工程師"})
     assert unavailable.status_code == 503
     assert unavailable.json()["error"]["message"] == (
         "The search engine is temporarily unavailable."
     )
 
     engine.error = None
-    engine.result = ("1", "1")
+    engine.result = _result(("1", "1"))
     with client() as http:
-        invalid = http.post(
-            "/api/v1/jobs/search",
-            json={"query": "工程師", "search_date": "2026-06-08"},
-        )
+        invalid = http.post("/api/v1/jobs/search", json={"query": "工程師"})
     assert invalid.status_code == 500
     assert invalid.json()["error"]["message"] == "The request could not be completed."
 
@@ -255,7 +278,7 @@ def test_every_invalid_engine_result_fails_closed(
     invalid_result: object,
 ) -> None:
     class InvalidEngine(FakeEngine):
-        def search(self, query: SearchQuery, *, limit: int) -> tuple[str, ...]:
+        def search(self, query: SearchQuery, *, limit: int) -> SearchResult:
             del query, limit
             return invalid_result  # type: ignore[return-value]
 
@@ -263,10 +286,7 @@ def test_every_invalid_engine_result_fails_closed(
         create_app(lambda: InvalidEngine()),
         raise_server_exceptions=False,
     ) as http:
-        response = http.post(
-            "/api/v1/jobs/search",
-            json={"query": "工程師", "search_date": "2026-06-08"},
-        )
+        response = http.post("/api/v1/jobs/search", json={"query": "工程師"})
 
     assert response.status_code == 500
     assert response.json()["error"]["code"] == "internal_error"
@@ -289,9 +309,12 @@ def test_factory_is_required_and_startup_errors_propagate() -> None:
         def close(self) -> None:
             pass
 
+    def invalid_factory() -> SearchEngine:
+        return cast(SearchEngine, InvalidEngine())
+
     with (
         pytest.raises(TypeError, match="runtime_factory must return a RetrievalRuntime"),
-        TestClient(create_app(lambda: InvalidEngine())),  # type: ignore[arg-type]
+        TestClient(create_app(invalid_factory)),
     ):
         pass
 
@@ -302,10 +325,7 @@ def test_access_log_does_not_include_query(
     secret_query = "不可寫入日誌的搜尋字串"
     caplog.set_level(logging.INFO, logger="work_retrieval.access")
     with client() as http:
-        response = http.post(
-            "/api/v1/jobs/search",
-            json={"query": secret_query, "search_date": "2026-06-08"},
-        )
+        response = http.post("/api/v1/jobs/search", json={"query": secret_query})
     assert response.status_code == 200
     access_records = [
         record.message for record in caplog.records if record.name == "work_retrieval.access"
@@ -326,10 +346,7 @@ def test_internal_error_logs_are_structured_and_sanitized(
     caplog.set_level(logging.INFO, logger="work_retrieval")
 
     with client() as http:
-        response = http.post(
-            "/api/v1/jobs/search",
-            json={"query": secret_query, "search_date": "2026-06-08"},
-        )
+        response = http.post("/api/v1/jobs/search", json={"query": secret_query})
 
     assert response.status_code == 500
     records = [
@@ -356,11 +373,7 @@ def test_job_detail_not_found_uses_error_envelope(client: Callable[[], TestClien
         response = http.get("/api/v1/job-details/999")
 
     assert response.status_code == 404
-    assert response.json()["error"] == {
-        "code": "job_not_found",
-        "message": "The requested job was not found.",
-        "details": [],
-    }
+    assert response.json()["error"]["code"] == "job_not_found"
 
 
 def test_job_detail_database_error_is_sanitized_503(

@@ -1,34 +1,30 @@
 from __future__ import annotations
 
 import os
-from calendar import monthrange
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta
+from datetime import datetime
 
-from sqlalchemy import URL, Engine, create_engine, select, text
+from sqlalchemy import URL, Engine, create_engine, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool
 
 from .models import Job
 
-ONE_DAY = timedelta(days=1)
-
-
-def search_window(search_date: date) -> tuple[datetime, datetime]:
-    month_index = search_date.year * 12 + search_date.month - 1 - 6
-    year, zero_based_month = divmod(month_index, 12)
-    month = zero_based_month + 1
-    start_date = date(year, month, min(search_date.day, monthrange(year, month)[1]))
-    return (
-        datetime.combine(start_date, time.min),
-        datetime.combine(search_date, time.min) + ONE_DAY,
-    )
-
 
 class JobStoreUnavailableError(RuntimeError):
     """PostgreSQL could not serve a job read without exposing internal details."""
+
+
+@dataclass(frozen=True, slots=True)
+class JobMetadataRecord:
+    job_id: str
+    work_city: str | None
+    duty_major: str | None
+    duty_middle: str | None
+    duty_minor: str | None
+    source_modified_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,33 +94,31 @@ class SqlAlchemyJobReader:
         )
         return cls(engine)
 
-    def check_connection(self) -> None:
-        try:
-            with self._engine.connect() as connection:
-                connection.execute(text("SELECT 1"))
-        except SQLAlchemyError as error:
-            raise JobStoreUnavailableError("PostgreSQL connection check failed") from error
-
-    def eligible_job_ids(self, *, search_date: date, limit: int) -> tuple[str, ...]:
-        if isinstance(limit, bool) or limit < 1:
-            raise ValueError("limit must be a positive integer")
-        window_start, window_end = search_window(search_date)
+    def metadata_for_job_ids(self, job_ids: tuple[str, ...]) -> tuple[JobMetadataRecord, ...]:
+        if len(set(job_ids)) != len(job_ids) or any(
+            not job_id.isascii() or not job_id.isdecimal() for job_id in job_ids
+        ):
+            raise ValueError("job_ids must contain unique ASCII decimal identifiers")
+        if not job_ids:
+            return ()
         try:
             with self._session_factory() as session:
-                statement = (
-                    select(Job.job_id)
-                    .where(
-                        Job.source_modified_at >= window_start,
-                        Job.source_modified_at < window_end,
-                    )
-                    .order_by(Job.source_row)
-                    .limit(limit)
-                )
-                return tuple(session.scalars(statement).all())
+                statement = select(
+                    Job.job_id,
+                    Job.work_city,
+                    Job.duty_major,
+                    Job.duty_middle,
+                    Job.duty_minor,
+                    Job.source_modified_at,
+                ).where(Job.job_id.in_(job_ids))
+                rows = session.execute(statement).all()
         except SQLAlchemyError as error:
-            raise JobStoreUnavailableError("PostgreSQL job lookup failed") from error
+            raise JobStoreUnavailableError("PostgreSQL job metadata lookup failed") from error
+        return tuple(JobMetadataRecord(*row) for row in rows)
 
     def job_details(self, job_id: str) -> dict[str, str | None] | None:
+        if not job_id.isascii() or not job_id.isdecimal():
+            raise ValueError("job_id must be an ASCII decimal identifier")
         try:
             with self._session_factory() as session:
                 job = session.scalar(select(Job).where(Job.job_id == job_id))

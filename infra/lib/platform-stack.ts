@@ -1,11 +1,9 @@
 import {
   Aws,
-  CfnCondition,
   CfnOutput,
   CfnParameter,
   DefaultStackSynthesizer,
   Duration,
-  Fn,
   RemovalPolicy,
   Stack,
   type StackProps
@@ -28,6 +26,8 @@ import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import type { Construct } from 'constructs';
 
 const EMBEDDING_ENDPOINT_NAME = 'qwen3-embedding-8b-20260801-031826';
+const EMBEDDING_ENDPOINT_CONFIG_NAME = EMBEDDING_ENDPOINT_NAME;
+const EMBEDDING_MODEL_NAME = EMBEDDING_ENDPOINT_NAME;
 const RERANKER_ENDPOINT_NAME = 'work-retrieval-qwen3-reranker-8b';
 const GITHUB_PRODUCTION_SUBJECT =
   'repo:TakalaWang@50894789/1111-work-retrieval@1318865130:environment:production';
@@ -72,7 +72,7 @@ export class PlatformStack extends Stack {
       'CpuServiceDesiredCount',
       {
         type: 'Number',
-        default: 1,
+        default: 0,
         minValue: 0
       }
     );
@@ -82,17 +82,11 @@ export class PlatformStack extends Stack {
       description: 'EC2 GPU instance type, for example g5.xlarge.'
     });
     const gpuMinCapacity = capacityParameter(this, 'GpuMinCapacity');
-    const gpuMaxCapacity = capacityParameter(this, 'GpuMaxCapacity');
+    const gpuMaxCapacity = capacityParameter(this, 'GpuMaxCapacity', 2);
     const gpuServiceDesiredCount = capacityParameter(
       this,
       'GpuServiceDesiredCount'
     );
-    const gpuCapacityEnabled = new CfnCondition(this, 'GpuCapacityEnabled', {
-      expression: Fn.conditionNot(
-        Fn.conditionEquals(gpuMaxCapacity.valueAsNumber, 0)
-      )
-    });
-
     for (const [name, service] of [
       ['EcrApiEndpoint', ec2.InterfaceVpcEndpointAwsService.ECR],
       ['EcrDockerEndpoint', ec2.InterfaceVpcEndpointAwsService.ECR_DOCKER],
@@ -109,18 +103,24 @@ export class PlatformStack extends Stack {
         privateDnsEnabled: true
       });
     }
+    new ec2.InterfaceVpcEndpoint(this, 'SageMakerApiEndpoint', {
+      vpc,
+      service: new ec2.InterfaceVpcEndpointService(
+        `com.amazonaws.${Aws.REGION}.api.sagemaker`,
+        443
+      ),
+      privateDnsEnabled: true
+    });
     for (const [name, service] of [
       ['EcsEndpoint', ec2.InterfaceVpcEndpointAwsService.ECS],
       ['EcsAgentEndpoint', ec2.InterfaceVpcEndpointAwsService.ECS_AGENT],
       ['EcsTelemetryEndpoint', ec2.InterfaceVpcEndpointAwsService.ECS_TELEMETRY]
     ] as const) {
-      const endpoint = new ec2.InterfaceVpcEndpoint(this, name, {
+      new ec2.InterfaceVpcEndpoint(this, name, {
         vpc,
         service,
         privateDnsEnabled: true
       });
-      const cfnEndpoint = endpoint.node.defaultChild as ec2.CfnVPCEndpoint;
-      cfnEndpoint.cfnOptions.condition = gpuCapacityEnabled;
     }
 
     const webBucket = new s3.Bucket(this, 'WebBucket', {
@@ -150,6 +150,15 @@ export class PlatformStack extends Stack {
       this,
       'GpuAutoScalingGroup',
       {
+        blockDevices: [
+          {
+            deviceName: '/dev/xvda',
+            volume: autoscaling.BlockDeviceVolume.ebs(100, {
+              encrypted: true,
+              volumeType: autoscaling.EbsDeviceVolumeType.GP3
+            })
+          }
+        ],
         vpc,
         vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
         instanceType: new ec2.InstanceType(gpuInstanceType.valueAsString),
@@ -182,7 +191,15 @@ export class PlatformStack extends Stack {
       DB_NAME: 'work_retrieval',
       DB_PORT: cluster.clusterEndpoint.port.toString(),
       EMBEDDING_ENDPOINT_NAME,
-      RERANKER_ENDPOINT_NAME
+      EMBEDDING_ENDPOINT_CONFIG_NAME,
+      EMBEDDING_MODEL_NAME,
+      RERANKER_ENDPOINT_NAME,
+      SEARCH_ENABLE_DENSE_SHADOW: 'false',
+      SEARCH_ENABLE_MULTIVIEW_MAXSIM: 'false',
+      SEARCH_PORT_FACTORY:
+        'work_retrieval_api.production:create_production_ports',
+      SEARCH_RUNTIME_MANIFEST_PATH: '/tmp/work-retrieval-runtime/manifest.json',
+      SEARCH_RUNTIME_ROOT: '/tmp/work-retrieval-runtime'
     };
     const databaseSecrets = {
       DB_PASSWORD: ecs.Secret.fromSecretsManager(cluster.secret!, 'password'),
@@ -220,7 +237,6 @@ export class PlatformStack extends Stack {
       circuitBreaker: { rollback: true },
       cluster: ecsCluster,
       desiredCount: cpuServiceDesiredCount.valueAsNumber,
-      healthCheckGracePeriod: Duration.minutes(2),
       minHealthyPercent: 100,
       securityGroups: [ecsSecurityGroup],
       taskDefinition: cpuTaskDefinition,
@@ -249,7 +265,7 @@ export class PlatformStack extends Stack {
       },
       gpuCount: 1,
       logging: ecs.LogDrivers.awsLogs({ logGroup, streamPrefix: 'gpu-api' }),
-      memoryReservationMiB: 4096,
+      memoryReservationMiB: 12288,
       secrets: databaseSecrets
     });
     gpuContainer.addPortMappings({ containerPort: 8000 });
@@ -320,7 +336,7 @@ export class PlatformStack extends Stack {
       priority: 1,
       port: 8000,
       protocol: elbv2.ApplicationProtocol.HTTP,
-      targets: [cpuService],
+      targets: [gpuService],
       healthCheck: { path: '/readyz' }
     });
 
@@ -560,11 +576,15 @@ export class PlatformStack extends Stack {
   }
 }
 
-function capacityParameter(stack: Stack, id: string): CfnParameter {
+function capacityParameter(
+  stack: Stack,
+  id: string,
+  defaultValue = 1
+): CfnParameter {
   return new CfnParameter(stack, id, {
     type: 'Number',
-    default: 0,
-    minValue: 0
+    default: defaultValue,
+    minValue: 1
   });
 }
 
@@ -596,6 +616,36 @@ function grantApiRuntimeAccess(
       resources: [
         sagemakerEndpointArn(stack, EMBEDDING_ENDPOINT_NAME),
         sagemakerEndpointArn(stack, RERANKER_ENDPOINT_NAME)
+      ]
+    })
+  );
+  taskDefinition.addToTaskRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['sagemaker:DescribeEndpoint'],
+      resources: [sagemakerEndpointArn(stack, EMBEDDING_ENDPOINT_NAME)]
+    })
+  );
+  taskDefinition.addToTaskRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['sagemaker:DescribeEndpointConfig'],
+      resources: [
+        stack.formatArn({
+          service: 'sagemaker',
+          resource: 'endpoint-config',
+          resourceName: EMBEDDING_ENDPOINT_CONFIG_NAME
+        })
+      ]
+    })
+  );
+  taskDefinition.addToTaskRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['sagemaker:DescribeModel'],
+      resources: [
+        stack.formatArn({
+          service: 'sagemaker',
+          resource: 'model',
+          resourceName: EMBEDDING_MODEL_NAME
+        })
       ]
     })
   );

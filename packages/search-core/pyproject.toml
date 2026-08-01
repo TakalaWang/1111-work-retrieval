@@ -1,9 +1,13 @@
 [project]
 name = "work-retrieval-core"
 version = "0.1.0"
-description = "Stable interface between the job-search API and its future retrieval engine."
+description = "Production retrieval engine and immutable runtime adapters."
 requires-python = "==3.12.*"
-dependencies = []
+dependencies = [
+    "boto3==1.43.46",
+    "numpy==2.5.1",
+    "tantivy==0.26.0",
+]
 
 [build-system]
 requires = ["hatchling"]
