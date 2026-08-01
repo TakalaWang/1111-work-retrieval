@@ -255,8 +255,7 @@ def create_app(engine_factory: EngineFactory) -> FastAPI:
         return SearchResponse(
             request_id=_request_id(request),
             result=[
-                SearchResultItem(job_id=job_id, rank=rank)
-                for rank, job_id in enumerate(job_ids, 1)
+                SearchResultItem(job_id=job_id, rank=rank) for rank, job_id in enumerate(job_ids, 1)
             ],
         )
 

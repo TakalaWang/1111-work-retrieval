@@ -58,6 +58,7 @@ describe('data stack', () => {
       DeletionProtection: true,
       EnableHttpEndpoint: true,
       Engine: 'aurora-postgresql',
+      EngineVersion: '16.13',
       ServerlessV2ScalingConfiguration: {
         MaxCapacity: 4,
         MinCapacity: 0,

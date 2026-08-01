@@ -62,9 +62,7 @@ def test_valid_request_maps_to_engine_and_returns_closed_shape(
         {"job_id": "job-1", "rank": 2},
     ]
     assert response.headers["X-Request-Id"] == body["request_id"]
-    assert engine.queries == [
-        (SearchQuery("後端工程師", ("100100",), ("140200",)), 10)
-    ]
+    assert engine.queries == [(SearchQuery("後端工程師", ("100100",), ("140200",)), 10)]
     assert engine.closed
 
 
@@ -237,9 +235,7 @@ def test_access_log_does_not_include_query(
         response = http.post("/api/v1/jobs/search", json={"query": secret_query})
     assert response.status_code == 200
     access_records = [
-        record.message
-        for record in caplog.records
-        if record.name == "work_retrieval.access"
+        record.message for record in caplog.records if record.name == "work_retrieval.access"
     ]
     assert len(access_records) == 1
     assert secret_query not in access_records[0]
@@ -261,9 +257,7 @@ def test_internal_error_logs_are_structured_and_sanitized(
 
     assert response.status_code == 500
     records = [
-        record.message
-        for record in caplog.records
-        if record.name.startswith("work_retrieval")
+        record.message for record in caplog.records if record.name.startswith("work_retrieval")
     ]
     assert len(records) == 2
     assert secret_query not in "".join(records)

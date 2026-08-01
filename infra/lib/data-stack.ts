@@ -58,7 +58,7 @@ export class DataStack extends Stack {
     );
     this.cluster = new rds.DatabaseCluster(this, 'Database', {
       engine: rds.DatabaseClusterEngine.auroraPostgres({
-        version: rds.AuroraPostgresEngineVersion.VER_16_6
+        version: rds.AuroraPostgresEngineVersion.VER_16_13
       }),
       writer: rds.ClusterInstance.serverlessV2('Writer', {
         publiclyAccessible: false

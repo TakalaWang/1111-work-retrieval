@@ -13,6 +13,7 @@
 ### Task 1: Define the job domain table
 
 **Files:**
+
 - Modify: `packages/database/src/work_retrieval_database/models.py`
 - Modify: `packages/database/src/work_retrieval_database/__init__.py`
 - Modify: `packages/database/tests/test_models.py`
@@ -32,6 +33,7 @@
 ### Task 2: Implement a fail-closed Aurora bulk importer
 
 **Files:**
+
 - Create: `scripts/import_jobs_to_aws.py`
 - Create: `tests/test_import_jobs_to_aws.py`
 - Modify: `pyproject.toml`
@@ -48,6 +50,7 @@
 ### Task 2B: Split the minimum deployable data plane
 
 **Files:**
+
 - Create: `infra/lib/data-stack.ts`
 - Modify: `infra/lib/platform-stack.ts`
 - Modify: `infra/bin/platform.ts`
@@ -67,6 +70,7 @@
 ### Task 3: Perform and verify the competition AWS import
 
 **Files:**
+
 - Modify: `README.md`
 - Modify: `CONTRIBUTING.md`
 
@@ -78,3 +82,7 @@
 6. Document only the verified invocation and operational boundary, then run the complete acceptance suite.
 7. Request spec review, then code-quality review; fix all findings.
 8. Commit, merge to `main`, push, and verify remote CI. Do not claim the future detail API exists.
+
+Status: AWS deployment, migration, immutable S3 upload, atomic Aurora import, and independent
+readback completed on 2026-08-01. Final repository acceptance, review, merge, push, and remote CI
+verification remain.

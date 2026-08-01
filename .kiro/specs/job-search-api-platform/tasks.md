@@ -24,7 +24,7 @@ These are intentionally not part of the scaffold and require their own approved 
 
 - [ ] Implement and evaluate a production `SearchEngine`, including normalization, ranking,
       lineage, and final corpus audit.
-- [ ] Import and read back the verified complete job snapshot in Aurora PostgreSQL.
+- [x] Import and read back the verified complete job snapshot in Aurora PostgreSQL.
 - [ ] Define the runtime session lifecycle only when a consuming application path is approved.
 - [ ] Specify and implement the future job-detail-by-ID API as a separate contract change.
 - [ ] Build and publish the API/GPU image and immutable runtime manifest.

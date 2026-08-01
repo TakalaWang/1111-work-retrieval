@@ -9,6 +9,7 @@ node_modules/
 build/
 coverage/
 cdk.out/
+cdk-outputs.json
 *.pyc
 *.log
 .env

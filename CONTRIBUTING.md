@@ -5,6 +5,10 @@
 ```bash
 uv sync --frozen --all-packages
 pnpm install --frozen-lockfile
+cp .env.example .env
+set -a
+source .env
+set +a
 ```
 
 Use Python 3.12, Node.js 24, and the committed lockfiles. Do not add a dependency when the
@@ -53,6 +57,11 @@ git diff -- packages/contract/openapi.json packages/contract/types.d.ts
 
 Schema changes require a new Alembic revision. Verify it on PostgreSQL 16 by upgrading from a
 fresh database; never edit an applied migration.
+
+Production job imports must use `scripts/import_jobs_to_aws.py` unchanged with the `competition`
+profile in account `378849533305` and `us-west-2`. The script rejects any other account, region,
+source checksum, header, or row count. Do not use Data API row-by-row inserts or bypass its staging
+validation and atomic replacement.
 
 ## Pull requests
 
