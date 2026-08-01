@@ -1,5 +1,6 @@
 import {
   CfnOutput,
+  CfnParameter,
   Duration,
   RemovalPolicy,
   Stack,
@@ -18,6 +19,10 @@ export class DataStack extends Stack {
 
   constructor(scope: Construct, id: string, props?: StackProps) {
     super(scope, id, props);
+    const s3PrefixListId = new CfnParameter(this, 'S3PrefixListId', {
+      allowedPattern: '^pl-[0-9a-f]+$',
+      type: 'String'
+    });
 
     this.vpc = new ec2.Vpc(this, 'Vpc', {
       natGateways: 0,
@@ -45,6 +50,11 @@ export class DataStack extends Stack {
         vpc: this.vpc,
         allowAllOutbound: false
       }
+    );
+    this.databaseSecurityGroup.addEgressRule(
+      ec2.Peer.prefixList(s3PrefixListId.valueAsString),
+      ec2.Port.tcp(443),
+      'Aurora S3 import only'
     );
     this.cluster = new rds.DatabaseCluster(this, 'Database', {
       engine: rds.DatabaseClusterEngine.auroraPostgres({

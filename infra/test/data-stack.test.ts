@@ -15,6 +15,19 @@ describe('data stack', () => {
     template.resourceCountIs('AWS::EC2::NatGateway', 0);
     template.resourceCountIs('AWS::EC2::SecurityGroupIngress', 0);
     template.resourceCountIs('AWS::S3::Bucket', 1);
+    template.hasParameter('S3PrefixListId', {
+      AllowedPattern: '^pl-[0-9a-f]+$',
+      Type: 'String'
+    });
+    template.hasResourceProperties('AWS::EC2::SecurityGroupEgress', {
+      CidrIp: Match.absent(),
+      CidrIpv6: Match.absent(),
+      Description: 'Aurora S3 import only',
+      DestinationPrefixListId: { Ref: 'S3PrefixListId' },
+      FromPort: 443,
+      IpProtocol: 'tcp',
+      ToPort: 443
+    });
     template.hasResource('AWS::S3::Bucket', {
       DeletionPolicy: 'Retain',
       UpdateReplacePolicy: 'Retain',

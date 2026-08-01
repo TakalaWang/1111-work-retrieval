@@ -69,11 +69,22 @@ jobs:
         env:
           API_IMAGE_URI: ${{ inputs.api_image_uri }}
           ARTIFACT_MANIFEST_SHA: ${{ inputs.artifact_manifest_sha }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
           GPU_INSTANCE_TYPE: ${{ inputs.gpu_instance_type }}
         run: |
+          S3_PREFIX_LIST_IDS="$(aws ec2 describe-managed-prefix-lists \
+            --filters \
+              "Name=owner-id,Values=AWS" \
+              "Name=prefix-list-name,Values=com.amazonaws.${AWS_REGION}.s3" \
+            --query 'PrefixLists[].PrefixListId' \
+            --output json)"
+          jq -e 'length == 1' <<<"$S3_PREFIX_LIST_IDS"
+          S3_PREFIX_LIST_ID="$(jq -r '.[0]' <<<"$S3_PREFIX_LIST_IDS")"
+          [[ "$S3_PREFIX_LIST_ID" =~ ^pl-[0-9a-f]+$ ]]
           pnpm --dir infra exec cdk deploy WorkRetrievalData WorkRetrievalPlatform \
             --require-approval never \
             --outputs-file cdk-outputs.json \
+            --parameters "WorkRetrievalData:S3PrefixListId=$S3_PREFIX_LIST_ID" \
             --parameters "WorkRetrievalPlatform:ApiImageUri=$API_IMAGE_URI" \
             --parameters "WorkRetrievalPlatform:ArtifactManifestSha256=$ARTIFACT_MANIFEST_SHA" \
             --parameters "WorkRetrievalPlatform:GpuInstanceType=$GPU_INSTANCE_TYPE"
