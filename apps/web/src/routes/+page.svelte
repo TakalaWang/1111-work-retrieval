@@ -49,25 +49,15 @@
 <main>
   <section class="search" aria-labelledby="search-title">
     <header class="intro">
-      <a
-        class="competition-mark"
-        href="https://www.digitimes.com.tw/seminar/generativeai_hackathon_2026/"
-        target="_blank"
-        rel="noreferrer"
-        aria-label="前往 2026 雲湧智生：臺灣生成式 AI 應用黑客松競賽官方網站"
-      >
-        <img
-          src="https://www.digitimes.com.tw/seminar/generativeai_hackathon_2026/assets/images/kv/kv.jpg"
-          width="1920"
-          height="1080"
-          alt="2026 雲湧智生：臺灣生成式 AI 應用黑客松競賽"
-        />
-      </a>
-      <div>
-        <p class="competition-name">2026 雲湧智生 · 1111 智慧求職</p>
-        <h1 id="search-title">AI 精準神算，快速找到工作</h1>
-        <p class="intro-copy">輸入職務、技能或地點，探索最相關的職缺。</p>
+      <div class="identity" aria-label="Work Retrieval，1111 智慧求職">
+        <span class="identity-mark" aria-hidden="true">WR</span>
+        <div>
+          <p class="identity-name">WORK RETRIEVAL</p>
+          <p class="competition-name">2026 雲湧智生 · 1111 智慧求職</p>
+        </div>
       </div>
+      <h1 id="search-title">AI 精準神算，快速找到工作</h1>
+      <p class="intro-copy">輸入職務、技能或地點，探索最相關的職缺。</p>
     </header>
     <form
       role="search"
@@ -230,37 +220,42 @@
   }
 
   .intro {
-    display: grid;
-    grid-template-columns: 11rem minmax(0, 1fr);
-    align-items: center;
-    gap: 1.15rem;
     margin-bottom: 1.25rem;
   }
 
-  .competition-mark {
-    display: block;
-    overflow: hidden;
-    border-radius: 0.7rem;
-    background: #07090a;
-    box-shadow: 0 5px 18px rgb(32 33 36 / 12%);
+  .identity {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    margin-bottom: 1rem;
   }
 
-  .competition-mark:focus-visible {
-    outline: 3px solid rgb(215 25 95 / 25%);
-    outline-offset: 3px;
+  .identity-mark {
+    display: grid;
+    width: 2.25rem;
+    height: 2.25rem;
+    flex: 0 0 auto;
+    place-items: center;
+    border-radius: 0.55rem;
+    background: #d7195f;
+    color: #fff;
+    font-size: 0.72rem;
+    font-weight: 900;
+    letter-spacing: -0.04em;
   }
 
-  .competition-mark img {
-    display: block;
-    width: 100%;
-    height: auto;
+  .identity-name {
+    margin: 0;
+    font-size: 0.72rem;
+    font-weight: 900;
+    letter-spacing: 0.12em;
   }
 
   .competition-name {
-    margin: 0 0 0.35rem;
-    color: #b81250;
-    font-size: 0.78rem;
-    font-weight: 800;
+    margin: 0.15rem 0 0;
+    color: #686b72;
+    font-size: 0.72rem;
+    font-weight: 700;
   }
 
   h1 {
@@ -587,15 +582,6 @@
     main {
       width: min(100% - 1.25rem, 52rem);
       padding-top: 2rem;
-    }
-
-    .intro {
-      grid-template-columns: 1fr;
-      gap: 0.8rem;
-    }
-
-    .competition-mark {
-      width: min(14rem, 100%);
     }
 
     form {
