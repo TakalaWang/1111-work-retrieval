@@ -116,10 +116,7 @@ export class PlatformStack extends Stack {
     }
     new ec2.InterfaceVpcEndpoint(this, 'SageMakerApiEndpoint', {
       vpc,
-      service: new ec2.InterfaceVpcEndpointService(
-        `com.amazonaws.${Aws.REGION}.api.sagemaker`,
-        443
-      ),
+      service: ec2.InterfaceVpcEndpointAwsService.SAGEMAKER_API,
       privateDnsEnabled: true
     });
     for (const [name, service] of [
