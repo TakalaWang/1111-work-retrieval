@@ -4,7 +4,7 @@
 
 **Goal:** Persist every row and field from the authoritative `職缺.csv` snapshot in the competition AWS account's Aurora PostgreSQL database without implementing the future job-detail API.
 
-**Architecture:** Add one explicit SQLAlchemy `jobs` model and a forward-only Alembic migration. Upload the immutable source CSV to the existing private S3 bucket, import it into a staging table with Aurora's native `aws_s3` extension, validate the complete snapshot, then atomically replace `jobs`. The operator script fails unless the AWS account, region, source SHA-256, header, row count, stack outputs, and final database counts match expected values.
+**Architecture:** Add one explicit SQLAlchemy `jobs` model and a forward-only Alembic migration. Split the deployable data plane from the fixed-cost application plane so this task creates only VPC/S3/Aurora, then upload the immutable source CSV to the private S3 bucket, import it into a staging table with Aurora's native `aws_s3` extension, validate the complete snapshot, and atomically replace `jobs`. The operator script fails unless the AWS account, `us-west-2` region, source SHA-256, header, row count, stack outputs, and final database counts match expected values.
 
 **Tech Stack:** Python 3.12 standard library, SQLAlchemy 2, Alembic, psycopg 3, PostgreSQL 16/Aurora PostgreSQL, AWS CLI, AWS CDK, S3, RDS Data API.
 
@@ -38,11 +38,30 @@
 - Modify: `infra/lib/platform-stack.ts`
 - Modify: `infra/test/platform-stack.test.ts`
 
-1. Write failing tests for the exact 39-column header, competition account `378849533305`, region `ap-southeast-2`, source SHA-256 `53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089`, 1,218,635 rows, and generated SQL validation.
+1. Write failing tests for the exact 39-column header, competition account `378849533305`, region `us-west-2`, source SHA-256 `53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089`, 1,218,635 rows, and generated SQL validation.
 2. Run the focused tests and confirm failure.
 3. Implement one stdlib operator script that validates the local CSV, resolves CloudFormation outputs and the RDS secret, uploads to a content-addressed S3 key, uses Data API plus `aws_s3.table_import_from_s3`, validates staging, atomically replaces `jobs`, and validates final count/distinct/source-row range. It must never accept another account or silently fall back.
 4. Grant the Aurora cluster read-only import access to the private runtime bucket and output its secret ARN. Keep the object private and immutable by SHA prefix.
 5. Run focused Python and CDK tests, then full lint/type/test/synth checks.
+6. Commit the task.
+
+### Task 2B: Split the minimum deployable data plane
+
+**Files:**
+- Create: `infra/lib/data-stack.ts`
+- Modify: `infra/lib/platform-stack.ts`
+- Modify: `infra/bin/platform.ts`
+- Create: `infra/test/data-stack.test.ts`
+- Modify: `infra/test/platform-stack.test.ts`
+- Modify: `.kiro/specs/job-search-api-platform/design.md`
+- Modify: `.kiro/specs/job-search-api-platform/requirements.md`
+- Modify: `.github/workflows/deploy.yml`
+
+1. Write failing CDK assertions for `WorkRetrievalData` owning VPC, private/versioned S3, and private encrypted Aurora with Data API, Secrets Manager, S3 import, zero-to-four ACU scaling, auto-pause, and deletion protection.
+2. Move those resources from `PlatformStack` into `DataStack`; pass the same VPC, bucket, cluster, and database security group into `PlatformStack` so later application deployment references the existing database instead of creating another.
+3. Keep public subnets available for the later ALB but deploy no ALB, CloudFront, WAF, ECR, ECS, GPU, interface VPC endpoints, or web bucket when only `WorkRetrievalData` is selected.
+4. Ensure manual full-platform deployment explicitly deploys both stacks, while this task can deploy only `WorkRetrievalData` with no API image parameters.
+5. Update Kiro design/requirements and verify synth assertions prove the data-only template contains none of the fixed-cost application-plane resources.
 6. Commit the task.
 
 ### Task 3: Perform and verify the competition AWS import
@@ -51,8 +70,8 @@
 - Modify: `README.md`
 - Modify: `CONTRIBUTING.md`
 
-1. Authenticate `competition` and verify caller account `378849533305` in `ap-southeast-2`.
-2. Locate or deploy `WorkRetrievalPlatform`; do not create API capacity or a job-detail API.
+1. Verify `competition` resolves to caller account `378849533305` in `us-west-2`.
+2. Deploy only `WorkRetrievalData`; do not create the ALB, CloudFront, WAF, interface endpoints, API capacity, or a job-detail API.
 3. Apply Alembic `0002_create_jobs` to Aurora through an authenticated in-scope administration path.
 4. Run the importer against `/Users/takala/code/1111 work retrieval/dataset/職缺.csv`.
 5. Read back source object metadata, `count(*)`, `count(distinct job_id)`, source-row bounds, and representative rows from Aurora. Require 1,218,635 rows and no duplicate IDs.
