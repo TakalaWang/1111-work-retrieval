@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 from work_retrieval_api import create_app
+from work_retrieval_api.jobs import JobNotFoundError, JobRecord
 from work_retrieval_core import SearchQuery, SearchUnavailableError
 
 
@@ -25,6 +26,22 @@ class FakeEngine:
 
     def close(self) -> None:
         self.closed = True
+
+
+class FakeJobImporter:
+    def __init__(self) -> None:
+        self.record = JobRecord("53256270", {"職務名稱": "口譯人員"})
+
+    def import_job(self, job_id: str) -> JobRecord:
+        if job_id != self.record.job_id:
+            raise JobNotFoundError(job_id)
+        return self.record
+
+    def get_job(self, job_id: str) -> JobRecord:
+        return self.import_job(job_id)
+
+    def close(self) -> None:
+        pass
 
 
 @pytest.fixture
@@ -76,6 +93,17 @@ def test_more_than_fifty_codes_are_accepted(client: Callable[[], TestClient]) ->
             json={"query": "工程師", "duty_code": codes},
         )
     assert response.status_code == 200
+
+
+def test_job_can_be_imported_by_numeric_id(engine: FakeEngine) -> None:
+    with TestClient(create_app(lambda: engine, FakeJobImporter)) as http:
+        response = http.post("/api/v1/jobs/pull", json={"job_id": "53256270"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "job_id": "53256270",
+        "details": {"職務名稱": "口譯人員"},
+    }
 
 
 @pytest.mark.parametrize(
