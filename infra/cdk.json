@@ -1,6 +1,7 @@
 {
   "app": "node bin/platform.ts",
   "context": {
+    "@aws-cdk/aws-autoscaling:generateLaunchTemplateInsteadOfLaunchConfig": true,
     "@aws-cdk/aws-rds:databaseProxyUniqueResourceName": true,
     "@aws-cdk/core:checkSecretUsage": true,
     "@aws-cdk/core:defaultCrossStackReferences": "strong",

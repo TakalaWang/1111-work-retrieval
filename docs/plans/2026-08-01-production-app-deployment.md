@@ -13,6 +13,7 @@
 ## Task 1: Publish the runtime artifact bundle
 
 **Files:**
+
 - Modify: `packages/contract/runtime-manifest.schema.json`
 - Create: `scripts/promote_runtime_artifacts.py`
 - Create: `tests/test_promote_runtime_artifacts.py`
@@ -26,6 +27,7 @@
 ## Task 2: Implement the production API runtime
 
 **Files:**
+
 - Modify: `packages/database/src/work_retrieval_database/`
 - Modify: `packages/database/pyproject.toml`
 - Modify: `apps/api/src/work_retrieval_api/`
@@ -44,6 +46,7 @@
 ## Task 3: Update the committed contract and web UI
 
 **Files:**
+
 - Modify: `packages/contract/openapi.json`
 - Modify: `packages/contract/types.d.ts`
 - Modify: `apps/web/src/lib/search.ts`
@@ -58,6 +61,7 @@
 ## Task 4: Make the application infrastructure deployable
 
 **Files:**
+
 - Modify: `infra/lib/data-stack.ts`
 - Modify: `infra/lib/platform-stack.ts`
 - Modify: `infra/bin/platform.ts`
@@ -73,6 +77,7 @@
 ## Task 5: Configure CD and deploy production
 
 **Files:**
+
 - Modify: `.github/workflows/deploy.yml`
 - Modify: `README.md`
 - Modify: `CONTRIBUTING.md`

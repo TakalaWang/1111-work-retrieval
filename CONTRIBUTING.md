@@ -22,8 +22,8 @@ standard library, platform, or an existing dependency already covers the require
 - Use PostgreSQL/Aurora only. Do not introduce SQLite code, files, migrations, or CI paths.
 - Define PostgreSQL domain models with SQLAlchemy in `packages/database`; manage schema changes
   with Alembic and HTTP contracts with Pydantic. Do not reuse one layer's classes in another.
-- Do not add a runtime SQLAlchemy engine or session factory until a domain access path requires
-  one.
+- Keep database engine/session ownership inside `SqlAlchemyJobReader`; close it with the application
+  lifespan and do not construct it per request.
 - Keep models, embeddings, and large indexes in the versioned S3 runtime prefix, never in Git or
   PostgreSQL.
 - Keep experiments, ablations, evaluators, and unfinished ranking implementations outside this
@@ -33,6 +33,7 @@ standard library, platform, or an existing dependency already covers the require
 ## Before opening a pull request
 
 ```bash
+uv run ruff format --check .
 uv run ruff check .
 uv run mypy
 uv run pytest
@@ -45,6 +46,7 @@ pnpm --dir apps/web build
 pnpm --dir infra test
 pnpm --dir infra build
 pnpm --dir infra synth
+docker build --tag work-retrieval-api:verify .
 ```
 
 When an API schema changes, regenerate and commit its consumers:
@@ -62,6 +64,25 @@ Production job imports must use `scripts/import_jobs_to_aws.py` unchanged with t
 profile in account `378849533305` and `us-west-2`. The script rejects any other account, region,
 source checksum, header, or row count. Do not use Data API row-by-row inserts or bypass its staging
 validation and atomic replacement.
+
+Runtime artifact promotion must use `scripts/promote_runtime_artifacts.py`. Review its dry-run
+manifest SHA before using `--execute`; never broaden its source allowlist to query history,
+behavior data, rerankers, SQLite, or unrelated experiments.
+
+## Deployment changes
+
+- Keep production deployment under `workflow_dispatch`; never add a push-triggered deploy.
+- Preserve the `main` ref check, protected `production` environment, `DEPLOY_ENABLED=true`, exact
+  `DEPLOY` confirmation, fixed account `378849533305`, and region `us-west-2`.
+- Preserve GitHub's immutable OIDC subject customization and the repository-ID-bound production
+  environment subject; do not replace it with the mutable owner/repository-name subject.
+- The workflow owns image build and push. CDK must receive an ECR digest URI, never a mutable tag or
+  caller-provided image URI.
+- DataStack deploys first and owns the retained ECR repository. PlatformStack receives the
+  immutable image, artifact SHA, CPU desired count, GPU type, and explicit GPU `0/0/0` capacities.
+- ECR scan completion, stack deployment, web publication, and public smoke checks are separate
+  gates. Do not describe a successful earlier gate as a live deployment.
+- Never commit AWS credentials, database passwords, generated CDK outputs, or local `.env` files.
 
 ## Pull requests
 
