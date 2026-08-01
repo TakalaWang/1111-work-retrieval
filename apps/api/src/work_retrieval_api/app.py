@@ -108,19 +108,24 @@ class RequestContextMiddleware:
         headers = Headers(scope=scope)
         content_type = headers.get("content-type", "").split(";", 1)[0].lower()
         response: Response | None = None
+        declared_length: int | None = None
+        if (length := headers.get("content-length")) is not None:
+            if not length.isdecimal() or int(length) > MAX_BODY_BYTES:
+                response = _error(
+                    Request(scope),
+                    413,
+                    "payload_too_large",
+                    f"Request body must not exceed {MAX_BODY_BYTES} bytes.",
+                )
+            else:
+                declared_length = int(length)
+
         requires_json = method == "POST" and path == SEARCH_PATH
         if (
-            requires_json
-            and (length := headers.get("content-length")) is not None
-            and (not length.isdecimal() or int(length) > MAX_BODY_BYTES)
+            response is None
+            and (requires_json or (declared_length or 0) > 0)
+            and content_type != "application/json"
         ):
-            response = _error(
-                Request(scope),
-                413,
-                "payload_too_large",
-                f"Request body must not exceed {MAX_BODY_BYTES} bytes.",
-            )
-        if response is None and requires_json and content_type != "application/json":
             response = _error(
                 Request(scope),
                 415,
@@ -130,7 +135,7 @@ class RequestContextMiddleware:
 
         buffered: deque[Message] = deque()
         consumed = 0
-        if response is None and requires_json:
+        if response is None:
             while True:
                 message = await receive()
                 buffered.append(message)
@@ -148,6 +153,15 @@ class RequestContextMiddleware:
                     break
                 if not message.get("more_body", False):
                     break
+
+        if response is None and consumed > 0 and content_type != "application/json":
+            response = _error(
+                Request(scope),
+                415,
+                "unsupported_media_type",
+                "Content-Type must be application/json.",
+            )
+            buffered.clear()
 
         async def replay_receive() -> Message:
             return buffered.popleft() if buffered else await receive()

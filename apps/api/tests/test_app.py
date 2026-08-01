@@ -157,12 +157,22 @@ def test_chunked_body_is_rejected_before_unbounded_buffering(
     assert response.json()["error"]["code"] == "payload_too_large"
 
 
-def test_json_body_rules_only_apply_to_post_search(
+def test_body_rules_apply_to_get_without_breaking_bodyless_get(
     client: Callable[[], TestClient],
 ) -> None:
+    def oversized_chunks() -> Iterator[bytes]:
+        yield b"x" * (8 * 1024)
+        yield b"x" * (8 * 1024 + 1)
+
     with client() as http:
         bodyless = http.get("/healthz")
-        bodyful = http.request(
+        oversized = http.request(
+            "GET",
+            "/healthz",
+            content=oversized_chunks(),
+            headers={"content-type": "application/json"},
+        )
+        wrong_type = http.request(
             "GET",
             "/healthz",
             content=b"{}",
@@ -170,7 +180,10 @@ def test_json_body_rules_only_apply_to_post_search(
         )
 
     assert bodyless.status_code == 200
-    assert bodyful.status_code == 200
+    assert oversized.status_code == 413
+    assert oversized.json()["error"]["code"] == "payload_too_large"
+    assert wrong_type.status_code == 415
+    assert wrong_type.json()["error"]["code"] == "unsupported_media_type"
 
 
 @pytest.mark.parametrize("method,status", [("put", 405), ("delete", 405)])
