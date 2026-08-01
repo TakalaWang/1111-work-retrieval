@@ -18,8 +18,10 @@ standard library, platform, or an existing dependency already covers the require
 - Use PostgreSQL/Aurora only. Do not introduce SQLite code, files, migrations, or CI paths.
 - Define PostgreSQL domain models with SQLAlchemy in `packages/database`; manage schema changes
   with Alembic and HTTP contracts with Pydantic. Do not reuse one layer's classes in another.
-- Do not add a runtime SQLAlchemy engine or session factory until a domain access path requires
-  one.
+- Keep PostgreSQL connections and queries in `packages/database`; HTTP handlers receive the
+  repository through explicit dependency injection.
+- Keep public serving paths read-only. Source snapshot ingestion must be an authenticated,
+  fail-closed operator workflow, never a browser-triggered API fallback.
 - Keep models, embeddings, and large indexes in the versioned S3 runtime prefix, never in Git or
   PostgreSQL.
 - Keep experiments, ablations, evaluators, and unfinished ranking implementations outside this
@@ -30,6 +32,7 @@ standard library, platform, or an existing dependency already covers the require
 
 ```bash
 uv run ruff check .
+uv run ruff format --check .
 uv run mypy
 uv run pytest
 uv run python -m work_retrieval_api.export_openapi packages/contract/openapi.json --check

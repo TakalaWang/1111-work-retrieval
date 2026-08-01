@@ -7,14 +7,19 @@ from pathlib import Path
 from work_retrieval_core import SearchEngine
 
 from work_retrieval_api import create_app
+from work_retrieval_api.jobs import JobRepository
 
 
 def _unavailable_factory() -> SearchEngine:
     raise RuntimeError("OpenAPI generation must not initialize a search engine")
 
 
+def _unavailable_repository_factory() -> JobRepository:
+    raise RuntimeError("OpenAPI generation must not initialize a job repository")
+
+
 def rendered_openapi() -> bytes:
-    app = create_app(_unavailable_factory)
+    app = create_app(_unavailable_factory, _unavailable_repository_factory)
     return (json.dumps(app.openapi(), ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode()
 
 

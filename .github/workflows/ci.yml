@@ -26,6 +26,7 @@ jobs:
           enable-cache: true
       - run: uv sync --frozen --all-packages
       - run: uv run ruff check .
+      - run: uv run ruff format --check .
       - run: uv run mypy
       - run: uv run pytest
       - name: Verify committed OpenAPI
@@ -67,13 +68,14 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d work_retrieval"
+          --health-cmd "psql -U postgres -d work_retrieval -Atqc 'SELECT 1'"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
     env:
       DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/work_retrieval
       PGPASSWORD: postgres
+      TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/work_retrieval
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
@@ -91,6 +93,10 @@ jobs:
             "SELECT string_agg(tablename, ',' ORDER BY tablename) FROM pg_tables WHERE schemaname = 'public'")" = "alembic_version,jobs"
           test "$(psql -h localhost -U postgres -d work_retrieval -Atc \
             "SELECT version_num FROM alembic_version")" = "0002_jobs"
+      - name: Verify ORM drift and repository reads
+        run: |
+          uv run alembic -c database/alembic.ini check
+          uv run pytest packages/database/tests/test_repository.py
 
   infrastructure:
     name: Infrastructure

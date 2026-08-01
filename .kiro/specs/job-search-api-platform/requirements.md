@@ -20,6 +20,9 @@ out of scope until it is promoted through a separate, evidence-backed change.
 - Unknown fields and legacy aliases are rejected. JSON bodies are limited to 16 KiB and other
   media types return `415`.
 - Successful responses contain `request_id` and at most ten unique, consecutively ranked job IDs.
+- Search-result and detail job IDs are non-empty ASCII decimal strings.
+- `GET /api/v1/job-details/{job_id}` reads persisted details. The public API has no import, upsert,
+  or request-time CSV path.
 - Every failure uses the shared error envelope and does not expose exceptions, SQL, or paths.
 - Access logs record metadata and latency, never query text.
 - `GET /healthz`, `GET /readyz`, and `GET /openapi.json` remain available.
@@ -27,8 +30,8 @@ out of scope until it is promoted through a separate, evidence-backed change.
 ## R3. Contract-first consumers
 
 - The repository commits deterministic OpenAPI JSON and generated TypeScript types.
-- The SvelteKit UI calls the relative `/api/v1/jobs/search` path and renders loading, results,
-  empty results, and request-ID-bearing failures.
+- The SvelteKit UI calls relative search and persisted-detail paths and renders loading, results,
+  partial detail failures, empty results, and request-ID-bearing failures.
 - CI rejects stale OpenAPI or generated TypeScript output. No mock server is a supported runtime.
 
 ## R4. PostgreSQL and artifacts
@@ -36,9 +39,12 @@ out of scope until it is promoted through a separate, evidence-backed change.
 - PostgreSQL 16/Aurora PostgreSQL is the only relational database; SQLite is forbidden.
 - SQLAlchemy owns PostgreSQL domain models, Alembic owns migrations, and Pydantic owns the HTTP
   contract; model classes are not shared across those boundaries.
-- The scaffold contains only the SQLAlchemy declarative base. It has no domain tables or runtime
-  engine/session factory.
-- The initial Alembic revision establishes version history only and creates no domain tables.
+- The `jobs` table stores a numeric text primary key, JSONB source details, and server-owned
+  creation/update timestamps. SQLAlchemy metadata must remain drift-free with Alembic.
+- The initial Alembic revision establishes version history; revision `0002_jobs` creates `jobs`.
+- The pooled read repository uses psycopg, pre-ping, and bounded connection/query timeouts.
+- Bulk source ingestion is a separate controlled operator workflow and is not implemented as a
+  public serving fallback.
 - Runtime models, embeddings, and indexes are private immutable S3 objects under
   `runtime/<manifest-sha256>/...`, described by the committed manifest schema.
 
@@ -48,6 +54,7 @@ out of scope until it is promoted through a separate, evidence-backed change.
   0–4 ACU with a ten-minute auto-pause.
 - CDK defines a private artifact bucket, ECR, GPU ECS on EC2 capacity, ALB, CloudFront `/api/*`
   routing, WAF, CloudWatch, and a least-privilege GitHub OIDC role.
+- ECS receives database connection coordinates and Secrets Manager-backed credentials.
 - ALB ingress accepts only the CloudFront origin-facing managed prefix list.
 - GPU desired capacity defaults to zero. Image URI, artifact manifest SHA-256, and GPU instance type
   are required deployment inputs.

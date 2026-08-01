@@ -7,12 +7,12 @@ from collections.abc import Callable, Iterator
 import pytest
 from fastapi.testclient import TestClient
 from work_retrieval_api import create_app
-from work_retrieval_api.jobs import JobNotFoundError, JobRecord
+from work_retrieval_api.jobs import DatabaseUnavailableError, JobRecord
 from work_retrieval_core import SearchQuery, SearchUnavailableError
 
 
 class FakeEngine:
-    def __init__(self, result: tuple[str, ...] = ("job-2", "job-1")) -> None:
+    def __init__(self, result: tuple[str, ...] = ("2", "1")) -> None:
         self.result = result
         self.queries: list[tuple[SearchQuery, int]] = []
         self.closed = False
@@ -28,20 +28,19 @@ class FakeEngine:
         self.closed = True
 
 
-class FakeJobImporter:
+class FakeJobRepository:
     def __init__(self) -> None:
         self.record = JobRecord("53256270", {"職務名稱": "口譯人員"})
+        self.closed = False
+        self.error: Exception | None = None
 
-    def import_job(self, job_id: str) -> JobRecord:
-        if job_id != self.record.job_id:
-            raise JobNotFoundError(job_id)
-        return self.record
-
-    def get_job(self, job_id: str) -> JobRecord:
-        return self.import_job(job_id)
+    def get(self, job_id: str) -> JobRecord | None:
+        if self.error is not None:
+            raise self.error
+        return self.record if job_id == self.record.job_id else None
 
     def close(self) -> None:
-        pass
+        self.closed = True
 
 
 @pytest.fixture
@@ -52,7 +51,10 @@ def engine() -> FakeEngine:
 @pytest.fixture
 def client(engine: FakeEngine) -> Callable[[], TestClient]:
     def build() -> TestClient:
-        return TestClient(create_app(lambda: engine), raise_server_exceptions=False)
+        return TestClient(
+            create_app(lambda: engine, FakeJobRepository),
+            raise_server_exceptions=False,
+        )
 
     return build
 
@@ -75,13 +77,11 @@ def test_valid_request_maps_to_engine_and_returns_closed_shape(
     assert set(body) == {"request_id", "result"}
     assert body["request_id"].startswith("req_")
     assert body["result"] == [
-        {"job_id": "job-2", "rank": 1},
-        {"job_id": "job-1", "rank": 2},
+        {"job_id": "2", "rank": 1},
+        {"job_id": "1", "rank": 2},
     ]
     assert response.headers["X-Request-Id"] == body["request_id"]
-    assert engine.queries == [
-        (SearchQuery("後端工程師", ("100100",), ("140200",)), 10)
-    ]
+    assert engine.queries == [(SearchQuery("後端工程師", ("100100",), ("140200",)), 10)]
     assert engine.closed
 
 
@@ -95,14 +95,39 @@ def test_more_than_fifty_codes_are_accepted(client: Callable[[], TestClient]) ->
     assert response.status_code == 200
 
 
-def test_job_can_be_imported_by_numeric_id(engine: FakeEngine) -> None:
-    with TestClient(create_app(lambda: engine, FakeJobImporter)) as http:
+def test_job_import_is_not_a_public_api(engine: FakeEngine) -> None:
+    with TestClient(create_app(lambda: engine, FakeJobRepository)) as http:
         response = http.post("/api/v1/jobs/pull", json={"job_id": "53256270"})
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "not_found"
+
+
+def test_persisted_job_can_be_read_by_numeric_id(engine: FakeEngine) -> None:
+    with TestClient(create_app(lambda: engine, FakeJobRepository)) as http:
+        response = http.get("/api/v1/job-details/53256270")
 
     assert response.status_code == 200
     assert response.json() == {
         "job_id": "53256270",
         "details": {"職務名稱": "口譯人員"},
+    }
+
+
+def test_missing_and_unavailable_job_data_use_safe_errors(engine: FakeEngine) -> None:
+    repository = FakeJobRepository()
+    with TestClient(create_app(lambda: engine, lambda: repository)) as http:
+        missing = http.get("/api/v1/job-details/1")
+        repository.error = DatabaseUnavailableError("private database detail")
+        unavailable = http.get("/api/v1/job-details/53256270")
+
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "job_not_found"
+    assert unavailable.status_code == 503
+    assert unavailable.json()["error"] == {
+        "code": "job_data_unavailable",
+        "message": "Job details are temporarily unavailable.",
+        "details": [],
     }
 
 
@@ -198,7 +223,7 @@ def test_unavailable_and_contract_violations_fail_closed(
     )
 
     engine.error = None
-    engine.result = ("duplicate", "duplicate")
+    engine.result = ("1", "1")
     with client() as http:
         invalid = http.post("/api/v1/jobs/search", json={"query": "工程師"})
     assert invalid.status_code == 500
@@ -211,6 +236,8 @@ def test_unavailable_and_contract_violations_fail_closed(
         ["job-1"],
         tuple(f"job-{index}" for index in range(11)),
         ("",),
+        ("job-1",),
+        ("\uff11\uff12\uff13",),
         (1,),
     ],
 )
@@ -223,7 +250,7 @@ def test_every_invalid_engine_result_fails_closed(
             return invalid_result  # type: ignore[return-value]
 
     with TestClient(
-        create_app(InvalidEngine),
+        create_app(InvalidEngine, FakeJobRepository),
         raise_server_exceptions=False,
     ) as http:
         response = http.post("/api/v1/jobs/search", json={"query": "工程師"})
@@ -235,13 +262,15 @@ def test_every_invalid_engine_result_fails_closed(
 def test_factory_is_required_and_startup_errors_propagate() -> None:
     with pytest.raises(TypeError):
         create_app()  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        create_app(FakeEngine)  # type: ignore[call-arg]
 
     def fail() -> FakeEngine:
         raise RuntimeError("artifacts are missing")
 
     with (
         pytest.raises(RuntimeError, match="artifacts are missing"),
-        TestClient(create_app(fail)),
+        TestClient(create_app(fail, FakeJobRepository)),
     ):
         pass
 
@@ -251,9 +280,27 @@ def test_factory_is_required_and_startup_errors_propagate() -> None:
 
     with (
         pytest.raises(TypeError, match="engine_factory must return a SearchEngine"),
-        TestClient(create_app(InvalidEngine)),  # type: ignore[arg-type]
+        TestClient(create_app(InvalidEngine, FakeJobRepository)),  # type: ignore[arg-type]
     ):
         pass
+
+    with (
+        pytest.raises(TypeError, match="job_repository_factory must return a JobRepository"),
+        TestClient(create_app(FakeEngine, InvalidEngine)),  # type: ignore[arg-type]
+    ):
+        pass
+
+    engine = FakeEngine()
+
+    def fail_repository() -> FakeJobRepository:
+        raise RuntimeError("database configuration is missing")
+
+    with (
+        pytest.raises(RuntimeError, match="database configuration is missing"),
+        TestClient(create_app(lambda: engine, fail_repository)),
+    ):
+        pass
+    assert engine.closed
 
 
 def test_access_log_does_not_include_query(
@@ -265,9 +312,7 @@ def test_access_log_does_not_include_query(
         response = http.post("/api/v1/jobs/search", json={"query": secret_query})
     assert response.status_code == 200
     access_records = [
-        record.message
-        for record in caplog.records
-        if record.name == "work_retrieval.access"
+        record.message for record in caplog.records if record.name == "work_retrieval.access"
     ]
     assert len(access_records) == 1
     assert secret_query not in access_records[0]
@@ -289,9 +334,7 @@ def test_internal_error_logs_are_structured_and_sanitized(
 
     assert response.status_code == 500
     records = [
-        record.message
-        for record in caplog.records
-        if record.name.startswith("work_retrieval")
+        record.message for record in caplog.records if record.name.startswith("work_retrieval")
     ]
     assert len(records) == 2
     assert secret_query not in "".join(records)

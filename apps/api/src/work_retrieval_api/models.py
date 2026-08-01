@@ -11,12 +11,6 @@ Query = Annotated[
 JobId = Annotated[str, StringConstraints(strict=True, pattern=r"^[0-9]+$")]
 
 
-class PullJobRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    job_id: JobId
-
-
 class SearchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -33,7 +27,7 @@ class SearchRequest(BaseModel):
 class SearchResultItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    job_id: str
+    job_id: JobId
     rank: Annotated[int, Field(ge=1, le=10)]
 
 
@@ -41,13 +35,13 @@ class SearchResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     request_id: str
-    result: list[SearchResultItem]
+    result: Annotated[list[SearchResultItem], Field(max_length=10)]
 
 
 class JobResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    job_id: str
+    job_id: JobId
     details: dict[str, str | None]
 
 

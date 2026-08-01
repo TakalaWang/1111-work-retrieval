@@ -101,6 +101,7 @@
             "type": "object"
           },
           "job_id": {
+            "pattern": "^[0-9]+$",
             "title": "Job Id",
             "type": "string"
           }
@@ -110,21 +111,6 @@
           "details"
         ],
         "title": "JobResponse",
-        "type": "object"
-      },
-      "PullJobRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "job_id": {
-            "pattern": "^[0-9]+$",
-            "title": "Job Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "job_id"
-        ],
-        "title": "PullJobRequest",
         "type": "object"
       },
       "SearchRequest": {
@@ -170,6 +156,7 @@
             "items": {
               "$ref": "#/components/schemas/SearchResultItem"
             },
+            "maxItems": 10,
             "title": "Result",
             "type": "array"
           }
@@ -185,6 +172,7 @@
         "additionalProperties": false,
         "properties": {
           "job_id": {
+            "pattern": "^[0-9]+$",
             "title": "Job Id",
             "type": "string"
           },
@@ -296,6 +284,16 @@
             },
             "description": "Validation Error"
           },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -308,84 +306,6 @@
           }
         },
         "summary": "Get Job"
-      }
-    },
-    "/api/v1/jobs/pull": {
-      "post": {
-        "operationId": "import_job_api_v1_jobs_pull_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/PullJobRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JobResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Not Found"
-          },
-          "413": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Request Entity Too Large"
-          },
-          "415": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Unsupported Media Type"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Unprocessable Entity"
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Service Unavailable"
-          }
-        },
-        "summary": "Import Job"
       }
     },
     "/api/v1/jobs/search": {

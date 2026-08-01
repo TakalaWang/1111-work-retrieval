@@ -1,4 +1,4 @@
-"""Add imported job details."""
+"""Add persisted job details."""
 
 from collections.abc import Sequence
 

@@ -40,6 +40,32 @@ describe('platform stack', () => {
     });
   });
 
+  test('injects direct PostgreSQL settings without exposing credentials', () => {
+    template.hasResourceProperties('AWS::ECS::TaskDefinition', {
+      ContainerDefinitions: Match.arrayWith([
+        Match.objectLike({
+          Environment: Match.arrayWith([
+            Match.objectLike({ Name: 'DATABASE_HOST' }),
+            Match.objectLike({
+              Name: 'DATABASE_NAME',
+              Value: 'work_retrieval'
+            }),
+            Match.objectLike({ Name: 'DATABASE_PORT' })
+          ]),
+          Secrets: Match.arrayWith([
+            Match.objectLike({ Name: 'DATABASE_PASSWORD' }),
+            Match.objectLike({ Name: 'DATABASE_USER' })
+          ])
+        })
+      ])
+    });
+    const task = JSON.stringify(
+      template.findResources('AWS::ECS::TaskDefinition')
+    );
+    expect(task).not.toContain('DATABASE_CLUSTER_ARN');
+    expect(task).not.toContain('DATABASE_SECRET_ARN');
+  });
+
   test('keeps artifacts private and immutable', () => {
     template.hasResourceProperties('AWS::S3::Bucket', {
       BucketEncryption: {
@@ -119,5 +145,14 @@ describe('platform stack', () => {
     const policies = JSON.stringify(template.findResources('AWS::IAM::Policy'));
     expect(policies).toContain('s3:DeleteObject');
     expect(policies).toContain('cloudfront:CreateInvalidation');
+    expect(policies).not.toContain('role/cdk-*');
+    for (const role of [
+      'deploy-role',
+      'file-publishing-role',
+      'image-publishing-role',
+      'lookup-role'
+    ]) {
+      expect(policies).toContain(`cdk-hnb659fds-${role}`);
+    }
   });
 });

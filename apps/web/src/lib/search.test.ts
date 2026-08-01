@@ -65,6 +65,35 @@ describe('search API boundary', () => {
     ).rejects.toEqual(new SearchApiError('搜尋服務回傳了無法辨識的內容。'));
   });
 
+  it.each([
+    {
+      request_id: 'req_invalid',
+      result: [{ job_id: 'job-1', rank: 1 }]
+    },
+    {
+      request_id: 'req_invalid',
+      result: [
+        { job_id: '1', rank: 1 },
+        { job_id: '1', rank: 2 }
+      ]
+    },
+    {
+      request_id: 'req_invalid',
+      result: [{ job_id: '1', rank: 2 }]
+    }
+  ])('rejects search results that violate ranking invariants', async (body) => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    );
+
+    await expect(
+      searchJobs({ query: '工程師', location_code: [], duty_code: [] }, fetcher)
+    ).rejects.toEqual(new SearchApiError('搜尋服務回傳了無法辨識的內容。'));
+  });
+
   it('rejects a malformed error envelope', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(

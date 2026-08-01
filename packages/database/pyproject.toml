@@ -3,7 +3,7 @@ name = "work-retrieval-database"
 version = "0.1.0"
 description = "SQLAlchemy domain model ownership for the work retrieval platform."
 requires-python = "==3.12.*"
-dependencies = ["sqlalchemy>=2.0,<3"]
+dependencies = ["psycopg[binary]>=3.2,<4", "sqlalchemy>=2.0,<3"]
 
 [build-system]
 requires = ["hatchling"]

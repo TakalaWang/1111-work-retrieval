@@ -7,7 +7,7 @@ Browser -> CloudFront + WAF -> /api/* -> ALB -> GPU ECS service -> SearchEngine
                               static UI
 
 GPU ECS -> S3 runtime/<manifest-sha256>/...
-GPU ECS -> Aurora PostgreSQL
+GPU ECS -> pooled PostgreSQL repository -> Aurora PostgreSQL
 ```
 
 The API owns transport validation and observability. `search-core` owns only the stable interface
@@ -16,12 +16,13 @@ corpus audit belong to that future engine and are deliberately absent from this 
 
 ## Runtime flow
 
-1. Application startup calls the required engine factory once; initialization failure aborts
-   startup.
+1. Application startup calls the required engine and job-repository factories once; initialization
+   failure aborts startup and closes resources already acquired.
 2. FastAPI validates and normalizes the request at the trust boundary.
 3. The async route invokes the synchronous engine through a worker thread with `limit=10`.
 4. The route validates engine output for count, uniqueness, and valid job IDs before responding.
-5. Shutdown closes the engine once. No alternate engine is selected on failure.
+5. Detail requests read only persisted records through the injected repository.
+6. Shutdown closes both resources once. No alternate engine or data fallback is selected.
 
 Health reports process liveness. Readiness is true only after successful engine initialization.
 Request IDs cross response headers, response envelopes, and structured metadata-only logs.
@@ -36,15 +37,15 @@ content-addressed runtime assets so a deployment resolves one immutable set rath
 ## Data and infrastructure
 
 Aurora stays in private subnets, uses encrypted storage and Secrets Manager credentials, and
-enables Data API for controlled administration. The baseline migration creates only
-`alembic_version`; domain tables wait for approved data ownership and lifecycle requirements.
-SQLAlchemy owns domain models and exposes their metadata to Alembic, while Alembic owns migration
-history and Pydantic separately owns HTTP validation. The scaffold defines only the declarative
-base, with no runtime engine/session factory.
+enables Data API for controlled administration. Revision `0002_jobs` adds the single JSONB-backed
+job-detail table. SQLAlchemy owns that model and a pooled, bounded read repository; Alembic owns
+migration history and Pydantic separately owns HTTP validation. Snapshot ingestion remains outside
+the public serving process.
 
 The artifact bucket blocks all public access and enforces encryption. CloudFront is the public
 origin for UI and API traffic; the ALB requires both CloudFront's origin-facing managed prefix
-list and a generated origin header. WAF applies AWS managed common rules. ECS uses an EC2 GPU
+list and a generated origin header. WAF applies AWS managed common rules. ECS receives database
+credentials from Secrets Manager and uses an EC2 GPU
 capacity provider and starts at zero instances/tasks to avoid cost before a real image and
 artifacts exist.
 
