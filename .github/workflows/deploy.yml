@@ -238,7 +238,7 @@ jobs:
           set -euo pipefail
           WEB_URL="$(jq -er '.WorkRetrievalPlatform.WebUrl' platform-outputs.json)"
           [[ "$WEB_URL" =~ ^https://[a-z0-9.-]+$ ]]
-          CURL=(curl --silent --show-error --fail-with-body --retry 18 --retry-all-errors --retry-delay 10)
+          CURL=(curl --silent --show-error --fail --retry 18 --retry-all-errors --retry-delay 10)
           "${CURL[@]}" "$WEB_URL/healthz" >/dev/null
           "${CURL[@]}" "$WEB_URL/readyz" >/dev/null
           WEB_HTML="$("${CURL[@]}" "$WEB_URL/")"
