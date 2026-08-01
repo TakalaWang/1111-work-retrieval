@@ -13,6 +13,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Protocol, cast
+from zoneinfo import ZoneInfo
 
 import boto3  # type: ignore[import-untyped]
 import tantivy
@@ -51,8 +52,10 @@ DEFAULT_LOCATION_TERM_FIELD = "工作城市"
 DEFAULT_DUTY_CODE_FIELD = "職務小類編號"
 DEFAULT_DUTY_TERM_FIELD = "職務小類"
 DEFAULT_VISIBILITY_FIELD = "是否公開"
-DEFAULT_MODIFIED_AT_FIELD = "更新日期"
+DEFAULT_MODIFIED_AT_FIELD = "職缺最後修改時間"
 DEFAULT_ARTIFACT_PREFIX = "indexes/tantivy-bm25-temporal-v2"
+SOURCE_TIMEZONE = ZoneInfo("Asia/Taipei")
+TAXONOMY_FIELDS = {"CodeNo", "CodeNameA", "CodeNameB", "CodeNameC"}
 ENGINE = "tantivy v0.26.0, index_format v7"
 FILTER_SEMANTICS = "visibility AND (location OR) AND (duty OR), applied before Top-K"
 TEMPORAL_SEMANTICS = (
@@ -119,7 +122,7 @@ def _timestamp(value: str, name: str) -> datetime:
     except ValueError as error:
         raise RuntimeError(f"{name} must be an ISO-8601 timestamp") from error
     if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise RuntimeError(f"{name} must include a timezone")
+        parsed = parsed.replace(tzinfo=SOURCE_TIMEZONE)
     return parsed
 
 
@@ -140,6 +143,31 @@ def _taxonomy_add(mapping: dict[str, set[str]], code: str, term: str, name: str)
     if not code.isascii() or not code.isdecimal() or not term:
         raise RuntimeError(f"source CSV contains an invalid {name} filter value")
     mapping.setdefault(code, set()).add(term)
+
+
+def _taxonomy_csv(path: Path, name: str) -> tuple[dict[str, set[str]], set[str]]:
+    mapping: dict[str, set[str]] = {}
+    primary_terms: set[str] = set()
+    with path.open(encoding="utf-8-sig", newline="") as source:
+        reader = csv.DictReader(source)
+        if reader.fieldnames is None or not TAXONOMY_FIELDS.issubset(reader.fieldnames):
+            missing = sorted(TAXONOMY_FIELDS.difference(reader.fieldnames or ()))
+            raise RuntimeError(f"{name} taxonomy CSV is missing fields: {missing}")
+        for row in reader:
+            code = canonical_text(row["CodeNo"])
+            primary = canonical_code(row["CodeNameA"])
+            if code in mapping or not primary:
+                raise RuntimeError(
+                    f"{name} taxonomy contains a duplicate code or empty primary term"
+                )
+            for field in ("CodeNameA", "CodeNameB", "CodeNameC"):
+                term = canonical_code(row[field])
+                if term:
+                    _taxonomy_add(mapping, code, term, name)
+            primary_terms.add(primary)
+    if not mapping:
+        raise RuntimeError(f"{name} taxonomy CSV contains no rows")
+    return mapping, primary_terms
 
 
 def _tree(index_directory: Path) -> list[dict[str, object]]:
@@ -176,11 +204,13 @@ def build_tantivy(
     jobs_csv: Path,
     output: Path,
     artifact_prefix: str,
-    location_code_field: str,
+    location_code_field: str | None,
     location_term_field: str,
-    duty_code_field: str,
+    location_taxonomy_csv: Path | None = None,
+    duty_code_field: str | None,
     duty_term_field: str,
-    visibility_field: str,
+    duty_taxonomy_csv: Path | None = None,
+    visibility_field: str | None,
     modified_at_field: str,
     correction_candidate_path: Path | None,
     correction_attestation_path: Path | None,
@@ -204,18 +234,35 @@ def build_tantivy(
         job_ids: list[str] = []
         seen: set[str] = set()
         order = hashlib.sha256()
-        locations: dict[str, set[str]] = {}
-        duties: dict[str, set[str]] = {}
+        if location_taxonomy_csv is None:
+            if location_code_field is None:
+                raise RuntimeError("location code field or taxonomy CSV is required")
+            locations: dict[str, set[str]] = {}
+            location_terms: set[str] | None = None
+        else:
+            locations, location_terms = _taxonomy_csv(location_taxonomy_csv, "location")
+        if duty_taxonomy_csv is None:
+            if duty_code_field is None:
+                raise RuntimeError("duty code field or taxonomy CSV is required")
+            duties: dict[str, set[str]] = {}
+            duty_terms: set[str] | None = None
+        else:
+            duties, duty_terms = _taxonomy_csv(duty_taxonomy_csv, "duty")
         required = {
             JOB_ID_FIELD,
-            location_code_field,
             location_term_field,
-            duty_code_field,
             duty_term_field,
-            visibility_field,
             modified_at_field,
             *(label for label, _field in FULL_JOB_FIELDS),
         }
+        if location_taxonomy_csv is None:
+            assert location_code_field is not None
+            required.add(location_code_field)
+        if duty_taxonomy_csv is None:
+            assert duty_code_field is not None
+            required.add(duty_code_field)
+        if visibility_field is not None:
+            required.add(visibility_field)
         csv.field_size_limit(64 * 1024 * 1024)
         with jobs_csv.open(encoding="utf-8-sig", newline="") as source:
             reader = csv.DictReader(source)
@@ -230,15 +277,33 @@ def build_tantivy(
                 job_ids.append(job_id)
                 order.update(job_id.encode() + b"\n")
                 values = {field: row[label] for label, field in FULL_JOB_FIELDS}
-                location_code = canonical_text(row[location_code_field])
-                location_term = canonical_code(row[location_term_field])
-                duty_code = canonical_text(row[duty_code_field])
-                duty_term = canonical_code(row[duty_term_field])
-                visibility = canonical_code(row[visibility_field])
+                location_term = canonical_code(canonical_text(row[location_term_field]))
+                duty_term = canonical_code(canonical_text(row[duty_term_field]))
+                visibility = (
+                    "1" if visibility_field is None else canonical_code(row[visibility_field])
+                )
                 if visibility not in {"0", "1"}:
                     raise RuntimeError("source CSV visibility must be exactly 0 or 1")
-                _taxonomy_add(locations, location_code, location_term, "location")
-                _taxonomy_add(duties, duty_code, duty_term, "duty")
+                if location_taxonomy_csv is None:
+                    assert location_code_field is not None
+                    _taxonomy_add(
+                        locations,
+                        canonical_text(row[location_code_field]),
+                        location_term,
+                        "location",
+                    )
+                elif location_term and location_term not in cast(set[str], location_terms):
+                    raise RuntimeError("source CSV location is absent from its taxonomy")
+                if duty_taxonomy_csv is None:
+                    assert duty_code_field is not None
+                    _taxonomy_add(
+                        duties,
+                        canonical_text(row[duty_code_field]),
+                        duty_term,
+                        "duty",
+                    )
+                elif duty_term and duty_term not in cast(set[str], duty_terms):
+                    raise RuntimeError("source CSV duty is absent from its taxonomy")
                 modified = _timestamp(row[modified_at_field], "job modified timestamp")
                 epoch_ms = int(modified.timestamp() * 1000)
                 if epoch_ms < 0:
@@ -247,8 +312,10 @@ def build_tantivy(
                 for field in TEXT_FIELDS:
                     text = _serialized(values, SOURCE_FIELDS[field])
                     document.add_text(field, " ".join(lexical_tokens(text)))
-                document.add_text("location_filter", location_term)
-                document.add_text("duty_filter", duty_term)
+                if location_term:
+                    document.add_text("location_filter", location_term)
+                if duty_term:
+                    document.add_text("duty_filter", duty_term)
                 document.add_text(VISIBILITY_FIELD, visibility)
                 document.add_unsigned(UPDATED_AT_FIELD, epoch_ms)
                 document.add_unsigned(JOB_INDEX_FIELD, row_index)
@@ -601,9 +668,11 @@ def main() -> None:
     build.add_argument("--artifact-prefix", default=DEFAULT_ARTIFACT_PREFIX)
     build.add_argument("--location-code-field", default=DEFAULT_LOCATION_CODE_FIELD)
     build.add_argument("--location-term-field", default=DEFAULT_LOCATION_TERM_FIELD)
+    build.add_argument("--location-taxonomy-csv", type=Path)
     build.add_argument("--duty-code-field", default=DEFAULT_DUTY_CODE_FIELD)
     build.add_argument("--duty-term-field", default=DEFAULT_DUTY_TERM_FIELD)
-    build.add_argument("--visibility-field", default=DEFAULT_VISIBILITY_FIELD)
+    build.add_argument("--duty-taxonomy-csv", type=Path)
+    build.add_argument("--visibility-field")
     build.add_argument("--modified-at-field", default=DEFAULT_MODIFIED_AT_FIELD)
     build.add_argument("--query-correction-candidate", type=Path)
     build.add_argument("--query-correction-attestation", type=Path)
@@ -629,8 +698,10 @@ def main() -> None:
             artifact_prefix=args.artifact_prefix,
             location_code_field=args.location_code_field,
             location_term_field=args.location_term_field,
+            location_taxonomy_csv=args.location_taxonomy_csv,
             duty_code_field=args.duty_code_field,
             duty_term_field=args.duty_term_field,
+            duty_taxonomy_csv=args.duty_taxonomy_csv,
             visibility_field=args.visibility_field,
             modified_at_field=args.modified_at_field,
             correction_candidate_path=args.query_correction_candidate,
