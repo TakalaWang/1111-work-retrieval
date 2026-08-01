@@ -49,10 +49,10 @@
 <main>
   <section class="search" aria-labelledby="search-title">
     <header class="intro">
-      <div class="identity" aria-label="Work Retrieval，1111 智慧求職">
-        <span class="identity-mark" aria-hidden="true">WR</span>
+      <div class="identity" aria-label="蝦咪係Ai，1111 智慧求職">
+        <span class="identity-mark" aria-hidden="true">AI</span>
         <div>
-          <p class="identity-name">WORK RETRIEVAL</p>
+          <p class="identity-name">蝦咪係Ai</p>
           <p class="competition-name">2026 雲湧智生 · 1111 智慧求職</p>
         </div>
       </div>
