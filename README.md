@@ -21,18 +21,19 @@ Git commit 與 public smoke 結果；各層狀態必須分別確認。
 
 ## 原始碼與文件
 
-| 路徑                                           | 內容                                                 |
-| ---------------------------------------------- | ---------------------------------------------------- |
-| [`apps/api`](apps/api)                         | FastAPI request validation、lifecycle 與 OpenAPI     |
-| [`apps/web`](apps/web)                         | SvelteKit 搜尋介面                                   |
-| [`packages/search-core`](packages/search-core) | Tantivy、Qwen、artifact bootstrap、fusion 與 audit   |
-| [`packages/database`](packages/database)       | SQLAlchemy `Job` model 與 PostgreSQL read repository |
-| [`packages/contract`](packages/contract)       | OpenAPI、TypeScript types 與 runtime manifest schema |
-| [`database`](database)                         | PostgreSQL Alembic migrations                        |
-| [`infra`](infra)                               | AWS CDK infrastructure                               |
-| [`scripts`](scripts)                           | 職缺資料驗證、AWS importer 與 artifact promotion     |
-| [`docs/architecture.md`](docs/architecture.md) | 系統架構與資料流程                                   |
-| [`docs/benchmark.md`](docs/benchmark.md)       | Benchmark 重現範圍與版本證據要求                     |
+| 路徑                                                         | 內容                                                 |
+| ------------------------------------------------------------ | ---------------------------------------------------- |
+| [`apps/api`](apps/api)                                       | FastAPI request validation、lifecycle 與 OpenAPI     |
+| [`apps/web`](apps/web)                                       | SvelteKit 搜尋介面                                   |
+| [`packages/search-core`](packages/search-core)               | Tantivy、Qwen、artifact bootstrap、fusion 與 audit   |
+| [`packages/database`](packages/database)                     | SQLAlchemy `Job` model 與 PostgreSQL read repository |
+| [`packages/contract`](packages/contract)                     | OpenAPI、TypeScript types 與 runtime manifest schema |
+| [`database`](database)                                       | PostgreSQL Alembic migrations                        |
+| [`infra`](infra)                                             | AWS CDK infrastructure                               |
+| [`scripts`](scripts)                                         | 職缺資料驗證、AWS importer 與 artifact promotion     |
+| [`docs/architecture.md`](docs/architecture.md)               | 系統架構與資料流程                                   |
+| [`docs/benchmark.md`](docs/benchmark.md)                     | Benchmark 重現範圍與版本證據要求                     |
+| [`docs/retrieval-pipelines.md`](docs/retrieval-pipelines.md) | Graph 與 multi-view embedding 重現、驗證及 AWS 契約  |
 
 PostgreSQL／Aurora 是唯一 relational database；不支援 SQLite。SQLAlchemy、Alembic 與 Pydantic
 分別負責 persistence model、schema migration 與 HTTP contract。Runtime model、embedding 與大型 index
