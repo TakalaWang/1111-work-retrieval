@@ -83,13 +83,8 @@ export interface components {
             location_code?: string[];
             /** Query */
             query: string;
-            /**
-             * Search Date
-             * Format: date
-             * @description ISO date from 0001-07-01 through 9999-12-30 inclusive.
-             * @default 2026-06-08
-             */
-            search_date?: string;
+            /** Search Date */
+            search_date?: string | null;
         };
         /** SearchResponse */
         SearchResponse: {

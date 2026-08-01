@@ -140,7 +140,7 @@ Aurora credentials 由 ECS 經 Secrets Manager 注入，不保存於 image、Git
 | Runtime manifest contract | [`runtime-manifest.schema.json`](packages/contract/runtime-manifest.schema.json)，repository schema version `2`；promotion tooling 已完成，正式 release 仍需明確 spec 與人工 `--execute` |
 | Embedding endpoint        | `qwen3-embedding-8b-20260801-031826`；`InService`                                                                                                                                        |
 | Reranker endpoint         | `work-retrieval-qwen3-reranker-8b`；`InService`                                                                                                                                          |
-| Production retrieval      | source 已整合；artifact promotion、image rollout 與 live readback 仍須各自驗證                                                                                                          |
+| Production retrieval      | source 已整合；artifact promotion、image rollout 與 live readback 仍須各自驗證                                                                                                           |
 
 Runtime v2 promotion 只接受一份已固定 source manifest SHA、selected inventory SHA、component
 manifest SHA 與 challenger promotion evidence 的 release spec。Dry-run 會執行完整 contract 與 component
@@ -204,7 +204,6 @@ AWS_PROFILE=competition AWS_DEFAULT_REGION=us-west-2 \
   uv run python scripts/import_jobs_to_aws.py \
   "/Users/takala/code/1111 work retrieval/dataset/職缺.csv"
 ```
-
 
 Importer 與 promotion script 都固定 account、region、來源 identity 與完整性檢查；不要繞過其驗證。
 
