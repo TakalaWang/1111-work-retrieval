@@ -8,6 +8,13 @@ Query = Annotated[
     str,
     StringConstraints(strict=True, strip_whitespace=True, min_length=1, max_length=512),
 ]
+JobId = Annotated[str, StringConstraints(strict=True, pattern=r"^[0-9]+$")]
+
+
+class PullJobRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: JobId
 
 
 class SearchRequest(BaseModel):
@@ -35,6 +42,13 @@ class SearchResponse(BaseModel):
 
     request_id: str
     result: list[SearchResultItem]
+
+
+class JobResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: str
+    details: dict[str, str | None]
 
 
 class ErrorDetail(BaseModel):

@@ -70,6 +70,16 @@ pnpm --dir packages/contract generate
 
 Commit both the OpenAPI document and generated TypeScript types. CI rejects drift.
 
+## CSV job import
+
+The API accepts `{"job_id":"53256270"}` at `POST /api/v1/jobs/pull`, finds the matching first
+column in the configured CSV, and upserts the remaining named fields into PostgreSQL.
+Read an imported record with `GET /api/v1/job-details/{job_id}`.
+
+Set `DATABASE_URL` to a PostgreSQL connection URL. `JOB_CSV_PATH` is intentionally unset by
+default and must point to the source CSV before imports can run. Supply
+`job_importer_from_environment` as the optional second factory passed to `create_app`.
+
 ## Deployment status
 
 Deployment is manual-only. The workflow requires the `production` GitHub environment,

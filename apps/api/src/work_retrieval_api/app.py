@@ -19,10 +19,18 @@ from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from work_retrieval_core import SearchEngine, SearchQuery, SearchUnavailableError
 
+from work_retrieval_api.jobs import (
+    JobImporter,
+    JobImportUnavailableError,
+    JobNotFoundError,
+)
 from work_retrieval_api.models import (
     ErrorBody,
     ErrorDetail,
     ErrorResponse,
+    JobId,
+    JobResponse,
+    PullJobRequest,
     SearchRequest,
     SearchResponse,
     SearchResultItem,
@@ -30,9 +38,11 @@ from work_retrieval_api.models import (
 )
 
 EngineFactory = Callable[[], SearchEngine]
+JobImporterFactory = Callable[[], JobImporter]
 MAX_BODY_BYTES = 16 * 1024
 MAX_RESULTS = 10
 SEARCH_PATH = "/api/v1/jobs/search"
+PULL_PATH = "/api/v1/jobs/pull"
 logger = logging.getLogger("work_retrieval.access")
 internal_logger = logging.getLogger("work_retrieval.internal")
 
@@ -102,7 +112,7 @@ class RequestContextMiddleware:
 
         headers = Headers(scope=scope)
         response: Response | None = None
-        if method == "POST" and path == SEARCH_PATH:
+        if method == "POST" and path in {SEARCH_PATH, PULL_PATH}:
             content_type = headers.get("content-type", "").split(";", 1)[0].lower()
             request = Request(scope)
             if content_type != "application/json":
@@ -123,7 +133,7 @@ class RequestContextMiddleware:
                 )
 
         buffered: deque[Message] = deque()
-        if response is None and method == "POST" and path == SEARCH_PATH:
+        if response is None and method == "POST" and path in {SEARCH_PATH, PULL_PATH}:
             consumed = 0
             while True:
                 message = await receive()
@@ -169,16 +179,25 @@ class RequestContextMiddleware:
             )
 
 
-def create_app(engine_factory: EngineFactory) -> FastAPI:
+def create_app(
+    engine_factory: EngineFactory,
+    job_importer_factory: JobImporterFactory | None = None,
+) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = engine_factory()
         if not isinstance(engine, SearchEngine):
             raise TypeError("engine_factory must return a SearchEngine")
         app.state.engine = engine
+        job_importer = job_importer_factory() if job_importer_factory is not None else None
+        if job_importer is not None and not isinstance(job_importer, JobImporter):
+            raise TypeError("job_importer_factory must return a JobImporter")
+        app.state.job_importer = job_importer
         try:
             yield
         finally:
+            if job_importer is not None:
+                job_importer.close()
             engine.close()
 
     app = FastAPI(title="1111 Work Retrieval API", version="1.0.0", lifespan=lifespan)
@@ -202,6 +221,16 @@ def create_app(engine_factory: EngineFactory) -> FastAPI:
             "search_unavailable",
             "The search engine is temporarily unavailable.",
         )
+
+    @app.exception_handler(JobImportUnavailableError)
+    async def job_import_unavailable(
+        request: Request, _error_value: JobImportUnavailableError
+    ) -> JSONResponse:
+        return _error(request, 503, "job_import_unavailable", "Job import is not configured.")
+
+    @app.exception_handler(JobNotFoundError)
+    async def job_not_found(request: Request, _error_value: JobNotFoundError) -> JSONResponse:
+        return _error(request, 404, "job_not_found", "The job ID was not found.")
 
     @app.exception_handler(StarletteHTTPException)
     async def http_error(request: Request, error: StarletteHTTPException) -> JSONResponse:
@@ -259,5 +288,37 @@ def create_app(engine_factory: EngineFactory) -> FastAPI:
                 for rank, job_id in enumerate(job_ids, 1)
             ],
         )
+
+    def configured_importer(request: Request) -> JobImporter:
+        importer = cast(JobImporter | None, request.app.state.job_importer)
+        if importer is None:
+            raise JobImportUnavailableError("JOB_CSV_PATH is not configured")
+        return importer
+
+    @app.post(
+        PULL_PATH,
+        response_model=JobResponse,
+        responses={
+            413: {"model": ErrorResponse},
+            415: {"model": ErrorResponse},
+            422: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
+    )
+    async def import_job(payload: PullJobRequest, request: Request) -> JobResponse:
+        record = await run_in_threadpool(
+            configured_importer(request).import_job, payload.job_id
+        )
+        return JobResponse(job_id=record.job_id, details=dict(record.details))
+
+    @app.get(
+        "/api/v1/job-details/{job_id}",
+        response_model=JobResponse,
+        responses={404: {"model": ErrorResponse}, 503: {"model": ErrorResponse}},
+    )
+    async def get_job(job_id: JobId, request: Request) -> JobResponse:
+        record = await run_in_threadpool(configured_importer(request).get_job, job_id)
+        return JobResponse(job_id=record.job_id, details=dict(record.details))
 
     return app
