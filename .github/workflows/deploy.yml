@@ -130,17 +130,19 @@ jobs:
             --outputs-file "$GITHUB_WORKSPACE/data-outputs.json" \
             --parameters "WorkRetrievalData:S3PrefixListId=$S3_PREFIX_LIST_ID"
 
-      - name: Verify the runtime manifest exists
+      - name: Download and validate the runtime manifest body
         env:
           ARTIFACT_MANIFEST_SHA: ${{ inputs.artifact_manifest_sha }}
         run: |
           set -euo pipefail
           RUNTIME_BUCKET="$(jq -er '.WorkRetrievalData.RuntimeBucketName' data-outputs.json)"
-          MANIFEST_HEAD="$(aws s3api head-object \
+          MANIFEST_PATH="$RUNNER_TEMP/runtime-manifest.json"
+          MANIFEST_GET="$(aws s3api get-object \
             --bucket "$RUNTIME_BUCKET" \
             --key "runtime/${ARTIFACT_MANIFEST_SHA}/manifest.json" \
             --expected-bucket-owner "$AWS_ACCOUNT_ID" \
-            --checksum-mode ENABLED)"
+            --checksum-mode ENABLED \
+            "$MANIFEST_PATH")"
           EXPECTED_CHECKSUM="$(python - "$ARTIFACT_MANIFEST_SHA" <<'PY'
           import base64
           import sys
@@ -149,8 +151,11 @@ jobs:
           PY
           )"
           jq -e --arg checksum "$EXPECTED_CHECKSUM" \
-            '.ContentLength > 0 and .ChecksumSHA256 == $checksum' \
-            <<<"$MANIFEST_HEAD" >/dev/null
+            '.ChecksumSHA256 == $checksum' \
+            <<<"$MANIFEST_GET" >/dev/null
+          uv run python scripts/validate_runtime_manifest_file.py \
+            --manifest "$MANIFEST_PATH" \
+            --expected-sha256 "$ARTIFACT_MANIFEST_SHA"
 
       - name: Build, publish, and scan the API image
         env:

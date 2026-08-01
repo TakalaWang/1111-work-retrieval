@@ -111,8 +111,10 @@ database security group，不會建立第二份資料來源。
 ## Trust and failure boundaries
 
 - API 與 browser 都 fail closed；malformed engine output 或 response 不會降級成部分結果。
-- Runtime assets 必須由 v2 manifest SHA-256 與每個 artifact SHA-256 固定，不使用 mutable `latest`；
-  `complete` 與 `publication_allowed` 必須同時通過，manifest 永遠最後寫入並回讀。
+- Runtime assets 必須由 v2 manifest SHA-256 與每個 artifact SHA-256/size 固定，不使用 mutable
+  `latest`；component inventory 必須恰好涵蓋 root inventory，且禁止 query history、GT/qrels、test JD、
+  raw logs 與 secrets。`complete` 與 `publication_allowed` 必須同時通過；所有 data objects 通過分頁
+  inventory audit 後才寫入 manifest，並對 manifest body 與完整 prefix 回讀。
 - PostgreSQL 是唯一 relational database；不提供 SQLite compatibility path。
 - ALB 只接受 CloudFront origin-facing prefix list，並驗證 generated origin header。
 - Deployment 使用 GitHub OIDC 與 protected environment，不保存 long-lived AWS credentials。

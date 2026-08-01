@@ -7,6 +7,7 @@ import argparse
 import base64
 import hashlib
 import json
+import math
 import subprocess
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -29,13 +30,60 @@ APPROVED_MODEL_REVISION = "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"
 APPROVED_WHOLE_DIMENSION = 4096
 APPROVED_MULTIVIEW_DIMENSION = 1024
 APPROVED_MULTIVIEW_KINDS = ["occupation", "skill", "requirement", "content"]
+APPROVED_DOCUMENT_FIELDS = [
+    "title",
+    "duty_minor",
+    "duty_middle",
+    "duty_major",
+    "computer_skills",
+    "work_skills",
+    "professional_certifications",
+    "experience_requirement",
+    "education_requirement",
+    "work_city",
+    "industry_minor",
+    "industry_middle",
+    "industry_major",
+    "additional_conditions",
+    "description",
+]
+APPROVED_QUERY_INSTRUCTION = (
+    "Instruct: Given a job search query, retrieve relevant job postings matching "
+    "the user's intent\nQuery: "
+)
+APPROVED_TANTIVY_SCHEMA_FIELDS = [
+    "title",
+    "duty",
+    "skills",
+    "industry",
+    "body",
+    "location_filter",
+    "duty_filter",
+    "visibility_filter",
+    "updated_at_epoch_ms",
+    "job_index",
+]
+APPROVED_TANTIVY_FIELD_BOOSTS = {
+    "title": 15.0,
+    "duty": 8.0,
+    "skills": 6.0,
+    "industry": 1.0,
+    "body": 0.5,
+}
 DEMO_AS_OF = "2026-06-08T23:59:59.999+08:00"
+APPROVED_GRAPH_TRAIN_CUTOFF = "2026-06-08T00:00:00+08:00"
+APPROVED_GRAPH_MAX_SOURCE_TIMESTAMP = "2026-06-07T23:51:07.143000+08:00"
+APPROVED_GRAPH_SOURCE_JD_SHA256 = "53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089"
+TEMPORAL_FILTER_SEMANTICS = (
+    "updated_at >= as_of - 180 days before Top-K; updated_at > as_of retained with freshness=0"
+)
 ARTIFACT_ROOTS = {
     "embedding": "embeddings",
     "model": "models",
     "index": "indexes",
     "graph": "graphs",
     "ranker": "rankers",
+    "guardrail": "guardrails",
     "evidence": "evidence",
 }
 CHALLENGERS = {
@@ -43,8 +91,31 @@ CHALLENGERS = {
     "skill_graph",
     "semantic_reranker",
     "learning_to_rank",
-    "query_neighbor_history",
-    "behavior_prior",
+    "guardrails",
+}
+FORBIDDEN_PATH_PARTS = {
+    "credential",
+    "credentials",
+    "ground-truth",
+    "ground_truth",
+    "gt",
+    "judgment",
+    "judgments",
+    "log",
+    "logs",
+    "qrel",
+    "qrels",
+    "query-history",
+    "query_history",
+    "raw-log",
+    "raw-logs",
+    "raw-search-logs",
+    "raw_log",
+    "raw_logs",
+    "secret",
+    "secrets",
+    "test-jd",
+    "test_jd",
 }
 HEX = frozenset("0123456789abcdef")
 RUNTIME_SCHEMA = (
@@ -127,6 +198,10 @@ def _require_sha256(name: str, value: object) -> str:
     return value
 
 
+def _reject_nonfinite_json(value: str) -> object:
+    raise ValueError(f"non-finite JSON number is forbidden: {value}")
+
+
 def validate_relative_path(path: str, kind: str | None = None) -> None:
     candidate = PurePosixPath(path)
     raw_parts = path.split("/")
@@ -150,12 +225,25 @@ def _validate_source_path(path: str) -> None:
 
 def canonical_bytes(value: Mapping[str, object]) -> bytes:
     return (
-        json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n"
+        json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
     ).encode()
 
 
 def _canonical_sha256(value: object) -> str:
-    payload = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    payload = json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
@@ -297,11 +385,12 @@ def _json_document(
     ):
         raise RuntimeError(f"component manifest body differs: {path}")
     try:
-        value = json.loads(raw)
-    except json.JSONDecodeError as error:
+        value = json.loads(raw, parse_constant=_reject_nonfinite_json)
+    except (json.JSONDecodeError, ValueError) as error:
         raise RuntimeError(f"component manifest is invalid JSON: {path}") from error
     if not isinstance(value, dict):
         raise RuntimeError(f"component manifest is not an object: {path}")
+    _forbid_sensitive_fields(value)
     return cast(dict[str, object], value)
 
 
@@ -315,24 +404,119 @@ def _require_equal(
         raise RuntimeError(f"{component} component manifest differs in: {', '.join(mismatches)}")
 
 
+def _require_exact_keys(component: str, value: Mapping[str, object], expected: set[str]) -> None:
+    if set(value) != expected:
+        raise RuntimeError(f"{component} component manifest schema differs")
+
+
+def _inventory_entries(
+    component: str,
+    document: Mapping[str, object],
+    artifacts: Mapping[str, object],
+    *,
+    field: str = "files",
+    kinds: set[str],
+) -> set[str]:
+    raw_entries = document.get(field)
+    if not isinstance(raw_entries, list) or not raw_entries:
+        raise RuntimeError(f"{component} component inventory is missing or empty")
+    paths: set[str] = set()
+    for raw in raw_entries:
+        if not isinstance(raw, dict) or set(raw) != {"path", "sha256", "size_bytes"}:
+            raise RuntimeError(f"{component} component inventory entry differs")
+        path = raw.get("path")
+        if not isinstance(path, str) or path in paths:
+            raise RuntimeError(f"{component} component inventory path is invalid or repeated")
+        artifact = artifacts.get(path)
+        if not isinstance(artifact, dict) or artifact.get("kind") not in kinds:
+            raise RuntimeError(f"{component} component inventory is unreachable: {path}")
+        if raw.get("sha256") != artifact.get("sha256") or raw.get("size_bytes") != artifact.get(
+            "size_bytes"
+        ):
+            raise RuntimeError(f"{component} component inventory SHA/size differs: {path}")
+        paths.add(path)
+    return paths
+
+
+def _validate_whole_shards(
+    component: Mapping[str, object], inventory: set[str], expected_rows: object
+) -> None:
+    shards = component.get("shards")
+    if not isinstance(shards, list) or not shards:
+        raise RuntimeError("whole embedding shards are missing")
+    expected_start = 0
+    shard_paths: set[str] = set()
+    for shard in shards:
+        if not isinstance(shard, dict) or set(shard) != {
+            "vectors_path",
+            "job_ids_path",
+            "row_start",
+            "row_end",
+            "rows",
+            "dimension",
+        }:
+            raise RuntimeError("whole embedding shard contract differs")
+        rows = shard.get("rows")
+        row_start = shard.get("row_start")
+        row_end = shard.get("row_end")
+        if (
+            type(rows) is not int
+            or type(row_start) is not int
+            or type(row_end) is not int
+            or row_start != expected_start
+            or row_end != row_start + rows
+            or rows <= 0
+            or shard.get("dimension") != APPROVED_WHOLE_DIMENSION
+        ):
+            raise RuntimeError("whole embedding shard row/dimension contract differs")
+        for name in ("vectors_path", "job_ids_path"):
+            path = shard.get(name)
+            if not isinstance(path, str) or path not in inventory or path in shard_paths:
+                raise RuntimeError("whole embedding shard file is absent or repeated")
+            shard_paths.add(path)
+        expected_start = row_end
+    if expected_start != expected_rows:
+        raise RuntimeError("whole embedding shard rows differ from the runtime contract")
+    embedding_paths = {path for path in inventory if path.startswith("embeddings/")}
+    if shard_paths != embedding_paths:
+        raise RuntimeError("whole embedding component inventory has unreferenced shard files")
+    if not any(path.startswith("models/") for path in inventory):
+        raise RuntimeError("whole embedding component inventory has no model snapshot files")
+
+
 def _validate_component_manifests(
     manifest: Mapping[str, object], documents: Mapping[str, bytes]
-) -> None:
+) -> set[str]:
     artifacts = cast(Mapping[str, object], manifest["artifacts"])
     incumbents = cast(Mapping[str, Mapping[str, object]], manifest["incumbents"])
+    reachable: set[str] = set()
     whole = incumbents["whole_embedding"]
     whole_path = _artifact_reference(artifacts, whole, "embedding")
+    reachable.add(whole_path)
     if whole.get("manifest_sha256") != APPROVED_WHOLE_MANIFEST_SHA256:
         raise RuntimeError("whole embedding manifest is not the verified production cache")
     whole_document = _json_document(whole_path, artifacts, documents)
-    shards = whole_document.get("shards")
-    dimensions = (
-        {shard.get("dimension") for shard in shards if isinstance(shard, dict)}
-        if isinstance(shards, list)
-        else set()
+    _require_exact_keys(
+        "whole embedding",
+        whole_document,
+        {
+            "complete",
+            "model",
+            "revision",
+            "dtype",
+            "normalized",
+            "rows",
+            "dataset_sha256",
+            "jobs_sha256",
+            "job_row_order_sha256",
+            "document_policy_version",
+            "document_template_sha256",
+            "document_fields",
+            "query_instruction",
+            "shards",
+            "files",
+        },
     )
-    if dimensions != {APPROVED_WHOLE_DIMENSION}:
-        raise RuntimeError("whole embedding component dimensions differ")
     _require_equal(
         "whole embedding",
         {
@@ -347,17 +531,39 @@ def _validate_component_manifests(
             "job_row_order_sha256": whole.get("job_row_order_sha256"),
             "document_policy_version": whole.get("document_policy_version"),
             "document_template_sha256": whole.get("document_template_sha256"),
+            "document_fields": APPROVED_DOCUMENT_FIELDS,
+            "query_instruction": APPROVED_QUERY_INSTRUCTION,
         },
         whole_document,
     )
-    if not any(
-        isinstance(value, dict) and value.get("kind") == "model" for value in artifacts.values()
-    ):
-        raise RuntimeError("verified Qwen model snapshot is missing")
+    whole_files = _inventory_entries(
+        "whole embedding", whole_document, artifacts, kinds={"embedding", "model"}
+    )
+    _validate_whole_shards(whole_document, whole_files, whole.get("rows"))
+    reachable.update(whole_files)
 
     temporal = incumbents["temporal_tantivy"]
     temporal_path = _artifact_reference(artifacts, temporal, "index")
+    reachable.add(temporal_path)
     temporal_document = _json_document(temporal_path, artifacts, documents)
+    _require_exact_keys(
+        "temporal Tantivy",
+        temporal_document,
+        {
+            "complete",
+            "engine",
+            "jobs_sha256",
+            "job_row_order_sha256",
+            "index_sha256",
+            "updated_at_field",
+            "filter_semantics",
+            "temporal_filter_semantics",
+            "index_directory",
+            "index_files",
+            "schema_fields",
+            "field_boosts",
+        },
+    )
     _require_equal(
         "temporal Tantivy",
         {
@@ -367,9 +573,9 @@ def _validate_component_manifests(
             "job_row_order_sha256": whole.get("job_row_order_sha256"),
             "index_sha256": temporal.get("index_sha256"),
             "updated_at_field": "updated_at_epoch_ms",
-            "temporal_filter_semantics": (
-                "updated_at <= as_of AND updated_at >= as_of - 180 days before Top-K"
-            ),
+            "temporal_filter_semantics": TEMPORAL_FILTER_SEMANTICS,
+            "schema_fields": APPROVED_TANTIVY_SCHEMA_FIELDS,
+            "field_boosts": APPROVED_TANTIVY_FIELD_BOOSTS,
         },
         temporal_document,
     )
@@ -378,12 +584,44 @@ def _validate_component_manifests(
         token in filter_semantics for token in ("location", "duty", "before Top-K")
     ):
         raise RuntimeError("temporal Tantivy hard-filter contract differs")
+    index_directory = temporal_document.get("index_directory")
+    expected_directory = str(PurePosixPath(temporal_path).parent / "index")
+    if index_directory != expected_directory:
+        raise RuntimeError("temporal Tantivy index directory differs")
+    index_files = _inventory_entries(
+        "temporal Tantivy", temporal_document, artifacts, field="index_files", kinds={"index"}
+    )
+    if not all(path.startswith(f"{expected_directory}/") for path in index_files):
+        raise RuntimeError("temporal Tantivy index inventory escaped its index directory")
+    reachable.update(index_files)
 
     challengers = cast(Mapping[str, Mapping[str, object]], manifest["challengers"])
     multiview = challengers["multiview_embedding"]
     if multiview.get("enabled") is True:
         path = _artifact_reference(artifacts, multiview, "embedding")
+        reachable.add(path)
         component = _json_document(path, artifacts, documents)
+        _require_exact_keys(
+            "multi-view embedding",
+            component,
+            {
+                "complete",
+                "publication_allowed",
+                "model",
+                "revision",
+                "model_contract_sha256",
+                "tokenizer_sha256",
+                "view_policy_sha256",
+                "dataset_sha256",
+                "output_dimension",
+                "dtype",
+                "normalized",
+                "mrl_report_sha256",
+                "mrl_evidence",
+                "view_policy",
+                "files",
+            },
+        )
         policy = component.get("view_policy")
         included_kinds = policy.get("included_kinds") if isinstance(policy, dict) else None
         _require_equal(
@@ -422,11 +660,32 @@ def _validate_component_manifests(
             },
             component_evidence,
         )
+        reachable.update(
+            _inventory_entries(
+                "multi-view embedding", component, artifacts, kinds={"embedding", "model"}
+            )
+        )
 
     graph = challengers["skill_graph"]
     if graph.get("enabled") is True:
         path = _artifact_reference(artifacts, graph, "graph")
+        reachable.add(path)
         component = _json_document(path, artifacts, documents)
+        _require_exact_keys(
+            "skill Graph",
+            component,
+            {
+                "complete",
+                "publication_allowed",
+                "schema_version",
+                "train_cutoff_exclusive",
+                "max_source_timestamp",
+                "source_jd_sha256",
+                "source_policy",
+                "test_jd_used",
+                "files",
+            },
+        )
         _require_equal(
             "skill Graph",
             {
@@ -441,13 +700,20 @@ def _validate_component_manifests(
             },
             component,
         )
+        reachable.update(_inventory_entries("skill Graph", component, artifacts, kinds={"graph"}))
 
     for name, challenger in challengers.items():
         if name in {"multiview_embedding", "skill_graph"} or challenger.get("enabled") is not True:
             continue
-        kind = "ranker" if name in {"semantic_reranker", "learning_to_rank"} else "evidence"
+        kind = "ranker" if name in {"semantic_reranker", "learning_to_rank"} else "guardrail"
         path = _artifact_reference(artifacts, challenger, kind)
+        reachable.add(path)
         component = _json_document(path, artifacts, documents)
+        _require_exact_keys(
+            name,
+            component,
+            {"complete", "publication_allowed", "promotion_report_sha256", "files"},
+        )
         evidence = challenger.get("promotion_evidence")
         evidence_sha = evidence.get("report_sha256") if isinstance(evidence, dict) else None
         _require_equal(
@@ -459,21 +725,41 @@ def _validate_component_manifests(
             },
             component,
         )
+        reachable.update(_inventory_entries(name, component, artifacts, kinds={kind}))
+    return reachable
 
 
-def _forbid_credentials(value: object) -> None:
+def _forbid_sensitive_fields(value: object) -> None:
     forbidden_keys = {"password", "secret", "token", "access_key", "secret_access_key"}
+    forbidden_data_keys = {
+        "ground_truth",
+        "ground_truth_rows",
+        "judgments",
+        "qrels",
+        "query_history",
+        "raw_logs",
+        "test_jd",
+        "test_jd_rows",
+    }
     if isinstance(value, dict):
         for key, child in value.items():
             normalized = str(key).lower()
+            if normalized in forbidden_data_keys:
+                raise RuntimeError(f"runtime JSON contains forbidden evaluation data: {key}")
             if normalized in forbidden_keys or normalized.endswith(
                 ("_password", "_secret", "_token", "_access_key")
             ):
                 raise RuntimeError(f"runtime manifest contains forbidden credential field: {key}")
-            _forbid_credentials(child)
+            _forbid_sensitive_fields(child)
     elif isinstance(value, list):
         for child in value:
-            _forbid_credentials(child)
+            _forbid_sensitive_fields(child)
+
+
+def _forbid_artifact_path(path: str) -> None:
+    parts = {part.casefold() for part in path.split("/")}
+    if parts & FORBIDDEN_PATH_PARTS:
+        raise RuntimeError(f"runtime bundle contains forbidden artifact path: {path}")
 
 
 def _timestamp(value: object, name: str) -> datetime:
@@ -488,20 +774,75 @@ def _timestamp(value: object, name: str) -> datetime:
     return parsed
 
 
-def _validate_promotion_evidence(evidence: object, artifacts: Mapping[str, object]) -> None:
+def _validate_promotion_evidence(
+    evidence: object,
+    artifacts: Mapping[str, object],
+    documents: Mapping[str, bytes],
+) -> str:
     if not isinstance(evidence, dict):
         raise RuntimeError("enabled challenger requires promotion evidence")
+    delta = evidence.get("absolute_delta")
     if (
         evidence.get("decision") != "accepted"
-        or not isinstance(evidence.get("absolute_delta"), (int, float))
-        or float(cast(float, evidence["absolute_delta"])) <= 0
+        or type(delta) not in {int, float}
+        or not math.isfinite(cast(float, delta))
+        or cast(float, delta) <= 0
     ):
-        raise RuntimeError("enabled challenger promotion evidence was not accepted")
+        raise RuntimeError("enabled challenger requires a finite positive NDCG@10 delta")
     report = {
         "manifest_path": evidence.get("report_path"),
         "manifest_sha256": evidence.get("report_sha256"),
     }
-    _artifact_reference(artifacts, report, "evidence")
+    report_path = _artifact_reference(artifacts, report, "evidence")
+    body = _json_document(report_path, artifacts, documents)
+    expected_keys = {
+        "schema_version",
+        "complete",
+        "publication_allowed",
+        "evaluation_split_sha256",
+        "baseline_run_sha256",
+        "candidate_run_sha256",
+        "primary_metric",
+        "baseline_value",
+        "candidate_value",
+        "absolute_delta",
+    }
+    if set(body) != expected_keys or body.get("schema_version") != 1:
+        raise RuntimeError("promotion report schema differs")
+    if body.get("complete") is not True or body.get("publication_allowed") is not True:
+        raise RuntimeError("promotion report is incomplete or not publishable")
+    lineage = {
+        "evaluation split": "evaluation_split_sha256",
+        "baseline run": "baseline_run_sha256",
+        "candidate run": "candidate_run_sha256",
+        "primary metric": "primary_metric",
+        "absolute delta": "absolute_delta",
+    }
+    for label, key in lineage.items():
+        if body.get(key) != evidence.get(key):
+            raise RuntimeError(f"promotion report {label} differs from runtime lineage")
+    baseline = body.get("baseline_value")
+    candidate = body.get("candidate_value")
+    report_delta = body.get("absolute_delta")
+    if (
+        type(baseline) not in {int, float}
+        or type(candidate) not in {int, float}
+        or type(report_delta) not in {int, float}
+        or not all(
+            math.isfinite(cast(float, value)) for value in (baseline, candidate, report_delta)
+        )
+        or cast(float, report_delta) <= 0
+        or not math.isclose(
+            cast(float, candidate) - cast(float, baseline),
+            cast(float, report_delta),
+            rel_tol=0,
+            abs_tol=1e-12,
+        )
+    ):
+        raise RuntimeError(
+            "promotion report requires a finite positive internally consistent delta"
+        )
+    return report_path
 
 
 def validate_runtime_manifest(
@@ -531,7 +872,7 @@ def validate_runtime_manifest(
         raise RuntimeError("runtime as_of policy differs")
     if eligibility != {
         "updated_within_days": 180,
-        "future_jobs": "exclude",
+        "future_jobs": "retained_with_zero_freshness",
         "stale_jobs": "exclude",
         "applied_before_retrieval": True,
     }:
@@ -543,6 +884,7 @@ def validate_runtime_manifest(
         if not isinstance(kind, str):
             raise RuntimeError(f"runtime artifact kind is missing: {path}")
         validate_relative_path(path, kind)
+        _forbid_artifact_path(path)
         _require_sha256(f"artifact SHA-256 for {path}", raw.get("sha256"))
         if type(raw.get("size_bytes")) is not int or cast(int, raw["size_bytes"]) < 0:
             raise RuntimeError(f"runtime artifact size is invalid: {path}")
@@ -560,9 +902,15 @@ def validate_runtime_manifest(
         )
         if max_source_timestamp >= cutoff:
             raise RuntimeError("Graph source timestamp must precede its exclusive train cutoff")
-        _require_sha256("Graph source JD SHA-256", graph.get("source_jd_sha256"))
+        if (
+            graph.get("train_cutoff_exclusive") != APPROVED_GRAPH_TRAIN_CUTOFF
+            or graph.get("max_source_timestamp") != APPROVED_GRAPH_MAX_SOURCE_TIMESTAMP
+            or graph.get("source_jd_sha256") != APPROVED_GRAPH_SOURCE_JD_SHA256
+        ):
+            raise RuntimeError("Graph does not match the approved Graph train snapshot")
         if graph.get("source_policy") != "train_jd_only" or graph.get("test_jd_used") is not False:
             raise RuntimeError("Graph is not proven train-only")
+    evidence_paths: set[str] = set()
     for name, challenger in challengers.items():
         enabled = challenger.get("enabled")
         if enabled is False:
@@ -596,8 +944,20 @@ def validate_runtime_manifest(
                 },
                 "evidence",
             )
-        else:
-            _validate_promotion_evidence(challenger.get("promotion_evidence"), artifacts)
+            mrl_path = cast(Mapping[str, object], evidence).get("report_path")
+            if not isinstance(mrl_path, str):
+                raise RuntimeError("multi-view MRL report path is missing")
+            mrl_body = _json_document(mrl_path, artifacts, documents)
+            if (
+                mrl_body.get("stable_result_sha256") != evidence.get("stable_result_sha256")
+                or mrl_body.get("selected_dimension") != APPROVED_MULTIVIEW_DIMENSION
+                or mrl_body.get("reference_dimension") != APPROVED_WHOLE_DIMENSION
+            ):
+                raise RuntimeError("multi-view MRL report lineage differs")
+            evidence_paths.add(mrl_path)
+        evidence_paths.add(
+            _validate_promotion_evidence(challenger.get("promotion_evidence"), artifacts, documents)
+        )
     expected_count = len(artifacts)
     expected_size = sum(cast(int, value["size_bytes"]) for value in artifacts.values())
     expected_inventory = _canonical_sha256(artifacts)
@@ -614,8 +974,12 @@ def validate_runtime_manifest(
         "artifact_inventory_sha256",
     ):
         _require_sha256(name, release.get(name))
-    _forbid_credentials(manifest)
-    _validate_component_manifests(manifest, documents)
+    _forbid_sensitive_fields(manifest)
+    reachable = _validate_component_manifests(manifest, documents) | evidence_paths
+    if reachable != set(artifacts):
+        extra = sorted(set(artifacts) - reachable)
+        missing = sorted(reachable - set(artifacts))
+        raise RuntimeError(f"runtime artifact inventory has unreachable={extra} missing={missing}")
     try:
         schema = json.loads(RUNTIME_SCHEMA.read_text(encoding="utf-8"))
         Draft202012Validator(schema, format_checker=FormatChecker()).validate(manifest)
@@ -695,8 +1059,8 @@ def _source_manifest_contract(spec: Mapping[str, object]) -> tuple[str, str]:
 
 def _read_json_object(payload: bytes, name: str) -> dict[str, object]:
     try:
-        value = json.loads(payload)
-    except json.JSONDecodeError as error:
+        value = json.loads(payload, parse_constant=_reject_nonfinite_json)
+    except (json.JSONDecodeError, ValueError) as error:
         raise RuntimeError(f"{name} is invalid JSON") from error
     if not isinstance(value, dict):
         raise RuntimeError(f"{name} is not a JSON object")
@@ -722,7 +1086,7 @@ def load_source_manifest(
     return _read_json_object(payload, "source manifest")
 
 
-def _component_paths(runtime: Mapping[str, object]) -> set[str]:
+def _document_paths(runtime: Mapping[str, object]) -> set[str]:
     try:
         incumbents = cast(Mapping[str, Mapping[str, object]], runtime["incumbents"])
         challengers = cast(Mapping[str, Mapping[str, object]], runtime["challengers"])
@@ -734,6 +1098,15 @@ def _component_paths(runtime: Mapping[str, object]) -> set[str]:
         for value in challengers.values()
         if value.get("enabled") is True
     )
+    for challenger in challengers.values():
+        if challenger.get("enabled") is not True:
+            continue
+        promotion = challenger.get("promotion_evidence")
+        if isinstance(promotion, dict) and isinstance(promotion.get("report_path"), str):
+            paths.add(cast(str, promotion["report_path"]))
+        mrl = challenger.get("mrl_evidence")
+        if isinstance(mrl, dict) and isinstance(mrl.get("report_path"), str):
+            paths.add(cast(str, mrl["report_path"]))
     return paths
 
 
@@ -745,7 +1118,7 @@ def load_component_documents(
     runtime = spec.get("runtime")
     if not isinstance(runtime, dict):
         raise RuntimeError("release spec runtime contract is missing")
-    paths = _component_paths(runtime)
+    paths = _document_paths(runtime)
     by_destination = {cast(str, item["path"]): item for item in items}
     source_key, _ = _source_manifest_contract(spec)
     source_root = source_key.removesuffix("manifest.json")
@@ -961,6 +1334,30 @@ def put_manifest(payload: bytes, manifest_sha: str) -> None:
         raise RuntimeError("destination manifest differs")
 
 
+def audit_data_objects(
+    items: Sequence[Mapping[str, object]], manifest_sha: str, payload: bytes
+) -> None:
+    prefix = f"runtime/{manifest_sha}/"
+    manifest_key = f"{prefix}manifest.json"
+    actual = _list_destination(prefix)
+    prior_manifest_size = actual.pop(manifest_key, None)
+    expected = {
+        destination_key(manifest_sha, cast(str, item["path"])): cast(int, item["size_bytes"])
+        for item in items
+    }
+    if actual != expected:
+        raise RuntimeError("destination data-only key or size inventory differs")
+    if prior_manifest_size is not None and (
+        prior_manifest_size != len(payload) or _read_destination_manifest(manifest_sha) != payload
+    ):
+        raise RuntimeError("existing destination manifest differs during data-only audit")
+    for item in items:
+        _verify_destination(
+            _head(DESTINATION_BUCKET, destination_key(manifest_sha, cast(str, item["path"]))),
+            item,
+        )
+
+
 def audit_destination(
     items: Sequence[Mapping[str, object]], manifest_sha: str, manifest_bytes: int
 ) -> None:
@@ -983,6 +1380,7 @@ def publish_release(
     items: Sequence[Mapping[str, object]], payload: bytes, manifest_sha: str, source_root: str
 ) -> None:
     copy_artifacts(items, manifest_sha, source_root)
+    audit_data_objects(items, manifest_sha, payload)
     put_manifest(payload, manifest_sha)
     audit_destination(items, manifest_sha, len(payload))
 

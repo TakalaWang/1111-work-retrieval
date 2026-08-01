@@ -65,7 +65,7 @@
           ],
           "properties": {
             "updated_within_days": { "const": 180 },
-            "future_jobs": { "const": "exclude" },
+            "future_jobs": { "const": "retained_with_zero_freshness" },
             "stale_jobs": { "const": "exclude" },
             "applied_before_retrieval": { "const": true }
           }
@@ -89,16 +89,14 @@
         "skill_graph",
         "semantic_reranker",
         "learning_to_rank",
-        "query_neighbor_history",
-        "behavior_prior"
+        "guardrails"
       ],
       "properties": {
         "multiview_embedding": { "$ref": "#/$defs/multiviewEmbedding" },
         "skill_graph": { "$ref": "#/$defs/skillGraph" },
         "semantic_reranker": { "$ref": "#/$defs/genericChallenger" },
         "learning_to_rank": { "$ref": "#/$defs/genericChallenger" },
-        "query_neighbor_history": { "$ref": "#/$defs/genericChallenger" },
-        "behavior_prior": { "$ref": "#/$defs/genericChallenger" }
+        "guardrails": { "$ref": "#/$defs/genericChallenger" }
       }
     },
     "artifacts": {
@@ -117,7 +115,7 @@
       "type": "string",
       "allOf": [
         {
-          "pattern": "^(embeddings|models|indexes|graphs|rankers|evidence)/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+$"
+          "pattern": "^(embeddings|models|indexes|graphs|rankers|guardrails|evidence)/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+$"
         },
         { "not": { "pattern": "(^|/)\\.{1,2}(/|$)" } }
       ]
@@ -128,7 +126,15 @@
       "required": ["kind", "sha256", "size_bytes"],
       "properties": {
         "kind": {
-          "enum": ["embedding", "model", "index", "graph", "ranker", "evidence"]
+          "enum": [
+            "embedding",
+            "model",
+            "index",
+            "graph",
+            "ranker",
+            "guardrail",
+            "evidence"
+          ]
         },
         "sha256": { "$ref": "#/$defs/sha256" },
         "size_bytes": { "type": "integer", "minimum": 0 }
@@ -198,7 +204,7 @@
         "updated_at_field": { "const": "updated_at_epoch_ms" },
         "hard_filters": { "const": true },
         "temporal_filter_semantics": {
-          "const": "updated_at <= as_of AND updated_at >= as_of - 180 days before Top-K"
+          "const": "updated_at >= as_of - 180 days before Top-K; updated_at > as_of retained with freshness=0"
         }
       }
     },
@@ -253,7 +259,8 @@
             "dtype",
             "normalized",
             "view_kinds",
-            "mrl_evidence"
+            "mrl_evidence",
+            "promotion_evidence"
           ],
           "properties": {
             "enabled": { "const": true },
@@ -284,7 +291,8 @@
               "minItems": 4,
               "maxItems": 4
             },
-            "mrl_evidence": { "$ref": "#/$defs/mrlEvidence" }
+            "mrl_evidence": { "$ref": "#/$defs/mrlEvidence" },
+            "promotion_evidence": { "$ref": "#/$defs/promotionEvidence" }
           }
         }
       ]
@@ -344,14 +352,14 @@
             "manifest_sha256": { "$ref": "#/$defs/sha256" },
             "schema_version": { "type": "integer", "minimum": 1 },
             "train_cutoff_exclusive": {
-              "type": "string",
-              "format": "date-time"
+              "const": "2026-06-08T00:00:00+08:00"
             },
             "max_source_timestamp": {
-              "type": "string",
-              "format": "date-time"
+              "const": "2026-06-07T23:51:07.143000+08:00"
             },
-            "source_jd_sha256": { "$ref": "#/$defs/sha256" },
+            "source_jd_sha256": {
+              "const": "53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089"
+            },
             "source_policy": { "const": "train_jd_only" },
             "test_jd_used": { "const": false },
             "promotion_evidence": { "$ref": "#/$defs/promotionEvidence" }
