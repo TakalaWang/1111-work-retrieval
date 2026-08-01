@@ -42,13 +42,33 @@
 </script>
 
 <svelte:head>
-  <title>職缺搜尋</title>
+  <title>AI 精準職缺搜尋｜2026 雲湧智生</title>
   <meta name="description" content="輸入關鍵字，搜尋最相關的 1111 職缺。" />
 </svelte:head>
 
 <main>
   <section class="search" aria-labelledby="search-title">
-    <h1 id="search-title">職缺搜尋</h1>
+    <header class="intro">
+      <a
+        class="competition-mark"
+        href="https://www.digitimes.com.tw/seminar/generativeai_hackathon_2026/"
+        target="_blank"
+        rel="noreferrer"
+        aria-label="前往 2026 雲湧智生：臺灣生成式 AI 應用黑客松競賽官方網站"
+      >
+        <img
+          src="https://www.digitimes.com.tw/seminar/generativeai_hackathon_2026/assets/images/kv/kv.jpg"
+          width="1920"
+          height="1080"
+          alt="2026 雲湧智生：臺灣生成式 AI 應用黑客松競賽"
+        />
+      </a>
+      <div>
+        <p class="competition-name">2026 雲湧智生 · 1111 智慧求職</p>
+        <h1 id="search-title">AI 精準神算，快速找到工作</h1>
+        <p class="intro-copy">輸入職務、技能或地點，探索最相關的職缺。</p>
+      </div>
+    </header>
     <form
       role="search"
       onsubmit={(event) => {
@@ -209,10 +229,53 @@
     padding: clamp(3rem, 10vh, 6rem) 0 5rem;
   }
 
+  .intro {
+    display: grid;
+    grid-template-columns: 11rem minmax(0, 1fr);
+    align-items: center;
+    gap: 1.15rem;
+    margin-bottom: 1.25rem;
+  }
+
+  .competition-mark {
+    display: block;
+    overflow: hidden;
+    border-radius: 0.7rem;
+    background: #07090a;
+    box-shadow: 0 5px 18px rgb(32 33 36 / 12%);
+  }
+
+  .competition-mark:focus-visible {
+    outline: 3px solid rgb(215 25 95 / 25%);
+    outline-offset: 3px;
+  }
+
+  .competition-mark img {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+
+  .competition-name {
+    margin: 0 0 0.35rem;
+    color: #b81250;
+    font-size: 0.78rem;
+    font-weight: 800;
+  }
+
   h1 {
-    margin: 0 0 1rem;
+    margin: 0;
     font-size: clamp(1.5rem, 4vw, 2rem);
     letter-spacing: -0.03em;
+    line-height: 1.25;
+    text-wrap: balance;
+  }
+
+  .intro-copy {
+    margin: 0.45rem 0 0;
+    color: #686b72;
+    font-size: 0.9rem;
+    line-height: 1.55;
   }
 
   form {
@@ -296,12 +359,13 @@
   }
 
   .controls input {
-    min-height: 2.25rem;
+    min-height: 2.75rem;
     border: 1px solid #cfd1d5;
     border-radius: 0.5rem;
     padding: 0.35rem 0.55rem;
     background: #fff;
     color: inherit;
+    font-size: 1rem;
   }
 
   .controls input:focus-visible {
@@ -353,6 +417,7 @@
     margin-top: 0.8rem;
     color: #686b72;
     font-size: 0.78rem;
+    overflow-wrap: anywhere;
   }
 
   .spinner {
@@ -406,6 +471,10 @@
     gap: 0.85rem;
   }
 
+  .job-heading > div {
+    min-width: 0;
+  }
+
   .rank {
     display: grid;
     width: 1.8rem;
@@ -423,6 +492,7 @@
     margin: 0;
     font-size: 1.08rem;
     line-height: 1.4;
+    overflow-wrap: anywhere;
   }
 
   .job-id {
@@ -481,6 +551,7 @@
   dd {
     margin: 0;
     color: #3f4248;
+    overflow-wrap: anywhere;
   }
 
   .updated {
@@ -493,6 +564,7 @@
     text-align: right;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.7rem;
+    overflow-wrap: anywhere;
   }
 
   .sr-only {
@@ -515,6 +587,15 @@
     main {
       width: min(100% - 1.25rem, 52rem);
       padding-top: 2rem;
+    }
+
+    .intro {
+      grid-template-columns: 1fr;
+      gap: 0.8rem;
+    }
+
+    .competition-mark {
+      width: min(14rem, 100%);
     }
 
     form {
@@ -549,7 +630,7 @@
     }
 
     .spinner {
-      animation-duration: 1.5s;
+      animation: none;
     }
   }
 </style>
