@@ -96,7 +96,7 @@
         "skill_graph": { "$ref": "#/$defs/skillGraph" },
         "semantic_reranker": { "$ref": "#/$defs/genericChallenger" },
         "learning_to_rank": { "$ref": "#/$defs/genericChallenger" },
-        "guardrails": { "$ref": "#/$defs/genericChallenger" }
+        "guardrails": { "$ref": "#/$defs/disabled" }
       }
     },
     "artifacts": {
@@ -115,7 +115,7 @@
       "type": "string",
       "allOf": [
         {
-          "pattern": "^(embeddings|models|indexes|graphs|rankers|guardrails|evidence)/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+$"
+          "pattern": "^(embeddings|models|indexes|graphs|rankers|evidence)/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+$"
         },
         { "not": { "pattern": "(^|/)\\.{1,2}(/|$)" } }
       ]
@@ -132,7 +132,6 @@
             "index",
             "graph",
             "ranker",
-            "guardrail",
             "evidence"
           ]
         },

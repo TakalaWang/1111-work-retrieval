@@ -9,11 +9,11 @@
 ## Contract decisions
 
 - `release.complete` and `release.publication_allowed` are literal `true`; an incomplete bundle cannot be represented as publishable runtime state.
-- Whole-job Qwen embeddings are required and pinned to model revision plus explicit `document_fields`, `query_instruction`, shard row ranges, vector/job-ID paths, and the model snapshot files they need. Every reachable file must match the root SHA-256/size inventory.
+- Whole-job Qwen embeddings are required and pinned to model revision plus the serving parser's exact `document_fields`, `query_prompt`, global job-ID path, and contiguous vector-shard layout. The research/EVA build manifest is provenance input, not a runtime layout manifest. Every serving file must match the root SHA-256/size inventory and remain under the component directory downloaded at startup.
 - Multi-view embeddings are optional. When enabled, occupation, skill, requirement, and content are all required at 1024 dimensions; `complete`, `publication_allowed`, MRL evidence, and a body-verified positive NDCG@10 promotion report must all pass.
 - Tantivy is required to be a temporal hard-filter index. Its `index_directory`, exact `index_files`, schema fields, field boosts, dynamic request-time mode, 180-day lower bound, and `2026-06-08T23:59:59.999+08:00` Demo reference time are pinned. Future-dated rows remain eligible but receive freshness `0`.
 - Graph is optional. When enabled, it must use exactly the approved JD snapshot SHA, exclusive `2026-06-08T00:00:00+08:00` cutoff, observed maximum source timestamp, schema, component inventory, and body-verified positive NDCG@10 promotion evidence.
-- Multi-view, Graph, reranker, LTR, and guardrails have explicit enabled flags. Every enabled challenger requires positive promotion evidence; disabled challengers carry only `enabled=false`. Query-neighbor history and behavior priors are not runtime v2 challengers.
+- Multi-view, Graph, reranker, LTR, and guardrails have explicit enabled flags. Every enabled challenger requires positive promotion evidence; disabled challengers carry only `enabled=false`. Guardrails remain disabled until the serving parser has a matching artifact adapter. Query-neighbor history and behavior priors are not runtime v2 challengers.
 - Root artifacts must equal the paths reachable from incumbent/challenger component manifests and evidence reports. Runtime bundles reject credentials, secrets, raw logs, query history, GT/qrels/judgments, test JD, mutable `latest` aliases, and absolute URIs.
 
 ## Tasks

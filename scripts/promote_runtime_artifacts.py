@@ -8,6 +8,7 @@ import base64
 import hashlib
 import json
 import math
+import re
 import subprocess
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -24,30 +25,37 @@ AWS_REGION = "us-west-2"
 SOURCE_BUCKET = "jobbank-data-bucket"
 DESTINATION_BUCKET = "workretrievaldata-runtimebucket404c5ee4-hkvrjx5fbkij"
 
-APPROVED_WHOLE_MANIFEST_SHA256 = "a02a23655fe8e5cc6b08afde35e93898ff94c62b88bbf7522e09f2c15378715c"
+APPROVED_WHOLE_BUILD_MANIFEST_SHA256 = (
+    "a02a23655fe8e5cc6b08afde35e93898ff94c62b88bbf7522e09f2c15378715c"
+)
+APPROVED_WHOLE_BUILD_PROVENANCE_PATH = "provenance/qwen3-embedding-8b/eva-6-build-manifest.json"
 APPROVED_MODEL = "Qwen/Qwen3-Embedding-8B"
 APPROVED_MODEL_REVISION = "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"
 APPROVED_WHOLE_DIMENSION = 4096
+APPROVED_DOCUMENT_POLICY_VERSION = "2026-07-24-clean-v1"
 APPROVED_MULTIVIEW_DIMENSION = 1024
 APPROVED_MULTIVIEW_KINDS = ["occupation", "skill", "requirement", "content"]
 APPROVED_DOCUMENT_FIELDS = [
-    "title",
-    "duty_minor",
-    "duty_middle",
-    "duty_major",
-    "computer_skills",
-    "work_skills",
-    "professional_certifications",
-    "experience_requirement",
-    "education_requirement",
-    "work_city",
-    "industry_minor",
-    "industry_middle",
-    "industry_major",
-    "additional_conditions",
-    "description",
+    "職務名稱",
+    "職務小類",
+    "職務中類",
+    "職務大類",
+    "電腦技能資料",
+    "工作技能",
+    "專業證照",
+    "工作經驗需求",
+    "學歷需求",
+    "工作城市",
+    "產業小類",
+    "產業中類",
+    "產業大類",
+    "附加條件",
+    "職務內容",
 ]
-APPROVED_QUERY_INSTRUCTION = (
+APPROVED_DOCUMENT_TEMPLATE_SHA256 = (
+    "3275f93ade6c4f043084e36303d38b33443858546a80104840f0e2b9468d2abb"
+)
+APPROVED_QUERY_PROMPT = (
     "Instruct: Given a job search query, retrieve relevant job postings matching "
     "the user's intent\nQuery: "
 )
@@ -63,6 +71,7 @@ APPROVED_TANTIVY_SCHEMA_FIELDS = [
     "updated_at_epoch_ms",
     "job_index",
 ]
+APPROVED_TANTIVY_ENGINE = "tantivy v0.26.0, index_format v7"
 APPROVED_TANTIVY_FIELD_BOOSTS = {
     "title": 15.0,
     "duty": 8.0,
@@ -77,13 +86,13 @@ APPROVED_GRAPH_SOURCE_JD_SHA256 = "53937f7bf076789c4cd7e3be34fb89875336108d57707
 TEMPORAL_FILTER_SEMANTICS = (
     "updated_at >= as_of - 180 days before Top-K; updated_at > as_of retained with freshness=0"
 )
+TANTIVY_FILTER_SEMANTICS = "visibility AND (location OR) AND (duty OR), applied before Top-K"
 ARTIFACT_ROOTS = {
     "embedding": "embeddings",
     "model": "models",
     "index": "indexes",
     "graph": "graphs",
     "ranker": "rankers",
-    "guardrail": "guardrails",
     "evidence": "evidence",
 }
 CHALLENGERS = {
@@ -314,6 +323,12 @@ def select_artifacts(
     source: Mapping[str, object], spec: Mapping[str, object]
 ) -> list[dict[str, object]]:
     inventory = _parse_source_manifest(source)
+    provenance = inventory.get(APPROVED_WHOLE_BUILD_PROVENANCE_PATH)
+    if (
+        not isinstance(provenance, dict)
+        or provenance.get("sha256") != APPROVED_WHOLE_BUILD_MANIFEST_SHA256
+    ):
+        raise RuntimeError("source inventory does not pin the approved EVA whole build manifest")
     rules = _selection_rules(spec)
     selected: list[dict[str, object]] = []
     matched_rules: set[int] = set()
@@ -438,9 +453,28 @@ def _inventory_entries(
     return paths
 
 
+def _component_file(
+    component: str,
+    path: object,
+    artifacts: Mapping[str, object],
+    *,
+    kind: str,
+    prefix: str,
+) -> str:
+    if not isinstance(path, str) or not path.startswith(prefix):
+        raise RuntimeError(f"{component} file is outside its runtime component directory")
+    artifact = artifacts.get(path)
+    if not isinstance(artifact, dict) or artifact.get("kind") != kind:
+        raise RuntimeError(f"{component} component inventory is missing: {path}")
+    return path
+
+
 def _validate_whole_shards(
-    component: Mapping[str, object], inventory: set[str], expected_rows: object
-) -> None:
+    component: Mapping[str, object],
+    artifacts: Mapping[str, object],
+    expected_rows: object,
+    prefix: str,
+) -> set[str]:
     shards = component.get("shards")
     if not isinstance(shards, list) or not shards:
         raise RuntimeError("whole embedding shards are missing")
@@ -449,7 +483,6 @@ def _validate_whole_shards(
     for shard in shards:
         if not isinstance(shard, dict) or set(shard) != {
             "vectors_path",
-            "job_ids_path",
             "row_start",
             "row_end",
             "rows",
@@ -469,19 +502,20 @@ def _validate_whole_shards(
             or shard.get("dimension") != APPROVED_WHOLE_DIMENSION
         ):
             raise RuntimeError("whole embedding shard row/dimension contract differs")
-        for name in ("vectors_path", "job_ids_path"):
-            path = shard.get(name)
-            if not isinstance(path, str) or path not in inventory or path in shard_paths:
-                raise RuntimeError("whole embedding shard file is absent or repeated")
-            shard_paths.add(path)
+        path = _component_file(
+            "whole embedding",
+            shard.get("vectors_path"),
+            artifacts,
+            kind="embedding",
+            prefix=prefix,
+        )
+        if path in shard_paths:
+            raise RuntimeError("whole embedding shard file is repeated")
+        shard_paths.add(path)
         expected_start = row_end
     if expected_start != expected_rows:
         raise RuntimeError("whole embedding shard rows differ from the runtime contract")
-    embedding_paths = {path for path in inventory if path.startswith("embeddings/")}
-    if shard_paths != embedding_paths:
-        raise RuntimeError("whole embedding component inventory has unreferenced shard files")
-    if not any(path.startswith("models/") for path in inventory):
-        raise RuntimeError("whole embedding component inventory has no model snapshot files")
+    return shard_paths
 
 
 def _validate_component_manifests(
@@ -493,16 +527,30 @@ def _validate_component_manifests(
     whole = incumbents["whole_embedding"]
     whole_path = _artifact_reference(artifacts, whole, "embedding")
     reachable.add(whole_path)
-    if whole.get("manifest_sha256") != APPROVED_WHOLE_MANIFEST_SHA256:
-        raise RuntimeError("whole embedding manifest is not the verified production cache")
+    _require_equal(
+        "whole embedding runtime",
+        {
+            "complete": True,
+            "model": APPROVED_MODEL,
+            "revision": APPROVED_MODEL_REVISION,
+            "dimension": APPROVED_WHOLE_DIMENSION,
+            "dtype": "float16",
+            "normalized": True,
+            "document_policy_version": APPROVED_DOCUMENT_POLICY_VERSION,
+            "document_template_sha256": APPROVED_DOCUMENT_TEMPLATE_SHA256,
+        },
+        whole,
+    )
     whole_document = _json_document(whole_path, artifacts, documents)
     _require_exact_keys(
         "whole embedding",
         whole_document,
         {
+            "schema_version",
             "complete",
             "model",
             "revision",
+            "dimension",
             "dtype",
             "normalized",
             "rows",
@@ -512,44 +560,66 @@ def _validate_component_manifests(
             "document_policy_version",
             "document_template_sha256",
             "document_fields",
-            "query_instruction",
+            "query_prompt",
+            "job_ids_path",
             "shards",
-            "files",
         },
     )
     _require_equal(
         "whole embedding",
         {
+            "schema_version": 1,
             "complete": True,
             "model": APPROVED_MODEL,
             "revision": APPROVED_MODEL_REVISION,
+            "dimension": APPROVED_WHOLE_DIMENSION,
             "dtype": "float16",
             "normalized": True,
             "rows": whole.get("rows"),
             "dataset_sha256": whole.get("dataset_sha256"),
             "jobs_sha256": whole.get("jobs_sha256"),
             "job_row_order_sha256": whole.get("job_row_order_sha256"),
-            "document_policy_version": whole.get("document_policy_version"),
-            "document_template_sha256": whole.get("document_template_sha256"),
+            "document_policy_version": APPROVED_DOCUMENT_POLICY_VERSION,
+            "document_template_sha256": APPROVED_DOCUMENT_TEMPLATE_SHA256,
             "document_fields": APPROVED_DOCUMENT_FIELDS,
-            "query_instruction": APPROVED_QUERY_INSTRUCTION,
+            "query_prompt": APPROVED_QUERY_PROMPT,
         },
         whole_document,
     )
-    whole_files = _inventory_entries(
-        "whole embedding", whole_document, artifacts, kinds={"embedding", "model"}
+    whole_prefix = str(PurePosixPath(whole_path).parent) + "/"
+    reachable.add(
+        _component_file(
+            "whole embedding",
+            whole_document.get("job_ids_path"),
+            artifacts,
+            kind="embedding",
+            prefix=whole_prefix,
+        )
     )
-    _validate_whole_shards(whole_document, whole_files, whole.get("rows"))
-    reachable.update(whole_files)
+    reachable.update(
+        _validate_whole_shards(whole_document, artifacts, whole.get("rows"), whole_prefix)
+    )
 
     temporal = incumbents["temporal_tantivy"]
     temporal_path = _artifact_reference(artifacts, temporal, "index")
     reachable.add(temporal_path)
+    _require_equal(
+        "temporal Tantivy runtime",
+        {
+            "complete": True,
+            "engine": APPROVED_TANTIVY_ENGINE,
+            "updated_at_field": "updated_at_epoch_ms",
+            "hard_filters": True,
+            "temporal_filter_semantics": TEMPORAL_FILTER_SEMANTICS,
+        },
+        temporal,
+    )
     temporal_document = _json_document(temporal_path, artifacts, documents)
     _require_exact_keys(
         "temporal Tantivy",
         temporal_document,
         {
+            "schema_version",
             "complete",
             "engine",
             "jobs_sha256",
@@ -560,6 +630,7 @@ def _validate_component_manifests(
             "temporal_filter_semantics",
             "index_directory",
             "index_files",
+            "taxonomy_path",
             "schema_fields",
             "field_boosts",
         },
@@ -567,8 +638,9 @@ def _validate_component_manifests(
     _require_equal(
         "temporal Tantivy",
         {
+            "schema_version": 1,
             "complete": True,
-            "engine": temporal.get("engine"),
+            "engine": APPROVED_TANTIVY_ENGINE,
             "jobs_sha256": whole.get("jobs_sha256"),
             "job_row_order_sha256": whole.get("job_row_order_sha256"),
             "index_sha256": temporal.get("index_sha256"),
@@ -576,24 +648,40 @@ def _validate_component_manifests(
             "temporal_filter_semantics": TEMPORAL_FILTER_SEMANTICS,
             "schema_fields": APPROVED_TANTIVY_SCHEMA_FIELDS,
             "field_boosts": APPROVED_TANTIVY_FIELD_BOOSTS,
+            "filter_semantics": TANTIVY_FILTER_SEMANTICS,
         },
         temporal_document,
     )
-    filter_semantics = temporal_document.get("filter_semantics")
-    if not isinstance(filter_semantics, str) or not all(
-        token in filter_semantics for token in ("location", "duty", "before Top-K")
-    ):
-        raise RuntimeError("temporal Tantivy hard-filter contract differs")
     index_directory = temporal_document.get("index_directory")
     expected_directory = str(PurePosixPath(temporal_path).parent / "index")
     if index_directory != expected_directory:
         raise RuntimeError("temporal Tantivy index directory differs")
-    index_files = _inventory_entries(
-        "temporal Tantivy", temporal_document, artifacts, field="index_files", kinds={"index"}
-    )
-    if not all(path.startswith(f"{expected_directory}/") for path in index_files):
-        raise RuntimeError("temporal Tantivy index inventory escaped its index directory")
+    raw_index_files = temporal_document.get("index_files")
+    if not isinstance(raw_index_files, list) or not raw_index_files:
+        raise RuntimeError("temporal Tantivy index files are missing")
+    index_files = {
+        _component_file(
+            "temporal Tantivy",
+            path,
+            artifacts,
+            kind="index",
+            prefix=f"{expected_directory}/",
+        )
+        for path in raw_index_files
+    }
+    if len(index_files) != len(raw_index_files):
+        raise RuntimeError("temporal Tantivy index file is repeated")
     reachable.update(index_files)
+    temporal_prefix = str(PurePosixPath(temporal_path).parent) + "/"
+    reachable.add(
+        _component_file(
+            "temporal Tantivy",
+            temporal_document.get("taxonomy_path"),
+            artifacts,
+            kind="index",
+            prefix=temporal_prefix,
+        )
+    )
 
     challengers = cast(Mapping[str, Mapping[str, object]], manifest["challengers"])
     multiview = challengers["multiview_embedding"]
@@ -705,7 +793,9 @@ def _validate_component_manifests(
     for name, challenger in challengers.items():
         if name in {"multiview_embedding", "skill_graph"} or challenger.get("enabled") is not True:
             continue
-        kind = "ranker" if name in {"semantic_reranker", "learning_to_rank"} else "guardrail"
+        if name == "guardrails":
+            raise RuntimeError("serving runtime does not parse guardrails")
+        kind = "ranker"
         path = _artifact_reference(artifacts, challenger, kind)
         reachable.add(path)
         component = _json_document(path, artifacts, documents)
@@ -757,8 +847,24 @@ def _forbid_sensitive_fields(value: object) -> None:
 
 
 def _forbid_artifact_path(path: str) -> None:
-    parts = {part.casefold() for part in path.split("/")}
-    if parts & FORBIDDEN_PATH_PARTS:
+    normalized_parts = {
+        re.sub(r"[^a-z0-9]+", "_", part.casefold().split(".", 1)[0]).strip("_")
+        for part in path.split("/")
+    }
+    tokens = {token for part in normalized_parts for token in part.split("_")}
+    if normalized_parts & FORBIDDEN_PATH_PARTS or tokens & {
+        "credential",
+        "credentials",
+        "gt",
+        "judgment",
+        "judgments",
+        "log",
+        "logs",
+        "qrel",
+        "qrels",
+        "secret",
+        "secrets",
+    }:
         raise RuntimeError(f"runtime bundle contains forbidden artifact path: {path}")
 
 
@@ -883,8 +989,8 @@ def validate_runtime_manifest(
         kind = raw.get("kind")
         if not isinstance(kind, str):
             raise RuntimeError(f"runtime artifact kind is missing: {path}")
-        validate_relative_path(path, kind)
         _forbid_artifact_path(path)
+        validate_relative_path(path, kind)
         _require_sha256(f"artifact SHA-256 for {path}", raw.get("sha256"))
         if type(raw.get("size_bytes")) is not int or cast(int, raw["size_bytes"]) < 0:
             raise RuntimeError(f"runtime artifact size is invalid: {path}")
@@ -919,6 +1025,8 @@ def validate_runtime_manifest(
             continue
         if enabled is not True:
             raise RuntimeError(f"challenger enabled flag is invalid: {name}")
+        if name == "guardrails":
+            raise RuntimeError("serving runtime does not parse guardrails")
         if (
             challenger.get("complete") is not True
             or challenger.get("publication_allowed") is not True

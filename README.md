@@ -139,32 +139,47 @@ Runtime v2 promotion 只接受一份已固定 source manifest SHA、selected inv
 manifest SHA 與 challenger promotion evidence 的 release spec。Dry-run 會執行完整 contract 與 component
 manifest 驗證，但不寫入 AWS：
 
+先將 pinned EVA build artifacts 轉成 core 會直接解析的 runtime layout；這一步會合併 global
+`job-ids.json`、建立 taxonomy、保留原始 `a02a…` build manifest provenance，並產生 source manifest
+與 release spec。預設 hardlink，跨檔案系統時須明確指定 `--link-mode copy`：
+
+```bash
+uv run python scripts/materialize_runtime_components.py \
+  --whole-build-root artifacts/experiments/qwen3-8b/full \
+  --tantivy-build-root artifacts/experiments/tantivy-bm25-temporal-v1 \
+  --city-taxonomy-csv dataset/城市對照表.csv \
+  --duty-taxonomy-csv dataset/職務對照表.csv \
+  --output-root artifacts/runtime-source \
+  --source-manifest-key one111-search/runtime-source/<immutable-build-id>/manifest.json
+```
+
 ```bash
 uv run python scripts/promote_runtime_artifacts.py \
-  --release-spec artifacts/production/runtime-release-spec.json
+  --release-spec artifacts/runtime-source/runtime-release-spec.json
 ```
 
 如要以本機 fixture／下載後的 immutable bundle 離線驗證，可額外指定：
 
 ```bash
 uv run python scripts/promote_runtime_artifacts.py \
-  --release-spec artifacts/production/runtime-release-spec.json \
-  --source-manifest-file artifacts/source/manifest.json \
-  --source-root artifacts/source/files
+  --release-spec artifacts/runtime-source/runtime-release-spec.json \
+  --source-manifest-file artifacts/runtime-source/manifest.json \
+  --source-root artifacts/runtime-source
 ```
 
 只有 dry-run 完整通過後，才使用已登入的 `competition` profile 在 `us-west-2` 明確發布：
 
 ```bash
 uv run python scripts/promote_runtime_artifacts.py \
-  --release-spec artifacts/production/runtime-release-spec.json \
+  --release-spec artifacts/runtime-source/runtime-release-spec.json \
   --execute
 ```
 
 發布順序固定為逐物件 checksum copy/readback、完整且分頁的 data-only inventory audit、`manifest.json`
-最後寫入，再對 manifest body 與完整 prefix readback。component manifests 必須以 path、SHA-256、size
-完整列出 whole-Qwen shards、Qwen model snapshot、Tantivy index files 與任何啟用 challenger；root inventory
-不得含 query history、GT/qrels/judgments、test JD、raw logs 或 secrets。任何 incomplete、
+最後寫入，再對 manifest body 與完整 prefix readback。component manifests 使用 serving parser 的 exact-key
+路徑 contract；root inventory 以 path、SHA-256、size 完整固定 whole-Qwen layout/job IDs/shards、Tantivy
+taxonomy/index files 與任何啟用 challenger，且不得含 query history、GT/qrels/judgments、test JD、raw logs
+或 secrets。任何 incomplete、
 `publication_allowed=false`、未通過正向 NDCG@10 promotion evidence、非 temporal
 Tantivy、Graph cutoff 越界或 object inventory drift 都會 fail closed；不會自動發布部分 release。
 

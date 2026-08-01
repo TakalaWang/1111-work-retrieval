@@ -38,15 +38,15 @@ def digest(value: bytes) -> str:
 
 def base_documents() -> dict[str, bytes]:
     vectors_path = "embeddings/qwen3-embedding-8b/whole/shards/00000.f16.npy"
-    job_ids_path = "embeddings/qwen3-embedding-8b/whole/shards/00000-job-ids.i64.npy"
-    model_path = "models/qwen3-embedding-8b/config.json"
+    job_ids_path = "embeddings/qwen3-embedding-8b/whole/job-ids.json"
     vectors = b"verified-vectors"
-    job_ids = b"verified-job-ids"
-    model = b'{"model_type":"qwen3"}\n'
+    job_ids = b'["1"]\n'
     whole = {
+        "schema_version": 1,
         "complete": True,
         "model": "Qwen/Qwen3-Embedding-8B",
         "revision": "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af",
+        "dimension": 4096,
         "dtype": "float16",
         "normalized": True,
         "rows": 1_218_635,
@@ -54,28 +54,32 @@ def base_documents() -> dict[str, bytes]:
         "jobs_sha256": HEX["a"],
         "job_row_order_sha256": HEX["b"],
         "document_policy_version": "2026-07-24-clean-v1",
-        "document_template_sha256": HEX["c"],
+        "document_template_sha256": promotion.APPROVED_DOCUMENT_TEMPLATE_SHA256,
         "document_fields": promotion.APPROVED_DOCUMENT_FIELDS,
-        "query_instruction": promotion.APPROVED_QUERY_INSTRUCTION,
+        "query_prompt": promotion.APPROVED_QUERY_PROMPT,
+        "job_ids_path": job_ids_path,
         "shards": [
             {
                 "vectors_path": vectors_path,
-                "job_ids_path": job_ids_path,
                 "row_start": 0,
                 "row_end": 1_218_635,
                 "rows": 1_218_635,
                 "dimension": 4096,
             }
         ],
-        "files": [
-            {"path": vectors_path, "sha256": digest(vectors), "size_bytes": len(vectors)},
-            {"path": job_ids_path, "sha256": digest(job_ids), "size_bytes": len(job_ids)},
-            {"path": model_path, "sha256": digest(model), "size_bytes": len(model)},
-        ],
     }
     index_path = "indexes/tantivy-bm25-temporal-v1/index/meta.json"
+    taxonomy_path = "indexes/tantivy-bm25-temporal-v1/filter-taxonomy.json"
     index_file = b'{"segments":[]}\n'
+    taxonomy = encoded(
+        {
+            "schema_version": 1,
+            "location_code_to_terms": {"100100": ["台北市"]},
+            "duty_code_to_terms": {"140200": ["軟體工程師"]},
+        }
+    )
     temporal = {
+        "schema_version": 1,
         "complete": True,
         "engine": "tantivy v0.26.0, index_format v7",
         "jobs_sha256": HEX["a"],
@@ -85,9 +89,8 @@ def base_documents() -> dict[str, bytes]:
         "filter_semantics": "visibility AND (location OR) AND (duty OR), applied before Top-K",
         "temporal_filter_semantics": promotion.TEMPORAL_FILTER_SEMANTICS,
         "index_directory": "indexes/tantivy-bm25-temporal-v1/index",
-        "index_files": [
-            {"path": index_path, "sha256": digest(index_file), "size_bytes": len(index_file)}
-        ],
+        "index_files": [index_path],
+        "taxonomy_path": taxonomy_path,
         "schema_fields": promotion.APPROVED_TANTIVY_SCHEMA_FIELDS,
         "field_boosts": promotion.APPROVED_TANTIVY_FIELD_BOOSTS,
     }
@@ -95,36 +98,36 @@ def base_documents() -> dict[str, bytes]:
         "embeddings/qwen3-embedding-8b/whole/manifest.json": encoded(whole),
         vectors_path: vectors,
         job_ids_path: job_ids,
-        model_path: model,
         "indexes/tantivy-bm25-temporal-v1/manifest.json": encoded(temporal),
         index_path: index_file,
+        taxonomy_path: taxonomy,
     }
 
 
 def base_source(documents: dict[str, bytes]) -> dict[str, object]:
     paths = {
         "embeddings/qwen3-embedding-8b/whole/manifest.json": (
-            "artifacts/experiments/qwen3-8b/full/manifest.json",
+            "runtime/embeddings/qwen3-embedding-8b/whole/manifest.json",
             "embedding",
         ),
         "embeddings/qwen3-embedding-8b/whole/shards/00000.f16.npy": (
-            "artifacts/experiments/qwen3-8b/full/shards/00000.f16.npy",
+            "runtime/embeddings/qwen3-embedding-8b/whole/shards/00000.f16.npy",
             "embedding",
         ),
-        "embeddings/qwen3-embedding-8b/whole/shards/00000-job-ids.i64.npy": (
-            "artifacts/experiments/qwen3-8b/full/shards/00000-job-ids.i64.npy",
+        "embeddings/qwen3-embedding-8b/whole/job-ids.json": (
+            "runtime/embeddings/qwen3-embedding-8b/whole/job-ids.json",
             "embedding",
-        ),
-        "models/qwen3-embedding-8b/config.json": (
-            "cache/huggingface/qwen/config.json",
-            "model",
         ),
         "indexes/tantivy-bm25-temporal-v1/manifest.json": (
-            "artifacts/experiments/tantivy-bm25-temporal-v1/manifest.json",
+            "runtime/indexes/tantivy-bm25-temporal-v1/manifest.json",
             "index",
         ),
         "indexes/tantivy-bm25-temporal-v1/index/meta.json": (
-            "artifacts/experiments/tantivy-bm25-temporal-v1/index/meta.json",
+            "runtime/indexes/tantivy-bm25-temporal-v1/index/meta.json",
+            "index",
+        ),
+        "indexes/tantivy-bm25-temporal-v1/filter-taxonomy.json": (
+            "runtime/indexes/tantivy-bm25-temporal-v1/filter-taxonomy.json",
             "index",
         ),
     }
@@ -139,6 +142,11 @@ def base_source(documents: dict[str, bytes]) -> dict[str, object]:
     files.extend(
         [
             {
+                "path": promotion.APPROVED_WHOLE_BUILD_PROVENANCE_PATH,
+                "sha256": promotion.APPROVED_WHOLE_BUILD_MANIFEST_SHA256,
+                "size": 56_203,
+            },
+            {
                 "path": "artifacts/production/query-history/answers.sqlite3",
                 "sha256": HEX["f"],
                 "size": 99,
@@ -151,17 +159,12 @@ def base_source(documents: dict[str, bytes]) -> dict[str, object]:
 def base_spec(source: dict[str, object], documents: dict[str, bytes]) -> dict[str, object]:
     selections = [
         {
-            "source_prefix": "artifacts/experiments/qwen3-8b/full/",
+            "source_prefix": "runtime/embeddings/qwen3-embedding-8b/whole/",
             "destination_prefix": "embeddings/qwen3-embedding-8b/whole/",
             "kind": "embedding",
         },
         {
-            "source_prefix": "cache/huggingface/qwen/",
-            "destination_prefix": "models/qwen3-embedding-8b/",
-            "kind": "model",
-        },
-        {
-            "source_prefix": "artifacts/experiments/tantivy-bm25-temporal-v1/",
+            "source_prefix": "runtime/indexes/tantivy-bm25-temporal-v1/",
             "destination_prefix": "indexes/tantivy-bm25-temporal-v1/",
             "kind": "index",
         },
@@ -257,17 +260,10 @@ def base_spec(source: dict[str, object], documents: dict[str, bytes]) -> dict[st
 
 
 @pytest.fixture
-def release_fixture(
-    monkeypatch: pytest.MonkeyPatch,
-) -> tuple[dict[str, object], dict[str, object], dict[str, bytes]]:
+def release_fixture() -> tuple[dict[str, object], dict[str, object], dict[str, bytes]]:
     documents = base_documents()
     source = base_source(documents)
     spec = base_spec(source, documents)
-    monkeypatch.setattr(
-        promotion,
-        "APPROVED_WHOLE_MANIFEST_SHA256",
-        spec["runtime"]["incumbents"]["whole_embedding"]["manifest_sha256"],
-    )
     return source, spec, documents
 
 
@@ -361,8 +357,10 @@ def test_contract_matches_core_temporal_and_challenger_semantics() -> None:
         "properties"
     ]["future_jobs"]
     required = set(SCHEMA["properties"]["challengers"]["required"])
+    guardrails = SCHEMA["properties"]["challengers"]["properties"]["guardrails"]
 
     assert future_policy == {"const": "retained_with_zero_freshness"}
+    assert guardrails == {"$ref": "#/$defs/disabled"}
     assert (
         promotion.CHALLENGERS
         == required
@@ -796,22 +794,51 @@ def test_runtime_validator_rejects_schema_extra_fields(release_fixture: object) 
         promotion.validate_runtime_manifest(manifest, documents)
 
 
-def test_component_inventory_must_reach_every_runtime_object(
-    release_fixture: object,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_eva_build_manifest_is_not_accepted_as_runtime_layout(release_fixture: object) -> None:
+    source, spec, documents = release_fixture
+    documents = dict(documents)
+    manifest, _ = promotion.build_manifest(source, spec, documents, HEX["e"])
+    whole_path = manifest["incumbents"]["whole_embedding"]["manifest_path"]
+    eva_build_manifest = {
+        "model": promotion.APPROVED_MODEL,
+        "revision": promotion.APPROVED_MODEL_REVISION,
+        "batch_size": 64,
+        "max_length": 512,
+        "shard_size": 10_000,
+        "dtype": "float16",
+        "normalized": True,
+        "document_fields": promotion.APPROVED_DOCUMENT_FIELDS,
+        "document_policy_version": promotion.APPROVED_DOCUMENT_POLICY_VERSION,
+        "document_template_sha256": promotion.APPROVED_DOCUMENT_TEMPLATE_SHA256,
+        "dataset_sha256": HEX["e"],
+        "complete": True,
+        "rows": 1_218_635,
+        "job_row_order_sha256": HEX["b"],
+        "shards": [{"index": 0, "rows": 10_000, "dimension": 4096}],
+    }
+    payload = encoded(eva_build_manifest)
+    documents[whole_path] = payload
+    manifest["artifacts"][whole_path]["sha256"] = digest(payload)
+    manifest["artifacts"][whole_path]["size_bytes"] = len(payload)
+    manifest["incumbents"]["whole_embedding"]["manifest_sha256"] = digest(payload)
+    reseal(manifest)
+
+    with pytest.raises(RuntimeError, match="whole embedding component manifest schema differs"):
+        promotion.validate_runtime_manifest(manifest, documents)
+
+
+def test_component_inventory_must_reach_every_runtime_object(release_fixture: object) -> None:
     source, spec, documents = release_fixture
     documents = dict(documents)
     manifest, _ = promotion.build_manifest(source, spec, documents, HEX["e"])
     whole_path = manifest["incumbents"]["whole_embedding"]["manifest_path"]
     whole = json.loads(documents[whole_path])
-    whole["files"] = []
+    whole["job_ids_path"] = "embeddings/qwen3-embedding-8b/whole/missing.json"
     payload = encoded(whole)
     documents[whole_path] = payload
     manifest["artifacts"][whole_path]["sha256"] = digest(payload)
     manifest["artifacts"][whole_path]["size_bytes"] = len(payload)
     manifest["incumbents"]["whole_embedding"]["manifest_sha256"] = digest(payload)
-    monkeypatch.setattr(promotion, "APPROVED_WHOLE_MANIFEST_SHA256", digest(payload))
     reseal(manifest)
 
     with pytest.raises(RuntimeError, match=r"component inventory|unreachable"):
@@ -832,12 +859,78 @@ def test_forbidden_raw_log_cannot_enter_bundle(release_fixture: object) -> None:
         promotion.validate_runtime_manifest(manifest, documents)
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "evidence/qrels.json",
+        "evidence/query_history.json",
+        "evidence/test_jd.csv",
+        "evidence/raw_logs.ndjson",
+        "evidence/aws_credentials.json",
+    ],
+)
+def test_forbidden_filename_suffixes_cannot_bypass_path_gate(
+    release_fixture: object, path: str
+) -> None:
+    source, spec, documents = release_fixture
+    manifest, _ = promotion.build_manifest(source, spec, documents, HEX["e"])
+    manifest["artifacts"][path] = {
+        "kind": "evidence",
+        "sha256": HEX["a"],
+        "size_bytes": 1,
+    }
+    reseal(manifest)
+
+    with pytest.raises(RuntimeError, match="forbidden"):
+        promotion.validate_runtime_manifest(manifest, documents)
+
+
+def test_guardrail_artifacts_stay_disabled_until_core_can_parse_them(
+    release_fixture: object,
+) -> None:
+    source, spec, documents = release_fixture
+    manifest, _ = promotion.build_manifest(source, spec, documents, HEX["e"])
+    manifest["challengers"]["guardrails"] = {
+        "enabled": True,
+        "complete": True,
+        "publication_allowed": True,
+        "manifest_path": "guardrails/calibration/manifest.json",
+        "manifest_sha256": HEX["a"],
+        "promotion_evidence": {
+            "decision": "accepted",
+            "report_path": "evidence/guardrail/report.json",
+            "report_sha256": HEX["b"],
+            "evaluation_split_sha256": HEX["c"],
+            "baseline_run_sha256": HEX["d"],
+            "candidate_run_sha256": HEX["e"],
+            "primary_metric": "ndcg_at_10",
+            "absolute_delta": 0.001,
+        },
+    }
+
+    with pytest.raises(RuntimeError, match="serving runtime does not parse guardrails"):
+        promotion.validate_runtime_manifest(manifest, documents)
+
+
 def test_selected_inventory_drift_fails_closed(release_fixture: object) -> None:
     source, spec, documents = release_fixture
     spec["selected_inventory_sha256"] = HEX["f"]
 
     with pytest.raises(RuntimeError, match="selected artifact inventory"):
         promotion.build_manifest(source, spec, documents, HEX["e"])
+
+
+def test_source_inventory_must_pin_eva_build_provenance(release_fixture: object) -> None:
+    source, spec, _ = release_fixture
+    provenance = next(
+        item
+        for item in source["files"]
+        if item["path"] == promotion.APPROVED_WHOLE_BUILD_PROVENANCE_PATH
+    )
+    provenance["sha256"] = HEX["f"]
+
+    with pytest.raises(RuntimeError, match="approved EVA whole build manifest"):
+        promotion.select_artifacts(source, spec)
 
 
 def test_destination_prefix_is_content_addressed() -> None:
