@@ -338,6 +338,12 @@ export class PlatformStack extends Stack {
         resources: [`arn:${Aws.PARTITION}:iam::${Aws.ACCOUNT_ID}:role/cdk-*`]
       })
     );
+    githubRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['ec2:DescribeManagedPrefixLists'],
+        resources: ['*']
+      })
+    );
     webBucket.grantReadWrite(githubRole);
     distribution.grantCreateInvalidation(githubRole);
 

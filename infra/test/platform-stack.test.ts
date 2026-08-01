@@ -117,6 +117,24 @@ describe('platform stack', () => {
     expect(JSON.stringify(roles)).toContain(
       'repo:TakalaWang/1111-work-retrieval:environment:production'
     );
+    const githubRoleId = Object.keys(roles).find((id) =>
+      JSON.stringify(roles[id]).includes(
+        'repo:TakalaWang/1111-work-retrieval:environment:production'
+      )
+    );
+    expect(githubRoleId).toBeDefined();
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: 'ec2:DescribeManagedPrefixLists',
+            Effect: 'Allow',
+            Resource: '*'
+          })
+        ])
+      },
+      Roles: Match.arrayWith([{ Ref: githubRoleId }])
+    });
     const policies = JSON.stringify(template.findResources('AWS::IAM::Policy'));
     expect(policies).toContain('s3:DeleteObject');
     expect(policies).toContain('cloudfront:CreateInvalidation');
