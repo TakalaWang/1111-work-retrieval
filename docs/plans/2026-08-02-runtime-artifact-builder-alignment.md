@@ -13,9 +13,11 @@
 ### Task 1: Establish the sealed incumbent and current Tantivy contracts
 
 **Files:**
+
 - Test: `tests/test_materialize_runtime_components.py`
 
 **Steps:**
+
 1. Pin the sealed source manifest SHA, dataset SHA, 1,218,635 rows, 122 shards, 4096 dimensions, clean-v1 policy, and 15 ordered fields.
 2. Preserve a small contract fixture with the same sealed manifest/inventory shape for deterministic projection tests.
 3. Generate the Tantivy side with the current `tantivy_index_pipeline` output.
@@ -24,10 +26,12 @@
 ### Task 2: Materialize a deterministic derived whole component
 
 **Files:**
+
 - Modify: `scripts/materialize_runtime_components.py`
 - Test: `tests/test_materialize_runtime_components.py`
 
 **Steps:**
+
 1. Exact-validate the sealed 4096d whole manifest plus every referenced shard/job-ID file against its approved inventory.
 2. Verify global job IDs, row order, dataset lineage, contiguous shard indices, source SHA, and source per-shard hashes.
 3. Derive new 1024d shards by prefix slice, float32 L2 renormalization, and float16 sealing; never overwrite source files.
@@ -38,10 +42,12 @@
 ### Task 3: Align promotion validation
 
 **Files:**
+
 - Modify: `scripts/promote_runtime_artifacts.py`
 - Modify: `tests/test_promote_runtime_artifacts.py`
 
 **Steps:**
+
 1. Replace fixed v1 paths with the clean-v1-derived whole prefix and temporal-v2 paths.
 2. Validate the sealed source manifest and the derived whole manifest as distinct immutable lineage artifacts; read the Tantivy component-declared build manifest as provenance.
 3. Validate the exact disabled-or-attested correction union and its inventory kinds/checksums.
@@ -52,11 +58,13 @@
 ### Task 4: Add one reproducible local command
 
 **Files:**
+
 - Create: `scripts/reproduce_runtime_release.sh`
 - Modify: `README.md`
 - Test: `tests/test_materialize_runtime_components.py`
 
 **Steps:**
+
 1. Add a strict shell wrapper that requires the local/downloaded sealed whole cache, current Tantivy root, output root, source manifest key, and approved hashes.
 2. Run materialization followed by offline promotion dry-run only; never upload, deploy, or invoke whole re-embedding.
 3. Document the clean-v1 incumbent, deterministic derived MRL1024 output, temporal-v2 inputs, disabled/attested corrections, S3 publication boundary, and fail-closed approvals.
@@ -65,9 +73,11 @@
 ### Task 5: Verify and commit
 
 **Files:**
+
 - Review all changed files.
 
 **Steps:**
+
 1. Run focused artifact and builder round-trip tests.
 2. Run the full Python pytest suite.
 3. Run `uv run ruff check .` and `uv run ruff format --check .`.

@@ -28,15 +28,15 @@ flowchart TD
 
 Tantivy BM25 是唯一已升版的 production Top-10 incumbent。A0--A6 是 promotion 狀態，不是功能願望清單：
 
-| Stage | Production 狀態 | 依據與邊界 |
-| --- | --- | --- |
-| A0 | promoted | contract validation、180 天 eligible universe、location/duty hard filters |
-| A1 | promoted | full-JD BM25F；exact/all-term evidence；query correction 預設關閉 |
-| A2 | incumbent + shadow | sealed whole-Qwen cache 衍生 MRL1024 可用；multi-view 尚待消融 |
-| A3 | off | LTR 尚無足夠且可信的 labeled groups／IPS-DR 證據 |
-| A4 | shadow | reranker 尚未證明 Top-10 正向提升 |
-| A5 | off | Graph 目前消融負向且延遲較高；保留可重現 challenger |
-| A6 | partial | 只啟用 180 天 hard cutoff；freshness/rank guardrail 重排關閉 |
+| Stage | Production 狀態    | 依據與邊界                                                                |
+| ----- | ------------------ | ------------------------------------------------------------------------- |
+| A0    | promoted           | contract validation、180 天 eligible universe、location/duty hard filters |
+| A1    | promoted           | full-JD BM25F；exact/all-term evidence；query correction 預設關閉         |
+| A2    | incumbent + shadow | sealed whole-Qwen cache 衍生 MRL1024 可用；multi-view 尚待消融            |
+| A3    | off                | LTR 尚無足夠且可信的 labeled groups／IPS-DR 證據                          |
+| A4    | shadow             | reranker 尚未證明 Top-10 正向提升                                         |
+| A5    | off                | Graph 目前消融負向且延遲較高；保留可重現 challenger                       |
+| A6    | partial            | 只啟用 180 天 hard cutoff；freshness/rank guardrail 重排關閉              |
 
 BM25 component 預設明確關閉 query correction，
 因此可在沒有 LLM/Graph artifact 的情況下獨立建置、評估與服務；只有 train-only candidate 通過 organizer
