@@ -167,18 +167,27 @@ jobs:
           docker build --platform linux/amd64 --tag "$IMAGE_WITH_TAG" .
           test "$(docker image inspect "$IMAGE_WITH_TAG" --format '{{.Architecture}}')" = amd64
           docker push "$IMAGE_WITH_TAG"
-          aws ecr wait image-scan-complete \
-            --repository-name "$REPOSITORY_NAME" \
-            --image-id imageTag="$IMAGE_TAG"
           IMAGE_DESCRIPTION="$(aws ecr describe-images \
             --repository-name "$REPOSITORY_NAME" \
             --image-ids imageTag="$IMAGE_TAG")"
           jq -e '.imageDetails | length == 1' <<<"$IMAGE_DESCRIPTION" >/dev/null
           IMAGE_DIGEST="$(jq -er '.imageDetails[0].imageDigest' <<<"$IMAGE_DESCRIPTION")"
           [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          SCAN="$(aws ecr describe-image-scan-findings \
-            --repository-name "$REPOSITORY_NAME" \
-            --image-id imageDigest="$IMAGE_DIGEST")"
+          SCAN_STATUS=''
+          for _ in {1..30}; do
+            if SCAN="$(aws ecr describe-image-scan-findings \
+              --repository-name "$REPOSITORY_NAME" \
+              --image-id imageDigest="$IMAGE_DIGEST" 2>&1)"; then
+              SCAN_STATUS="$(jq -er '.imageScanStatus.status' <<<"$SCAN")"
+              [[ "$SCAN_STATUS" == 'COMPLETE' ]] && break
+              [[ "$SCAN_STATUS" != 'FAILED' ]] || exit 1
+            elif ! grep -Fq 'ScanNotFoundException' <<<"$SCAN"; then
+              printf '%s\n' "$SCAN" >&2
+              exit 1
+            fi
+            sleep 10
+          done
+          [[ "$SCAN_STATUS" == 'COMPLETE' ]]
           jq -e '
             .imageScanStatus.status == "COMPLETE" and
             (.imageScanFindings.findingSeverityCounts.CRITICAL // 0) == 0 and
