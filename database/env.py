@@ -6,6 +6,7 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 from sqlalchemy.engine import make_url
+from work_retrieval_database import Base
 
 config = context.config
 if config.config_file_name:
@@ -18,7 +19,7 @@ if make_url(database_url).get_backend_name() != "postgresql":
     raise RuntimeError("DATABASE_URL must use PostgreSQL")
 
 config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
-target_metadata = None
+target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:

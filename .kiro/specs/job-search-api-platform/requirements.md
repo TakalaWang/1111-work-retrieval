@@ -34,6 +34,10 @@ out of scope until it is promoted through a separate, evidence-backed change.
 ## R4. PostgreSQL and artifacts
 
 - PostgreSQL 16/Aurora PostgreSQL is the only relational database; SQLite is forbidden.
+- SQLAlchemy owns PostgreSQL domain models, Alembic owns migrations, and Pydantic owns the HTTP
+  contract; model classes are not shared across those boundaries.
+- The scaffold contains only the SQLAlchemy declarative base. It has no domain tables or runtime
+  engine/session factory.
 - The initial Alembic revision establishes version history only and creates no domain tables.
 - Runtime models, embeddings, and indexes are private immutable S3 objects under
   `runtime/<manifest-sha256>/...`, described by the committed manifest schema.

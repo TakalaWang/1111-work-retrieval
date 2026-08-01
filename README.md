@@ -10,6 +10,10 @@ deployed. The API can only start when a `SearchEngine` factory is supplied expli
 ## Boundaries
 
 - PostgreSQL/Aurora is the only relational database. SQLite is not supported.
+- SQLAlchemy owns PostgreSQL domain models, Alembic owns migrations, and Pydantic owns the HTTP
+  contract. These layers do not share model classes.
+- The repository currently defines only the SQLAlchemy declarative base: there are no domain
+  tables or runtime engine/session factory.
 - Runtime models, embeddings, and indexes live in private S3 objects under
   `runtime/<manifest-sha256>/...`; they are not committed to Git.
 - There is no in-memory retriever, experimental ranking path, mock runtime, or automatic
@@ -24,6 +28,7 @@ deployed. The API can only start when a `SearchEngine` factory is supplied expli
 | `apps/api`             | FastAPI request validation, error envelopes, health endpoints, and OpenAPI          |
 | `apps/web`             | Thin SvelteKit search UI                                                            |
 | `packages/search-core` | Immutable search types and the `SearchEngine` protocol                              |
+| `packages/database`    | SQLAlchemy declarative base and future PostgreSQL domain models                     |
 | `packages/contract`    | Committed OpenAPI, generated TypeScript types, and artifact manifest schema         |
 | `database`             | Alembic configuration and an empty PostgreSQL baseline                              |
 | `infra`                | AWS CDK stack for Aurora, S3, ECR, GPU ECS, ALB, CloudFront, WAF, and observability |

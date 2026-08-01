@@ -38,6 +38,9 @@ content-addressed runtime assets so a deployment resolves one immutable set rath
 Aurora stays in private subnets, uses encrypted storage and Secrets Manager credentials, and
 enables Data API for controlled administration. The baseline migration creates only
 `alembic_version`; domain tables wait for approved data ownership and lifecycle requirements.
+SQLAlchemy owns domain models and exposes their metadata to Alembic, while Alembic owns migration
+history and Pydantic separately owns HTTP validation. The scaffold defines only the declarative
+base, with no runtime engine/session factory.
 
 The artifact bucket blocks all public access and enforces encryption. CloudFront is the public
 origin for UI and API traffic; the ALB requires both CloudFront's origin-facing managed prefix

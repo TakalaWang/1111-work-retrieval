@@ -18,7 +18,7 @@ dev = [
 package = false
 
 [tool.uv.workspace]
-members = ["apps/api", "packages/search-core"]
+members = ["apps/api", "packages/database", "packages/search-core"]
 
 [tool.ruff]
 line-length = 100
@@ -30,12 +30,12 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
-packages = ["work_retrieval_core", "work_retrieval_api"]
-mypy_path = ["packages/search-core/src", "apps/api/src"]
+packages = ["work_retrieval_core", "work_retrieval_database", "work_retrieval_api"]
+mypy_path = ["packages/search-core/src", "packages/database/src", "apps/api/src"]
 
 [tool.pytest.ini_options]
 addopts = "-q"
-testpaths = ["apps/api/tests", "packages/search-core/tests"]
+testpaths = ["apps/api/tests", "packages/database/tests", "packages/search-core/tests"]
 filterwarnings = [
     "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning",
 ]

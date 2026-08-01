@@ -6,6 +6,7 @@ requires-python = "==3.12.*"
 members = [
     "work-retrieval-api",
     "work-retrieval-core",
+    "work-retrieval-database",
     "work-retrieval-workspace",
 ]
 
@@ -482,6 +483,17 @@ requires-dist = [
 name = "work-retrieval-core"
 version = "0.1.0"
 source = { editable = "packages/search-core" }
+
+[[package]]
+name = "work-retrieval-database"
+version = "0.1.0"
+source = { editable = "packages/database" }
+dependencies = [
+    { name = "sqlalchemy" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "sqlalchemy", specifier = ">=2.0,<3" }]
 
 [[package]]
 name = "work-retrieval-workspace"

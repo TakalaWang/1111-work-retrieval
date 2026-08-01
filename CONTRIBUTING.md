@@ -16,6 +16,10 @@ standard library, platform, or an existing dependency already covers the require
 - Inject `SearchEngine` explicitly. Runtime fallback engines and production test doubles are
   forbidden.
 - Use PostgreSQL/Aurora only. Do not introduce SQLite code, files, migrations, or CI paths.
+- Define PostgreSQL domain models with SQLAlchemy in `packages/database`; manage schema changes
+  with Alembic and HTTP contracts with Pydantic. Do not reuse one layer's classes in another.
+- Do not add a runtime SQLAlchemy engine or session factory until a domain access path requires
+  one.
 - Keep models, embeddings, and large indexes in the versioned S3 runtime prefix, never in Git or
   PostgreSQL.
 - Keep experiments, ablations, evaluators, and unfinished ranking implementations outside this
