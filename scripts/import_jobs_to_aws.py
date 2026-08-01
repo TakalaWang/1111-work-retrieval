@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
 import hashlib
 import json
@@ -18,6 +19,7 @@ AWS_PROFILE = "competition"
 STACK_NAME = "WorkRetrievalData"
 DATABASE_NAME = "work_retrieval"
 SOURCE_SHA256 = "53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089"
+SOURCE_CHECKSUM_SHA256 = base64.b64encode(bytes.fromhex(SOURCE_SHA256)).decode("ascii")
 SOURCE_BYTES = 1_285_945_103
 SOURCE_ROWS = 1_218_635
 POLL_ATTEMPTS = 240
@@ -239,6 +241,8 @@ def ensure_source_object(source: Path, bucket: str) -> None:
         object_key(),
         "--expected-bucket-owner",
         AWS_ACCOUNT,
+        "--checksum-mode",
+        "ENABLED",
     ]
     try:
         existing = aws(head_arguments)
@@ -262,6 +266,10 @@ def ensure_source_object(source: Path, bucket: str) -> None:
                 str(source),
                 "--metadata",
                 f"sha256={SOURCE_SHA256}",
+                "--checksum-algorithm",
+                "SHA256",
+                "--checksum-sha256",
+                SOURCE_CHECKSUM_SHA256,
                 "--if-none-match",
                 "*",
                 "--expected-bucket-owner",
@@ -277,7 +285,11 @@ def ensure_source_object(source: Path, bucket: str) -> None:
 def _verify_source_object(head: dict[str, object]) -> None:
     metadata = head.get("Metadata")
     sha256 = metadata.get("sha256") if isinstance(metadata, dict) else None
-    if head.get("ContentLength") != SOURCE_BYTES or sha256 != SOURCE_SHA256:
+    if (
+        head.get("ContentLength") != SOURCE_BYTES
+        or sha256 != SOURCE_SHA256
+        or head.get("ChecksumSHA256") != SOURCE_CHECKSUM_SHA256
+    ):
         raise RuntimeError("S3 key already contains a different object")
 
 

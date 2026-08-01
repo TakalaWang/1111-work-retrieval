@@ -23,6 +23,7 @@ def test_import_contract_is_fixed_to_the_verified_snapshot() -> None:
     )
     assert importer.SOURCE_BYTES == 1_285_945_103
     assert importer.SOURCE_ROWS == 1_218_635
+    assert importer.SOURCE_CHECKSUM_SHA256 == ("U5N/e/B2eJxM1+O+NPuJh1M2EI1XcHtakxghgeEIcIk=")
     assert len(importer.SOURCE_HEADER) == 39
     assert importer.SOURCE_HEADER[0] == "職缺編號"
     assert importer.SOURCE_HEADER[-1] == "職缺最後修改時間"
@@ -96,7 +97,36 @@ def test_import_and_replace_sql_are_bulk_atomic_and_lossless() -> None:
     assert "NULLIF(NULLIF(" in replace_sql
 
 
-def test_existing_mismatched_s3_object_is_never_overwritten(
+@pytest.mark.parametrize("stored_checksum", [None, "forged-checksum"])
+def test_existing_object_without_the_exact_stored_checksum_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stored_checksum: str | None,
+) -> None:
+    source = tmp_path / "jobs.csv"
+    source.write_bytes(b"source")
+    calls: list[list[str]] = []
+
+    def fake_aws(arguments: list[str], **_: object) -> dict[str, object]:
+        calls.append(arguments)
+        head: dict[str, object] = {
+            "ContentLength": importer.SOURCE_BYTES,
+            "Metadata": {"sha256": importer.SOURCE_SHA256},
+        }
+        if stored_checksum is not None:
+            head["ChecksumSHA256"] = stored_checksum
+        return head
+
+    monkeypatch.setattr(importer, "aws", fake_aws)
+
+    with pytest.raises(RuntimeError, match="different object"):
+        importer.ensure_source_object(source, "private-bucket")
+
+    assert [arguments[:2] for arguments in calls] == [["s3api", "head-object"]]
+    assert "--checksum-mode" in calls[0]
+
+
+def test_existing_object_with_exact_size_metadata_and_checksum_is_accepted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = tmp_path / "jobs.csv"
@@ -105,12 +135,15 @@ def test_existing_mismatched_s3_object_is_never_overwritten(
 
     def fake_aws(arguments: list[str], **_: object) -> dict[str, object]:
         calls.append(arguments)
-        return {"ContentLength": 1, "Metadata": {"sha256": "wrong"}}
+        return {
+            "ContentLength": importer.SOURCE_BYTES,
+            "Metadata": {"sha256": importer.SOURCE_SHA256},
+            "ChecksumSHA256": importer.SOURCE_CHECKSUM_SHA256,
+        }
 
     monkeypatch.setattr(importer, "aws", fake_aws)
 
-    with pytest.raises(RuntimeError, match="different object"):
-        importer.ensure_source_object(source, "private-bucket")
+    importer.ensure_source_object(source, "private-bucket")
 
     assert [arguments[:2] for arguments in calls] == [["s3api", "head-object"]]
 
@@ -130,6 +163,7 @@ def test_new_s3_object_uses_a_conditional_put(
             return {
                 "ContentLength": importer.SOURCE_BYTES,
                 "Metadata": {"sha256": importer.SOURCE_SHA256},
+                "ChecksumSHA256": importer.SOURCE_CHECKSUM_SHA256,
             }
         return {}
 
@@ -140,6 +174,8 @@ def test_new_s3_object_uses_a_conditional_put(
     put = calls[1]
     assert put[:2] == ["s3api", "put-object"]
     assert put[put.index("--if-none-match") + 1] == "*"
+    assert put[put.index("--checksum-algorithm") + 1] == "SHA256"
+    assert put[put.index("--checksum-sha256") + 1] == importer.SOURCE_CHECKSUM_SHA256
 
 
 def test_long_sql_requests_continue_after_timeout(
