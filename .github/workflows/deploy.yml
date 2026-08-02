@@ -63,6 +63,7 @@ jobs:
           DEPLOY_ENABLED: ${{ vars.DEPLOY_ENABLED }}
           DEPLOYMENT_ID: ${{ inputs.deployment_id }}
           GPU_INSTANCE_TYPE: ${{ inputs.gpu_instance_type }}
+          SEARCH_ENABLE_GRAPH: ${{ vars.SEARCH_ENABLE_GRAPH || 'false' }}
         run: |
           set -euo pipefail
           [[ "$AWS_DEPLOY_ROLE_ARN" =~ ^arn:aws:iam::378849533305:role/[A-Za-z0-9+=,.@_/-]+$ ]]
@@ -72,6 +73,7 @@ jobs:
           [[ -z "$ALARM_EMAIL" || "$ALARM_EMAIL" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]
           [[ "$COMPUTE_PROFILE" == "cpu-incumbent" || "$COMPUTE_PROFILE" == "gpu-shadow" ]]
           [[ "$GPU_INSTANCE_TYPE" =~ ^[a-z0-9][a-z0-9.-]*$ ]]
+          [[ "$SEARCH_ENABLE_GRAPH" == "true" || "$SEARCH_ENABLE_GRAPH" == "false" ]]
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
@@ -125,6 +127,7 @@ jobs:
       - name: Download and validate the runtime manifest body
         env:
           ARTIFACT_MANIFEST_SHA: ${{ inputs.artifact_manifest_sha }}
+          SEARCH_ENABLE_GRAPH: ${{ vars.SEARCH_ENABLE_GRAPH || 'false' }}
         run: |
           set -euo pipefail
           RUNTIME_BUCKET="$(jq -er '.WorkRetrievalData.RuntimeBucketName' data-outputs.json)"
@@ -148,6 +151,9 @@ jobs:
           uv run python scripts/validate_runtime_manifest_file.py \
             --manifest "$MANIFEST_PATH" \
             --expected-sha256 "$ARTIFACT_MANIFEST_SHA"
+          if [[ "$SEARCH_ENABLE_GRAPH" == "true" ]]; then
+            jq -e '.challengers.skill_graph.enabled == true' "$MANIFEST_PATH" >/dev/null
+          fi
 
       - name: Build, publish, and scan the API image
         env:
@@ -198,6 +204,7 @@ jobs:
           ARTIFACT_MANIFEST_SHA: ${{ inputs.artifact_manifest_sha }}
           COMPUTE_PROFILE: ${{ inputs.compute_profile }}
           GPU_INSTANCE_TYPE: ${{ inputs.gpu_instance_type }}
+          SEARCH_ENABLE_GRAPH: ${{ vars.SEARCH_ENABLE_GRAPH || 'false' }}
         run: |
           set -euo pipefail
           [[ "$API_IMAGE_URI" =~ ^378849533305\.dkr\.ecr\.us-west-2\.amazonaws\.com/.+@sha256:[0-9a-f]{64}$ ]]
@@ -208,6 +215,7 @@ jobs:
             --parameters "WorkRetrievalPlatform:AlarmEmail=$ALARM_EMAIL" \
             --parameters "WorkRetrievalPlatform:ArtifactManifestSha256=$ARTIFACT_MANIFEST_SHA" \
             --parameters "WorkRetrievalPlatform:ComputeProfile=$COMPUTE_PROFILE" \
+            --parameters "WorkRetrievalPlatform:EnableGraph=$SEARCH_ENABLE_GRAPH" \
             --parameters "WorkRetrievalPlatform:GpuInstanceType=$GPU_INSTANCE_TYPE"
 
       - name: Publish the static web application

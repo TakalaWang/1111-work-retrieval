@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -33,6 +34,11 @@ from work_retrieval_core.adapters import (
     load_job_ids,
 )
 from work_retrieval_core.engine import MAX_AGE_DAYS, CandidateEvidence, CandidateRequest
+from work_retrieval_core.graph_policy import (
+    GRAPH_SERVING_ALGORITHM,
+    GRAPH_SERVING_IMPLEMENTATION_SHA256,
+    GRAPH_SERVING_POLICY,
+)
 
 RUN_MANIFEST_KEYS = {
     "schema_version",
@@ -46,30 +52,17 @@ RUN_MANIFEST_KEYS = {
     "run_sha256",
 }
 PARAMETERS: dict[str, object] = {
-    "seed_scan_depth": 1000,
-    "maximum_graph_seed_jobs": 10,
-    "minimum_anchor_seed_jobs": 2,
-    "maximum_anchors": 8,
-    "maximum_duty_anchors": 4,
-    "minimum_duty_anchor_support": 2,
-    "maximum_edges_per_anchor": 10,
-    "maximum_bridge_terms": 16,
-    "maximum_jobs_per_bridge_term": 50,
+    **GRAPH_SERVING_POLICY,
     "maximum_relation_evidence_per_path": 3,
     "maximum_paths_per_candidate": 5,
-    "allowed_relation_types": ["RELATED_TO", "SPECIALIZATION_OF", "USED_WITH"],
-    "maximum_hops": 1,
-    "rrf_k": 60,
-    "baseline_weight": 1.0,
-    "graph_weight": 1.0,
-    "protected_baseline_head": 3,
-    "maximum_novel_top_10": 2,
-    "novel_top_10_policy": "maximum_two_replacements_then_fill_missing_baseline_slots_v1",
     "maximum_results": 1000,
     "candidate_universe": "temporal_v2_tantivy_eligible_universe",
     "trec_score_policy": "strict_rank_descending_integer_v1",
 }
-ALGORITHM = "graph-conditioned-temporal-bridge-retrieval-protected-rrf-v3"
+ALGORITHM = GRAPH_SERVING_ALGORITHM
+EVALUATION_IMPLEMENTATION_SHA256 = hashlib.sha256(
+    GRAPH_SERVING_IMPLEMENTATION_SHA256.encode() + b"\0" + Path(__file__).read_bytes()
+).hexdigest()
 TAG = "graph-consensus-v1"
 SAFE_QID = re.compile(r"[A-Za-z0-9_.:-]+")
 

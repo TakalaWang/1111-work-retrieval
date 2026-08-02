@@ -45,7 +45,11 @@ class StubMetadata:
         pass
 
 
-def _manifest() -> dict[str, object]:
+def _manifest(*, graph: bool = False) -> dict[str, object]:
+    from work_retrieval_core.graph_policy import (
+        GRAPH_SERVING_IMPLEMENTATION_SHA256,
+        GRAPH_SERVING_POLICY_SHA256,
+    )
     from work_retrieval_core.manifest import (
         WHOLE_DOCUMENT_POLICY_VERSION,
         WHOLE_DOCUMENT_TEMPLATE_SHA256,
@@ -57,6 +61,65 @@ def _manifest() -> dict[str, object]:
         whole: {"kind": "embedding", "sha256": "b" * 64, "size_bytes": 42},
         lexical: {"kind": "index", "sha256": "c" * 64, "size_bytes": 42},
     }
+    challengers = {
+        name: {"enabled": False}
+        for name in (
+            "multiview_embedding",
+            "skill_graph",
+            "semantic_reranker",
+            "learning_to_rank",
+            "guardrails",
+        )
+    }
+    if graph:
+        graph_path = "graphs/skill-graph/manifest.json"
+        candidate_path = "evidence/skill-graph/candidate-manifest.json"
+        report_path = "evidence/skill-graph/report.json"
+        attestation_path = "evidence/skill-graph/organizer-attestation.json"
+        artifacts[graph_path] = {"kind": "graph", "sha256": "d" * 64, "size_bytes": 42}
+        artifacts[report_path] = {"kind": "evidence", "sha256": "e" * 64, "size_bytes": 42}
+        artifacts[candidate_path] = {
+            "kind": "evidence",
+            "sha256": "a" * 64,
+            "size_bytes": 42,
+        }
+        artifacts[attestation_path] = {
+            "kind": "evidence",
+            "sha256": "f" * 64,
+            "size_bytes": 42,
+        }
+        challengers["skill_graph"] = {
+            "enabled": True,
+            "complete": True,
+            "publication_allowed": True,
+            "manifest_path": graph_path,
+            "manifest_sha256": "d" * 64,
+            "schema_version": 1,
+            "train_cutoff_exclusive": "2026-06-08T00:00:00+08:00",
+            "max_source_timestamp": "2026-06-07T23:51:07.143000+08:00",
+            "source_jd_sha256": "53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089",
+            "source_policy": "train_jd_only",
+            "test_jd_used": False,
+            "candidate_manifest_sha256": "a" * 64,
+            "candidate_manifest_path": candidate_path,
+            "source_ablation_report_sha256": "b" * 64,
+            "serving_algorithm": "graph-conditioned-temporal-bridge-retrieval-protected-rrf-v3",
+            "serving_policy_sha256": GRAPH_SERVING_POLICY_SHA256,
+            "serving_implementation_sha256": GRAPH_SERVING_IMPLEMENTATION_SHA256,
+            "evaluation_implementation_sha256": "9" * 64,
+            "organizer_attestation_path": attestation_path,
+            "organizer_attestation_sha256": "f" * 64,
+            "promotion_evidence": {
+                "decision": "accepted",
+                "report_path": report_path,
+                "report_sha256": "e" * 64,
+                "evaluation_split_sha256": "a" * 64,
+                "baseline_run_sha256": "b" * 64,
+                "candidate_run_sha256": "c" * 64,
+                "primary_metric": "ndcg_at_10",
+                "absolute_delta": 0.001,
+            },
+        }
     inventory_sha = hashlib.sha256(
         json.dumps(artifacts, separators=(",", ":"), sort_keys=True).encode()
     ).hexdigest()
@@ -69,8 +132,8 @@ def _manifest() -> dict[str, object]:
             "source_manifest_sha256": "a" * 64,
             "selected_inventory_sha256": "a" * 64,
             "artifact_inventory_sha256": inventory_sha,
-            "object_count": 2,
-            "size_bytes": 84,
+            "object_count": len(artifacts),
+            "size_bytes": sum(item["size_bytes"] for item in artifacts.values()),
         },
         "retrieval_policy": {
             "as_of": {
@@ -118,22 +181,13 @@ def _manifest() -> dict[str, object]:
                 ),
             },
         },
-        "challengers": {
-            name: {"enabled": False}
-            for name in (
-                "multiview_embedding",
-                "skill_graph",
-                "semantic_reranker",
-                "learning_to_rank",
-                "guardrails",
-            )
-        },
+        "challengers": challengers,
         "artifacts": artifacts,
     }
 
 
-def _write_manifest(path: Path) -> None:
-    path.write_text(json.dumps(_manifest()), encoding="utf-8")
+def _write_manifest(path: Path, *, graph: bool = False) -> None:
+    path.write_text(json.dumps(_manifest(graph=graph)), encoding="utf-8")
 
 
 def test_environment_runtime_uses_manifest_ports_and_demo_fixture(tmp_path: Path) -> None:
@@ -146,8 +200,10 @@ def test_environment_runtime_uses_manifest_ports_and_demo_fixture(tmp_path: Path
     def port_factory(
         manifest: RuntimeManifest,
         enable_multiview: bool,
+        enable_graph: bool,
         environment: Mapping[str, str],
     ) -> RetrievalPorts:
+        assert not enable_graph
         received.append((manifest, enable_multiview, dict(environment)))
         return RetrievalPorts(lexical, dense, StubMetadata())
 
@@ -196,7 +252,7 @@ def test_demo_as_of_rejects_ambiguous_values(tmp_path: Path, value: str) -> None
                 "SEARCH_RUNTIME_MANIFEST_PATH": str(manifest_path),
                 "SEARCH_DEMO_AS_OF": value,
             },
-            port_factory=lambda manifest, enabled, environment: RetrievalPorts(
+            port_factory=lambda manifest, enabled, graph, environment: RetrievalPorts(
                 StubRetriever(), StubRetriever(), StubMetadata()
             ),
         )
@@ -209,9 +265,10 @@ def test_multiview_feature_flag_is_strict(tmp_path: Path) -> None:
     def factory(
         manifest: RuntimeManifest,
         enabled: bool,
+        graph: bool,
         environment: Mapping[str, str],
     ) -> RetrievalPorts:
-        del manifest, enabled, environment
+        del manifest, enabled, graph, environment
         return RetrievalPorts(StubRetriever(), StubRetriever(), StubMetadata())
 
     with pytest.raises(RuntimeError, match="must be true or false"):
@@ -238,3 +295,64 @@ def test_multiview_feature_flag_is_strict(tmp_path: Path) -> None:
             },
             port_factory=factory,
         )
+
+
+def test_graph_feature_flag_is_strict_and_requires_promoted_manifest(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "runtime.json"
+    _write_manifest(manifest_path)
+
+    def factory(
+        manifest: RuntimeManifest,
+        multiview: bool,
+        graph: bool,
+        environment: Mapping[str, str],
+    ) -> RetrievalPorts:
+        del manifest, multiview, graph, environment
+        return RetrievalPorts(StubRetriever(), StubRetriever(), StubMetadata())
+
+    with pytest.raises(RuntimeError, match="must be true or false"):
+        runtime_from_environment(
+            {
+                "SEARCH_RUNTIME_MANIFEST_PATH": str(manifest_path),
+                "SEARCH_ENABLE_GRAPH": "1",
+            },
+            port_factory=factory,
+        )
+    with pytest.raises(RuntimeError, match="requires a promoted Graph manifest"):
+        runtime_from_environment(
+            {
+                "SEARCH_RUNTIME_MANIFEST_PATH": str(manifest_path),
+                "SEARCH_ENABLE_GRAPH": "true",
+            },
+            port_factory=factory,
+        )
+
+
+def test_graph_feature_flag_reaches_production_factory(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "runtime.json"
+    _write_manifest(manifest_path, graph=True)
+    received: list[bool] = []
+
+    def factory(
+        manifest: RuntimeManifest,
+        multiview: bool,
+        graph: bool,
+        environment: Mapping[str, str],
+    ) -> RetrievalPorts:
+        del manifest, multiview, environment
+        received.append(graph)
+        return RetrievalPorts(StubRetriever(), StubRetriever(), StubMetadata())
+
+    engine = runtime_from_environment(
+        {
+            "SEARCH_RUNTIME_MANIFEST_PATH": str(manifest_path),
+            "SEARCH_ENABLE_GRAPH": "true",
+        },
+        port_factory=factory,
+    )
+
+    assert received == [True]
+    assert engine.search(SearchQuery("工程師"), limit=10).trace.lanes[0].name == (
+        "graph_conditioned_tantivy"
+    )
+    engine.close()
