@@ -45,4 +45,15 @@ describe('Big Fruit Tree page identity', () => {
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
   });
+
+  it('allows filter panels to extend beyond the hero', () => {
+    const searchStart = page.indexOf('  .search {');
+    const searchStyles = page.slice(
+      searchStart,
+      page.indexOf('\n  }', searchStart) + 4
+    );
+
+    expect(searchStyles).toContain('overflow: visible;');
+    expect(searchStyles).not.toContain('overflow: hidden;');
+  });
 });

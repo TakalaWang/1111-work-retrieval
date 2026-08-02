@@ -537,40 +537,19 @@
 
   .search {
     position: relative;
-    overflow: hidden;
+    z-index: 2;
+    overflow: visible;
     border: 2px solid var(--leaf);
     border-top: 0.75rem solid var(--sun);
     border-radius: 1.5rem;
     padding: clamp(1.5rem, 4vw, 3.5rem) clamp(1rem, 5vw, 4rem)
       clamp(2rem, 5vw, 4rem);
-    background: var(--cream);
+    background:
+      radial-gradient(circle at 100% 0, #e0efd5 0 8rem, transparent 8.05rem),
+      radial-gradient(circle at 0 100%, #f8dfa0 0 6.5rem, transparent 6.55rem),
+      var(--cream);
     box-shadow: 0.65rem 0.75rem 0 #dcebd6;
     transition: padding 180ms ease;
-  }
-
-  .search::before,
-  .search::after {
-    position: absolute;
-    border-radius: 50%;
-    content: '';
-    pointer-events: none;
-  }
-
-  .search::before {
-    top: -7rem;
-    right: -5rem;
-    width: 16rem;
-    height: 16rem;
-    background: #e0efd5;
-  }
-
-  .search::after {
-    bottom: -8rem;
-    left: -5rem;
-    width: 13rem;
-    height: 13rem;
-    background: #f7d875;
-    opacity: 0.58;
   }
 
   .search.has-results {
@@ -758,6 +737,8 @@
   }
 
   .results {
+    position: relative;
+    z-index: 1;
     width: min(100%, 64rem);
     margin: 2.25rem auto 0;
   }
