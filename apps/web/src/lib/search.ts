@@ -9,8 +9,8 @@ type ErrorResponse = components['schemas']['ErrorResponse'];
 export interface SearchForm {
   query: string;
   searchDate?: string;
-  locationCodes?: string;
-  dutyCodes?: string;
+  locationCodes?: string[];
+  dutyCodes?: string[];
 }
 
 export interface PresentedJob {
@@ -125,16 +125,10 @@ function usefulDetail(details: JobResponse['details'], key: string) {
 }
 
 export function serializeSearch(form: SearchForm): SearchRequest {
-  const codes = (value?: string) =>
-    value
-      ?.split(/[,，]/u)
-      .map((code) => code.trim())
-      .filter(Boolean) ?? [];
-
   return {
     query: form.query.trim(),
-    location_code: codes(form.locationCodes),
-    duty_code: codes(form.dutyCodes),
+    location_code: form.locationCodes ?? [],
+    duty_code: form.dutyCodes ?? [],
     ...(form.searchDate ? { search_date: form.searchDate } : {})
   };
 }

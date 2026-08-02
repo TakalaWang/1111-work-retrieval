@@ -41,12 +41,12 @@ describe('search API boundary', () => {
     });
   });
 
-  it('serializes comma-separated location and duty codes', () => {
+  it('serializes selected location and duty codes', () => {
     expect(
       serializeSearch({
         query: '工程師',
-        locationCodes: ' 100100, , 100200 ',
-        dutyCodes: '140200，140300'
+        locationCodes: ['100100', '100200'],
+        dutyCodes: ['140200', '140300']
       })
     ).toEqual({
       query: '工程師',

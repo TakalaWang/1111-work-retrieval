@@ -1,10 +1,14 @@
 <script>
+  import MultiSelectChecklist from '$lib/MultiSelectChecklist.svelte';
+  import filterOptions from '$lib/filter-options.json';
   import { ApiError, searchJobDetails } from '$lib/search';
 
   let query = $state('');
   let searchDate = $state('2026-06-08');
-  let locationCodes = $state('');
-  let dutyCodes = $state('');
+  /** @type {string[]} */
+  let locationCodes = $state([]);
+  /** @type {string[]} */
+  let dutyCodes = $state([]);
   let loading = $state(false);
   let searched = $state(false);
   /** @type {import('$lib/search').PresentedJob[]} */
@@ -97,30 +101,23 @@
             disabled={loading}
           />
         </label>
-        <label for="location-codes">
-          <span>區域代碼（選填）</span>
-          <input
-            id="location-codes"
-            bind:value={locationCodes}
-            type="text"
-            name="location_code"
-            autocomplete="off"
-            placeholder="100100, 100200"
-            disabled={loading}
-          />
-        </label>
-        <label for="duty-codes">
-          <span>工作代碼（選填）</span>
-          <input
-            id="duty-codes"
-            bind:value={dutyCodes}
-            type="text"
-            name="duty_code"
-            autocomplete="off"
-            placeholder="140200, 140300"
-            disabled={loading}
-          />
-        </label>
+        <MultiSelectChecklist
+          id="location-codes"
+          label="區域（選填）"
+          searchPlaceholder="搜尋區域名稱或代碼"
+          options={filterOptions.locations}
+          bind:selected={locationCodes}
+          disabled={loading}
+        />
+        <MultiSelectChecklist
+          id="duty-codes"
+          label="工作（選填）"
+          searchPlaceholder="搜尋工作名稱或代碼"
+          options={filterOptions.duties}
+          bind:selected={dutyCodes}
+          disabled={loading}
+          align="end"
+        />
       </div>
     </form>
   </section>
