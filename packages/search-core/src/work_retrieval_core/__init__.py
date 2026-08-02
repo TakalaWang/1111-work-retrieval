@@ -19,10 +19,18 @@ from work_retrieval_core.engine import (
     SearchUnavailableError,
 )
 from work_retrieval_core.manifest import Artifact, RuntimeManifest
+from work_retrieval_core.ranking import (
+    BusinessEvidence,
+    CandidateEvidenceGate,
+    evidence_preserving_rank,
+    weighted_rrf_pool,
+)
 
 __all__ = [
     "Artifact",
+    "BusinessEvidence",
     "CandidateEvidence",
+    "CandidateEvidenceGate",
     "CandidateRequest",
     "CandidateRetriever",
     "CompiledQuery",
@@ -41,4 +49,6 @@ __all__ = [
     "SearchQuery",
     "SearchResult",
     "SearchUnavailableError",
+    "evidence_preserving_rank",
+    "weighted_rrf_pool",
 ]
