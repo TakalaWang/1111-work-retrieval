@@ -30,6 +30,7 @@ DENSE_SHADOW_ENABLED_ENV = "SEARCH_ENABLE_DENSE_SHADOW"
 RERANKER_ENABLED_ENV = "SEARCH_ENABLE_RERANKER"
 RERANKER_ENDPOINT_ENV = "RERANKER_ENDPOINT_NAME"
 RERANKER_V7_ENDPOINT_NAME = "work-retrieval-qwen3-reranker-8b-v7"
+GRAPH_ENABLED_ENV = "SEARCH_ENABLE_GRAPH"
 DEMO_TIMEZONE = ZoneInfo("Asia/Taipei")
 
 
@@ -75,7 +76,7 @@ class ProductionRuntime:
 
 
 RuntimeFactory = Callable[[], RetrievalRuntime]
-PortFactory = Callable[[RuntimeManifest, bool, Mapping[str, str]], RetrievalPorts]
+PortFactory = Callable[[RuntimeManifest, bool, bool, Mapping[str, str]], RetrievalPorts]
 
 
 def runtime_from_environment(
@@ -101,6 +102,12 @@ def runtime_from_environment(
         values.get(DENSE_SHADOW_ENABLED_ENV, "false"),
         name=DENSE_SHADOW_ENABLED_ENV,
     )
+    enable_graph = _boolean(
+        values.get(GRAPH_ENABLED_ENV, "false"),
+        name=GRAPH_ENABLED_ENV,
+    )
+    if enable_graph and manifest.skill_graph is None:
+        raise RuntimeError(f"{GRAPH_ENABLED_ENV} requires a promoted Graph manifest")
     enable_multiview = _boolean(
         values.get(MULTIVIEW_ENABLED_ENV, "false"),
         name=MULTIVIEW_ENABLED_ENV,
@@ -128,8 +135,9 @@ def runtime_from_environment(
             manifest,
             include_dense=enable_dense_shadow,
             include_multiview=enable_multiview,
+            include_graph=enable_graph,
         )
-    ports = factory(manifest, enable_multiview, values)
+    ports = factory(manifest, enable_multiview, enable_graph, values)
     if not isinstance(ports, RetrievalPorts):
         raise TypeError("SEARCH_PORT_FACTORY must return RetrievalPorts")
     if not isinstance(ports.metadata, JobDetailLookup):
@@ -148,6 +156,7 @@ def runtime_from_environment(
         ports,
         enable_dense_shadow=enable_dense_shadow,
         enable_multiview_maxsim=enable_multiview,
+        enable_graph=enable_graph,
         multiview_artifact_key=multiview_artifact,
         reranker_mode=reranker_mode,
         clock=clock,

@@ -43,7 +43,12 @@ BM25 component 預設明確關閉 query correction，
 fixed-input NDCG@10 正向顯著性驗證並提供 SHA-pinned attestation 時才允許重建成 enabled component。Dense
 預設關閉；顯式開啟時只提供 shadow/tail
 evidence，不能改排 BM25 Top-10，失敗也不影響 incumbent。Graph、multi-view MaxSim、reranker、LTR 與
-guardrail 預設關閉，且 manifest 若宣稱啟用尚無 production adapter 的模組會直接拒絕啟動。Freshness
+guardrail 預設關閉；Graph 只有在 `SEARCH_ENABLE_GRAPH=true` 且 manifest 含已 promotion 的 immutable
+Graph component 時才改用 bounded Graph-conditioned Tantivy。該 component 必須以原始 candidate manifest
+固定六個 Graph 檔，並固定 serving policy 與 implementation SHA、
+外部 organizer attestation、正向 NDCG@10 report、serving algorithm 與 canonical policy SHA；offline 與
+production ranking 以 golden parity test 鎖定。其他宣稱啟用但沒有 production adapter 的模組
+會直接拒絕啟動。Freshness
 只留在 audit 與未來 LTR shadow feature；離線 rank-decay ablation 為負向，因此不拿來重排 relevance。
 
 ## Time and hard-filter contract

@@ -46,6 +46,7 @@ FULL_JOB_FIELDS = (
 HTML_TAG = re.compile(r"<[^>]*>")
 URL = re.compile(r"\b(?:https?://|www\.)\S+", re.IGNORECASE)
 ZERO_WIDTH = re.compile(r"[\u200b-\u200f\u2060\ufeff]")
+LATIN = re.compile(r"[a-z0-9][a-z0-9+#.\-]*")
 
 
 def canonical_text(value: str | None) -> str:
@@ -61,6 +62,46 @@ def canonical_text(value: str | None) -> str:
 
 def canonical_code(value: str | None) -> str:
     return " ".join(unicodedata.normalize("NFKC", value or "").casefold().split())
+
+
+def lexical_tokens(text: str | None) -> list[str]:
+    value = text or ""
+    if value.strip().casefold() == "null":
+        return []
+    value = html.unescape(value)
+    value = HTML_TAG.sub(" ", value)
+    value = ZERO_WIDTH.sub("", value)
+    value = URL.sub(" ", value)
+    value = canonical_code(value)
+    tokens: list[str] = []
+    han_run: list[str] = []
+
+    def flush_han() -> None:
+        if not han_run:
+            return
+        word = "".join(han_run)
+        tokens.extend(word)
+        tokens.extend(word[index : index + 2] for index in range(len(word) - 1))
+        if len(word) <= 8:
+            tokens.append(word)
+        han_run.clear()
+
+    for character in value:
+        if is_han(character):
+            han_run.append(character)
+        else:
+            flush_han()
+    flush_han()
+    for match in LATIN.finditer(value):
+        token = match.group()
+        tokens.append(token)
+        tokens.extend(part for part in re.split(r"[+#.\-]+", token) if part != token and part)
+    return list(dict.fromkeys(tokens))
+
+
+def is_han(character: str) -> bool:
+    code = ord(character)
+    return 0x3400 <= code <= 0x4DBF or 0x4E00 <= code <= 0x9FFF
 
 
 def serialize_full_job(values: Mapping[str, str | None]) -> str:

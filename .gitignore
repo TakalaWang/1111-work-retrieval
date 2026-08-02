@@ -17,3 +17,4 @@ platform-outputs.json
 .env
 artifacts/
 inputs/*.zip
+.superpowers/

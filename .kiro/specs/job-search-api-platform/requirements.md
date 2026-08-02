@@ -78,9 +78,10 @@ out of scope until it is promoted through a separate, evidence-backed change.
 
 ## R6. Delivery safety
 
-- Pull requests and pushes may run CI, but pushes never deploy.
-- Deployment is available only through `workflow_dispatch`, the protected `production`
-  environment, `DEPLOY_ENABLED=true`, exact human confirmation, and validated immutable inputs.
+- Pull requests run CI; pushes to `main`, including merged pull requests, also deploy automatically.
+- Deployment is available only from `main` through the protected `production` environment,
+  `DEPLOY_ENABLED=true`, and a validated immutable runtime manifest. `workflow_dispatch` remains
+  available for intentional redeployment and additionally requires exact human confirmation.
 - The full deployment workflow explicitly deploys `WorkRetrievalData` and then
   `WorkRetrievalPlatform`; application parameters are scoped only to `WorkRetrievalPlatform`.
 - A scaffold, successful build, CDK synthesis, or merged change must not be described as deployed.

@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+from work_retrieval_core.graph_policy import (
+    GRAPH_SERVING_ALGORITHM,
+    GRAPH_SERVING_IMPLEMENTATION_SHA256,
+    GRAPH_SERVING_POLICY_SHA256,
+)
 
 ARTIFACT_KEY = re.compile(
     r"^(embeddings|models|indexes|graphs|rankers|evidence)/"
@@ -48,6 +55,9 @@ CHALLENGERS = {
     "learning_to_rank",
     "guardrails",
 }
+GRAPH_TRAIN_CUTOFF = "2026-06-08T00:00:00+08:00"
+GRAPH_MAX_SOURCE_TIMESTAMP = "2026-06-07T23:51:07.143000+08:00"
+GRAPH_SOURCE_JD_SHA256 = "53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089"
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +71,27 @@ class Artifact:
 class Component:
     manifest_path: str
     manifest_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class GraphPromotionEvidence:
+    report_path: str
+    report_sha256: str
+    evaluation_split_sha256: str
+    baseline_run_sha256: str
+    candidate_run_sha256: str
+    absolute_delta: float
+
+
+@dataclass(frozen=True, slots=True)
+class SkillGraph(Component):
+    candidate_manifest_path: str
+    candidate_manifest_sha256: str
+    source_ablation_report_sha256: str
+    evaluation_implementation_sha256: str
+    organizer_attestation_path: str
+    organizer_attestation_sha256: str
+    promotion: GraphPromotionEvidence
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +117,7 @@ class RuntimeManifest:
     whole_embedding: WholeEmbedding
     temporal_tantivy: TemporalTantivy
     multiview_embedding: Component | None
+    skill_graph: SkillGraph | None
 
     @classmethod
     def from_path(cls, path: str | Path) -> RuntimeManifest:
@@ -129,9 +161,10 @@ class RuntimeManifest:
         challengers = _mapping(root["challengers"], "challengers")
         _exact_keys(challengers, CHALLENGERS, "challengers")
         multiview = _optional_component(challengers["multiview_embedding"], artifacts, "embedding")
-        for name in ("skill_graph", "semantic_reranker", "learning_to_rank", "guardrails"):
+        skill_graph = _skill_graph(challengers["skill_graph"], artifacts)
+        for name in ("semantic_reranker", "learning_to_rank", "guardrails"):
             _disabled_challenger(challengers[name], name)
-        return cls(tuple(artifacts.items()), whole, temporal, multiview)
+        return cls(tuple(artifacts.items()), whole, temporal, multiview, skill_graph)
 
     def artifact(self, key: str) -> Artifact | None:
         return next((artifact for name, artifact in self.artifacts if name == key), None)
@@ -141,6 +174,7 @@ class RuntimeManifest:
         *,
         include_dense: bool,
         include_multiview: bool,
+        include_graph: bool,
     ) -> tuple[tuple[str, Artifact], ...]:
         components: list[Component] = [self.temporal_tantivy]
         if include_dense:
@@ -149,9 +183,24 @@ class RuntimeManifest:
             if self.multiview_embedding is None:
                 raise RuntimeError("multi-view flag requires an enabled manifest challenger")
             components.append(self.multiview_embedding)
+        if include_graph:
+            if self.skill_graph is None:
+                raise RuntimeError("Graph flag requires an enabled manifest challenger")
+            components.append(self.skill_graph)
         prefixes = tuple(str(PurePosixPath(item.manifest_path).parent) + "/" for item in components)
+        graph_evidence = (
+            {
+                self.skill_graph.promotion.report_path,
+                self.skill_graph.candidate_manifest_path,
+                self.skill_graph.organizer_attestation_path,
+            }
+            if include_graph and self.skill_graph is not None
+            else set()
+        )
         selected = tuple(
-            (path, artifact) for path, artifact in self.artifacts if path.startswith(prefixes)
+            (path, artifact)
+            for path, artifact in self.artifacts
+            if path.startswith(prefixes) or path in graph_evidence
         )
         if not selected:
             raise RuntimeError("runtime manifest selected no incumbent artifacts")
@@ -336,6 +385,129 @@ def _optional_component(
     return Component(path, sha256)
 
 
+def _skill_graph(value: object, artifacts: Mapping[str, Artifact]) -> SkillGraph | None:
+    raw = _mapping(value, "challengers.skill_graph")
+    if raw.get("enabled") is False:
+        if set(raw) != {"enabled"}:
+            raise RuntimeError("disabled Graph carries unverified metadata")
+        return None
+    required = {
+        "enabled",
+        "complete",
+        "publication_allowed",
+        "manifest_path",
+        "manifest_sha256",
+        "schema_version",
+        "train_cutoff_exclusive",
+        "max_source_timestamp",
+        "source_jd_sha256",
+        "source_policy",
+        "test_jd_used",
+        "candidate_manifest_sha256",
+        "candidate_manifest_path",
+        "source_ablation_report_sha256",
+        "serving_algorithm",
+        "serving_policy_sha256",
+        "serving_implementation_sha256",
+        "evaluation_implementation_sha256",
+        "organizer_attestation_path",
+        "organizer_attestation_sha256",
+        "promotion_evidence",
+    }
+    _exact_keys(raw, required, "challengers.skill_graph")
+    _equal(
+        raw,
+        {
+            "enabled": True,
+            "complete": True,
+            "publication_allowed": True,
+            "schema_version": 1,
+            "train_cutoff_exclusive": GRAPH_TRAIN_CUTOFF,
+            "max_source_timestamp": GRAPH_MAX_SOURCE_TIMESTAMP,
+            "source_jd_sha256": GRAPH_SOURCE_JD_SHA256,
+            "source_policy": "train_jd_only",
+            "test_jd_used": False,
+            "serving_algorithm": GRAPH_SERVING_ALGORITHM,
+            "serving_policy_sha256": GRAPH_SERVING_POLICY_SHA256,
+            "serving_implementation_sha256": GRAPH_SERVING_IMPLEMENTATION_SHA256,
+        },
+        "skill Graph challenger",
+    )
+    path, sha256 = _component_reference(raw, artifacts, "graph")
+    candidate_path = _artifact_reference(
+        raw["candidate_manifest_path"],
+        raw["candidate_manifest_sha256"],
+        artifacts,
+        "evidence",
+        "Graph candidate manifest",
+    )
+    candidate_sha256 = _sha(raw["candidate_manifest_sha256"], "Graph candidate manifest")
+    ablation_sha256 = _sha(raw["source_ablation_report_sha256"], "Graph ablation report")
+    evaluation_sha256 = _sha(
+        raw["evaluation_implementation_sha256"], "Graph evaluation implementation"
+    )
+    attestation_path = _artifact_reference(
+        raw["organizer_attestation_path"],
+        raw["organizer_attestation_sha256"],
+        artifacts,
+        "evidence",
+        "Graph organizer attestation",
+    )
+    evidence = _graph_promotion_evidence(raw["promotion_evidence"], artifacts)
+    return SkillGraph(
+        path,
+        sha256,
+        candidate_path,
+        candidate_sha256,
+        ablation_sha256,
+        evaluation_sha256,
+        attestation_path,
+        _sha(raw["organizer_attestation_sha256"], "Graph organizer attestation"),
+        evidence,
+    )
+
+
+def _graph_promotion_evidence(
+    value: object, artifacts: Mapping[str, Artifact]
+) -> GraphPromotionEvidence:
+    raw = _mapping(value, "Graph promotion evidence")
+    required = {
+        "decision",
+        "report_path",
+        "report_sha256",
+        "evaluation_split_sha256",
+        "baseline_run_sha256",
+        "candidate_run_sha256",
+        "primary_metric",
+        "absolute_delta",
+    }
+    _exact_keys(raw, required, "Graph promotion evidence")
+    delta = raw["absolute_delta"]
+    if (
+        raw["decision"] != "accepted"
+        or raw["primary_metric"] != "ndcg_at_10"
+        or type(delta) not in {int, float}
+        or not math.isfinite(delta)
+        or delta <= 0
+    ):
+        raise RuntimeError("Graph promotion evidence is not accepted and positive")
+    report_path = _artifact_reference(
+        raw["report_path"],
+        raw["report_sha256"],
+        artifacts,
+        "evidence",
+        "Graph promotion report",
+    )
+    return GraphPromotionEvidence(
+        report_path,
+        _sha(raw["report_sha256"], "Graph promotion report"),
+        _sha(raw["evaluation_split_sha256"], "Graph evaluation split"),
+        _sha(raw["baseline_run_sha256"], "Graph baseline run"),
+        _sha(raw["candidate_run_sha256"], "Graph candidate run"),
+        float(delta),
+    )
+
+
 def _disabled_challenger(value: object, name: str) -> None:
     raw = _mapping(value, f"challengers.{name}")
     if raw != {"enabled": False}:
@@ -353,6 +525,23 @@ def _component_reference(
     if artifact is None or artifact.kind != kind or artifact.sha256 != sha256:
         raise RuntimeError("component manifest is absent or differs from artifact inventory")
     return path, sha256
+
+
+def _artifact_reference(
+    path_value: object,
+    sha_value: object,
+    artifacts: Mapping[str, Artifact],
+    kind: str,
+    field: str,
+) -> str:
+    path = path_value
+    sha256 = _sha(sha_value, field)
+    if not isinstance(path, str):
+        raise RuntimeError(f"{field} path is missing")
+    artifact = artifacts.get(path)
+    if artifact is None or artifact.kind != kind or artifact.sha256 != sha256:
+        raise RuntimeError(f"{field} is absent or differs from artifact inventory")
+    return path
 
 
 def _mapping(value: object, field: str) -> Mapping[str, Any]:

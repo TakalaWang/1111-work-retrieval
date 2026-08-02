@@ -8,6 +8,7 @@ import json
 import subprocess
 import sys
 from collections import defaultdict
+from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
 
@@ -26,6 +27,9 @@ import skill_graph_pipeline as graph
 import tantivy_graph_off_runner as graph_off
 import tantivy_index_pipeline as tantivy_pipeline
 import whole_embedding_pipeline as whole_embeddings
+from work_retrieval_core import CandidateEvidence, CandidateRequest
+from work_retrieval_core.engine import MAX_AGE_DAYS
+from work_retrieval_core.graph import GraphConditionedRetriever, SkillGraphIndex
 from work_retrieval_core.serialization import FULL_JOB_FIELDS
 
 
@@ -283,6 +287,100 @@ def _graph_candidate_fixture(tmp_path: Path) -> dict[str, Path]:
         "baseline": baseline,
         "generated": generated,
     }
+
+
+def test_offline_and_production_graph_ranking_have_golden_parity(tmp_path: Path) -> None:
+    candidates = importlib.import_module("graph_candidate_runner")
+    edge: dict[str, object] = {
+        "job_id": "20",
+        "skill": "javascript",
+        "surface": "Node",
+        "evidence_span": "Node",
+    }
+    relation: dict[str, object] = {
+        "source": "javascript",
+        "type": "USED_WITH",
+        "target": "sql",
+        "support": 2,
+        "weight": 0.9,
+    }
+    bridge_rows = (
+        CandidateEvidence("9", 8.0, 1),
+        CandidateEvidence("20", 7.0, 2),
+    )
+    as_of = datetime(2026, 6, 8, tzinfo=UTC)
+    query = graph_off.CanonicalQuery("q1", "Node.js engineer", as_of, (), ())
+    baseline = [candidates.RunRow("q1", str(rank), rank, float(11 - rank)) for rank in range(1, 11)]
+    indexes = candidates.GraphIndexes(
+        skills_by_job={"20": [edge]},
+        aliases={"javascript": [edge], "Node": [edge]},
+        skills_by_duty={},
+        relations_by_skill={"javascript": [relation], "sql": [relation]},
+        evidence_by_relation={("javascript", "USED_WITH", "sql"): []},
+    )
+
+    class OfflineBridge:
+        def duty_terms(self, codes: tuple[str, ...]) -> tuple[str, ...]:
+            return ()
+
+        def retrieve(
+            self,
+            canonical_query: graph_off.CanonicalQuery,
+            bridge_term: str,
+            *,
+            limit: int,
+        ) -> tuple[CandidateEvidence, ...]:
+            assert bridge_term == "sql" and limit == 50
+            return bridge_rows
+
+    offline_ids = [
+        job_id
+        for job_id, _score in candidates._query_candidates(
+            baseline, indexes, query, OfflineBridge()
+        )[0][:10]
+    ]
+    job_skills = tmp_path / "job-skills.jsonl"
+    duty_skills = tmp_path / "duty-skills.jsonl"
+    relations = tmp_path / "skill-relations.jsonl"
+    _write_jsonl(job_skills, [edge])
+    _write_jsonl(duty_skills, [])
+    _write_jsonl(relations, [relation])
+
+    class ProductionBaseline:
+        def retrieve(
+            self, request: CandidateRequest, *, limit: int
+        ) -> tuple[CandidateEvidence, ...]:
+            if request.lexical_texts == ("sql",):
+                return bridge_rows
+            return tuple(
+                CandidateEvidence(str(rank), float(11 - rank), rank) for rank in range(1, 11)
+            )
+
+        def close(self) -> None:
+            pass
+
+    production = GraphConditionedRetriever(
+        ProductionBaseline(),
+        SkillGraphIndex.from_paths(job_skills, duty_skills, relations),
+        duty_terms=lambda codes: (),
+    )
+    production_ids = [
+        row.job_id
+        for row in production.retrieve(
+            CandidateRequest(
+                query.query,
+                (),
+                (),
+                as_of,
+                as_of - timedelta(days=MAX_AGE_DAYS),
+                (query.query,),
+            ),
+            limit=10,
+        )
+    ]
+
+    expected = ["1", "2", "3", "9", "20", "4", "5", "6", "7", "8"]
+    assert offline_ids == production_ids == expected
 
 
 def test_skill_graph_build_validate_and_trace(tmp_path: Path) -> None:
@@ -929,6 +1027,65 @@ def test_fixed_input_graph_ablation_uses_external_evaluator(
     assert report["publication_allowed"] is False
     assert report["official_score_claimed"] is False
     assert all(not control["enabled"] for control in report["controls"].values())  # type: ignore[union-attr]
+    report_sha256 = contract.sha256_file(tmp_path / "ablation.json")
+    candidate_manifest = contract.read_json_object(
+        graph_output / "manifest.json", "Graph candidate"
+    )
+    monkeypatch.setattr(
+        graph, "GRAPH_MAX_SOURCE_TIMESTAMP", candidate_manifest["max_source_timestamp"]
+    )
+    monkeypatch.setattr(graph, "GRAPH_SOURCE_JD_SHA256", candidate_manifest["source_jd_sha256"])
+    attestation_path = tmp_path / "graph-organizer-attestation.json"
+    _write_json(
+        attestation_path,
+        {
+            "schema_version": 1,
+            "complete": True,
+            "attestation_kind": "fixed-input-graph-promotion",
+            "candidate_manifest_sha256": report["candidate_manifest_sha256"],
+            "ablation_report_sha256": report_sha256,
+            "publication_allowed": True,
+            "evaluator_id": "organizer-v1",
+            "evaluator_kind": "organizer",
+            "significant": True,
+            "primary_metric": "ndcg_at_10",
+            "baseline_value": report["graph_off"]["ndcg_at_10"],  # type: ignore[index]
+            "candidate_value": report["graph_on"]["ndcg_at_10"],  # type: ignore[index]
+            "absolute_delta": report["delta"]["ndcg_at_10"],  # type: ignore[index]
+            "evaluation_split_sha256": report["split_manifest_sha256"],
+            "baseline_run_sha256": report["graph_off_run_sha256"],
+            "candidate_run_sha256": report["graph_on_run_sha256"],
+            "serving_algorithm": report["serving_algorithm"],
+            "serving_policy_sha256": report["serving_policy_sha256"],
+            "serving_implementation_sha256": report["serving_implementation_sha256"],
+            "evaluation_implementation_sha256": report["evaluation_implementation_sha256"],
+        },
+    )
+    approved_output = tmp_path / "approved-graph"
+    approval = graph.approve_graph(
+        graph_output=graph_output,
+        split_manifest_path=split_manifest,
+        evidence_path=fixture["evidence"],
+        extraction_manifest_path=fixture["extraction_manifest"],
+        ablation_report_path=tmp_path / "ablation.json",
+        ablation_report_sha256=report_sha256,
+        organizer_attestation_path=attestation_path,
+        organizer_attestation_sha256=contract.sha256_file(attestation_path),
+        runtime_prefix="graphs/skill-graph/approved-v1",
+        candidate_manifest_runtime_path=("evidence/skill-graph/approved-v1-candidate.json"),
+        promotion_report_runtime_path="evidence/skill-graph/approved-v1.json",
+        organizer_attestation_runtime_path=("evidence/skill-graph/approved-v1-organizer.json"),
+        output=approved_output,
+    )
+    approved_manifest = contract.read_json_object(
+        approved_output / "manifest.json", "approved Graph"
+    )
+    assert approval["manifest_sha256"] == contract.sha256_file(approved_output / "manifest.json")
+    assert approved_manifest["publication_allowed"] is True
+    assert approved_manifest["serving_policy_sha256"] == report["serving_policy_sha256"]
+    assert {item["path"].rsplit("/", 1)[-1] for item in approved_manifest["files"]} == set(  # type: ignore[index,union-attr]
+        graph.GRAPH_FILES.values()
+    )
     original_run = run_paths["graph_on"].read_bytes()
     original_manifest = manifest_paths["graph_on"].read_bytes()
     tampered_lines = original_run.decode().splitlines()

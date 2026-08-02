@@ -28,6 +28,10 @@ from work_retrieval_core.constraints import (
     QueryConstraints,
     WorkShiftConstraint,
 )
+from work_retrieval_core.graph_policy import (
+    GRAPH_SERVING_IMPLEMENTATION_SHA256,
+    GRAPH_SERVING_POLICY_SHA256,
+)
 from work_retrieval_core.manifest import (
     WHOLE_DOCUMENT_POLICY_VERSION,
     WHOLE_DOCUMENT_TEMPLATE_SHA256,
@@ -37,7 +41,7 @@ DEMO_AS_OF = datetime(2026, 6, 8, tzinfo=UTC)
 HEX = "a" * 64
 
 
-def _manifest(*, multiview: bool = False) -> dict[str, object]:
+def _manifest(*, multiview: bool = False, graph: bool = False) -> dict[str, object]:
     whole_path = "embeddings/qwen3-embedding-8b/whole/manifest.json"
     tantivy_path = "indexes/tantivy-bm25-temporal-v3/manifest.json"
     artifacts: dict[str, object] = {
@@ -63,6 +67,55 @@ def _manifest(*, multiview: bool = False) -> dict[str, object]:
             "publication_allowed": True,
             "manifest_path": path,
             "manifest_sha256": "d" * 64,
+        }
+    if graph:
+        path = "graphs/skill-graph/manifest.json"
+        candidate_path = "evidence/skill-graph/candidate-manifest.json"
+        report_path = "evidence/skill-graph/report.json"
+        attestation_path = "evidence/skill-graph/organizer-attestation.json"
+        artifacts[path] = {"kind": "graph", "sha256": "e" * 64, "size_bytes": 19}
+        artifacts[report_path] = {"kind": "evidence", "sha256": "f" * 64, "size_bytes": 20}
+        artifacts[candidate_path] = {
+            "kind": "evidence",
+            "sha256": "2" * 64,
+            "size_bytes": 22,
+        }
+        artifacts[attestation_path] = {
+            "kind": "evidence",
+            "sha256": "1" * 64,
+            "size_bytes": 21,
+        }
+        challengers["skill_graph"] = {
+            "enabled": True,
+            "complete": True,
+            "publication_allowed": True,
+            "manifest_path": path,
+            "manifest_sha256": "e" * 64,
+            "schema_version": 1,
+            "train_cutoff_exclusive": "2026-06-08T00:00:00+08:00",
+            "max_source_timestamp": "2026-06-07T23:51:07.143000+08:00",
+            "source_jd_sha256": "53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089",
+            "source_policy": "train_jd_only",
+            "test_jd_used": False,
+            "candidate_manifest_sha256": "2" * 64,
+            "candidate_manifest_path": candidate_path,
+            "source_ablation_report_sha256": "3" * 64,
+            "serving_algorithm": "graph-conditioned-temporal-bridge-retrieval-protected-rrf-v3",
+            "serving_policy_sha256": GRAPH_SERVING_POLICY_SHA256,
+            "serving_implementation_sha256": GRAPH_SERVING_IMPLEMENTATION_SHA256,
+            "evaluation_implementation_sha256": "4" * 64,
+            "organizer_attestation_path": attestation_path,
+            "organizer_attestation_sha256": "1" * 64,
+            "promotion_evidence": {
+                "decision": "accepted",
+                "report_path": report_path,
+                "report_sha256": "f" * 64,
+                "evaluation_split_sha256": HEX,
+                "baseline_run_sha256": HEX,
+                "candidate_run_sha256": HEX,
+                "primary_metric": "ndcg_at_10",
+                "absolute_delta": 0.001,
+            },
         }
     inventory_sha = hashlib.sha256(
         json.dumps(artifacts, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
@@ -232,7 +285,7 @@ def test_manifest_requires_both_incumbents_and_selects_only_their_prefixes() -> 
     assert [
         path
         for path, _artifact in parsed.required_artifacts(
-            include_dense=False, include_multiview=False
+            include_dense=False, include_multiview=False, include_graph=False
         )
     ] == [
         "indexes/tantivy-bm25-temporal-v3/manifest.json",
@@ -240,7 +293,7 @@ def test_manifest_requires_both_incumbents_and_selects_only_their_prefixes() -> 
     assert [
         path
         for path, _artifact in parsed.required_artifacts(
-            include_dense=True, include_multiview=False
+            include_dense=True, include_multiview=False, include_graph=False
         )
     ] == [
         "embeddings/qwen3-embedding-8b/whole/manifest.json",
@@ -253,6 +306,41 @@ def test_manifest_requires_both_incumbents_and_selects_only_their_prefixes() -> 
     )
     with pytest.raises(RuntimeError, match="absent"):
         RuntimeManifest.from_dict(missing)
+
+
+def test_manifest_selects_graph_artifacts_only_when_enabled() -> None:
+    parsed = RuntimeManifest.from_dict(_manifest(graph=True))
+
+    assert parsed.skill_graph is not None
+    assert [
+        path
+        for path, _artifact in parsed.required_artifacts(
+            include_dense=False,
+            include_multiview=False,
+            include_graph=True,
+        )
+    ] == [
+        "indexes/tantivy-bm25-temporal-v3/manifest.json",
+        "graphs/skill-graph/manifest.json",
+        "evidence/skill-graph/report.json",
+        "evidence/skill-graph/candidate-manifest.json",
+        "evidence/skill-graph/organizer-attestation.json",
+    ]
+
+    with pytest.raises(RuntimeError, match="Graph flag requires"):
+        RuntimeManifest.from_dict(_manifest()).required_artifacts(
+            include_dense=False,
+            include_multiview=False,
+            include_graph=True,
+        )
+
+
+def test_manifest_rejects_graph_serving_policy_drift() -> None:
+    value = _manifest(graph=True)
+    value["challengers"]["skill_graph"]["serving_policy_sha256"] = HEX  # type: ignore[index]
+
+    with pytest.raises(RuntimeError, match="serving_policy_sha256"):
+        RuntimeManifest.from_dict(value)
 
 
 def test_multiview_requires_both_manifest_artifact_and_port() -> None:
@@ -307,11 +395,32 @@ def test_dynamic_as_of_filters_stale_rows_and_retains_future_snapshots() -> None
     assert future.freshness_score == 0.0
     assert [(lane.name, lane.status, lane.reason) for lane in result.trace.lanes[-5:]] == [
         ("qwen_dense_multiview_maxsim", "disabled", "feature_flag_disabled"),
-        ("graph", "disabled", "ablation_not_approved"),
+        ("graph", "disabled", "feature_flag_disabled"),
         ("reranker", "disabled", "feature_flag_disabled"),
         ("ltr", "disabled", "calibration_not_approved"),
         ("guardrail", "disabled", "calibration_not_approved"),
     ]
+    engine.close()
+
+
+def test_enabled_graph_is_the_incumbent_lane() -> None:
+    graph = StubRetriever((_candidate("1", 10.0, 1),))
+    engine = ProductionSearchEngine(
+        RuntimeManifest.from_dict(_manifest(graph=True)),
+        RetrievalPorts(graph, None, StubMetadata((_metadata("1", 0),))),
+        enable_graph=True,
+        clock=lambda: DEMO_AS_OF,
+    )
+
+    result = engine.search(SearchQuery("Python"), limit=10)
+
+    assert result.trace.lanes[0].as_dict() == {
+        "name": "graph_conditioned_tantivy",
+        "status": "enabled",
+        "reason": "top10_incumbent",
+        "candidate_count": 1,
+    }
+    assert result.trace.results[0].evidence[0].ranking_contribution == 10.0
     engine.close()
 
 
@@ -456,7 +565,8 @@ def test_close_is_idempotent_and_closed_engine_fails() -> None:
         engine.search(SearchQuery("工程師"), limit=10)
 
 
-def test_dense_shadow_cannot_reorder_incumbent_top_ten() -> None:
+@pytest.mark.parametrize("graph_enabled", [False, True])
+def test_dense_shadow_cannot_reorder_incumbent_top_ten(graph_enabled: bool) -> None:
     lexical_candidates = tuple(
         _candidate(str(index), float(20 - index), index) for index in range(1, 11)
     )
@@ -469,13 +579,14 @@ def test_dense_shadow_cannot_reorder_incumbent_top_ten() -> None:
     )
     metadata = StubMetadata(tuple(_metadata(str(index), 0) for index in range(1, 12)))
     engine = ProductionSearchEngine(
-        RuntimeManifest.from_dict(_manifest()),
+        RuntimeManifest.from_dict(_manifest(graph=graph_enabled)),
         RetrievalPorts(
             StubRetriever(lexical_candidates),
             StubRetriever(dense_candidates),
             metadata,
         ),
         enable_dense_shadow=True,
+        enable_graph=graph_enabled,
         clock=lambda: DEMO_AS_OF,
     )
 
@@ -865,7 +976,7 @@ def test_typed_job_constraints_are_audited_and_postgres_revalidated() -> None:
 
 def test_manifest_rejects_enabled_challenger_without_production_adapter() -> None:
     value = _manifest()
-    value["challengers"]["skill_graph"] = {"enabled": True}  # type: ignore[index]
+    value["challengers"]["semantic_reranker"] = {"enabled": True}  # type: ignore[index]
 
     with pytest.raises(RuntimeError, match="must be disabled"):
         RuntimeManifest.from_dict(value)

@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 import hashlib
-import html
 import json
 import math
-import re
-import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -27,7 +24,16 @@ from work_retrieval_core.engine import (
     CompiledQuery,
     QueryRewrite,
 )
+from work_retrieval_core.graph import GraphConditionedRetriever, SkillGraphIndex
+from work_retrieval_core.graph_policy import (
+    GRAPH_SERVING_ALGORITHM,
+    GRAPH_SERVING_IMPLEMENTATION_SHA256,
+    GRAPH_SERVING_POLICY_SHA256,
+)
 from work_retrieval_core.manifest import (
+    GRAPH_MAX_SOURCE_TIMESTAMP,
+    GRAPH_SOURCE_JD_SHA256,
+    GRAPH_TRAIN_CUTOFF,
     MODEL,
     MODEL_REVISION,
     SOURCE_EMBEDDING_DIMENSION,
@@ -41,6 +47,8 @@ from work_retrieval_core.manifest import (
 from work_retrieval_core.serialization import (
     FULL_JOB_FIELDS,
     canonical_code,
+    is_han,
+    lexical_tokens,
 )
 
 QUERY_PROMPT = (
@@ -71,10 +79,6 @@ FILTER_SEMANTICS = (
     "AND optional monthly salary/job attribute/work shift/no-experience/management, "
     "applied before Top-K"
 )
-LATIN = re.compile(r"[a-z0-9][a-z0-9+#.\-]*")
-HTML_TAG = re.compile(r"<[^>]*>")
-URL = re.compile(r"\b(?:https?://|www\.)\S+", re.IGNORECASE)
-ZERO_WIDTH = re.compile(r"[\u200b-\u200f\u2060\ufeff]")
 EXACT_DENSE_CHUNK_ROWS = 24_576
 EXACT_DENSE_MAX_ELIGIBLE_ROWS = 250_000
 EXACT_DENSE_TIMEOUT_SECONDS = 2.0
@@ -641,6 +645,285 @@ class TantivyLayout:
         return cls(directory, taxonomy_path, job_ids_path, correction_path, attestation_path)
 
 
+@dataclass(frozen=True, slots=True)
+class SkillGraphLayout:
+    job_skills_path: str
+    duty_skills_path: str
+    skill_relations_path: str
+
+    @classmethod
+    def from_path(
+        cls, path: Path, manifest: RuntimeManifest, *, runtime_root: Path
+    ) -> SkillGraphLayout:
+        if manifest.skill_graph is None:
+            raise RuntimeError("Graph layout requires an enabled manifest challenger")
+        raw = _json_object(path, "skill Graph component")
+        _exact_keys(
+            raw,
+            {
+                "complete",
+                "publication_allowed",
+                "schema_version",
+                "train_cutoff_exclusive",
+                "max_source_timestamp",
+                "source_jd_sha256",
+                "source_policy",
+                "test_jd_used",
+                "candidate_manifest_path",
+                "candidate_manifest_sha256",
+                "source_ablation_report_sha256",
+                "serving_algorithm",
+                "serving_policy_sha256",
+                "serving_implementation_sha256",
+                "evaluation_implementation_sha256",
+                "promotion_report_path",
+                "promotion_report_sha256",
+                "organizer_attestation_path",
+                "organizer_attestation_sha256",
+                "files",
+            },
+            "skill Graph component",
+        )
+        if (
+            raw["complete"] is not True
+            or raw["publication_allowed"] is not True
+            or raw["schema_version"] != 1
+            or raw["train_cutoff_exclusive"] != GRAPH_TRAIN_CUTOFF
+            or raw["max_source_timestamp"] != GRAPH_MAX_SOURCE_TIMESTAMP
+            or raw["source_jd_sha256"] != GRAPH_SOURCE_JD_SHA256
+            or raw["source_policy"] != "train_jd_only"
+            or raw["test_jd_used"] is not False
+            or raw["candidate_manifest_path"] != manifest.skill_graph.candidate_manifest_path
+            or raw["candidate_manifest_sha256"] != manifest.skill_graph.candidate_manifest_sha256
+            or raw["source_ablation_report_sha256"]
+            != manifest.skill_graph.source_ablation_report_sha256
+            or raw["serving_algorithm"] != GRAPH_SERVING_ALGORITHM
+            or raw["serving_policy_sha256"] != GRAPH_SERVING_POLICY_SHA256
+            or raw["serving_implementation_sha256"] != GRAPH_SERVING_IMPLEMENTATION_SHA256
+            or raw["evaluation_implementation_sha256"]
+            != manifest.skill_graph.evaluation_implementation_sha256
+            or raw["promotion_report_path"] != manifest.skill_graph.promotion.report_path
+            or raw["promotion_report_sha256"] != manifest.skill_graph.promotion.report_sha256
+            or raw["organizer_attestation_path"] != manifest.skill_graph.organizer_attestation_path
+            or raw["organizer_attestation_sha256"]
+            != manifest.skill_graph.organizer_attestation_sha256
+        ):
+            raise RuntimeError("skill Graph component is not production-publishable")
+        cutoff = _aware_timestamp(raw["train_cutoff_exclusive"], "Graph train cutoff")
+        maximum = _aware_timestamp(raw["max_source_timestamp"], "Graph max source timestamp")
+        if maximum >= cutoff:
+            raise RuntimeError("skill Graph contains post-cutoff source data")
+        _sha(raw["source_jd_sha256"], "Graph source JD")
+        _validate_graph_evidence(runtime_root, manifest)
+        files = raw["files"]
+        if not isinstance(files, list):
+            raise RuntimeError("skill Graph files must be an array")
+        expected_names = {
+            "jobs.jsonl",
+            "skills.jsonl",
+            "job-skills.jsonl",
+            "duty-skills.jsonl",
+            "skill-relations.jsonl",
+            "relation-evidence.jsonl",
+        }
+        component_prefix = str(Path(manifest.skill_graph.manifest_path).parent.as_posix()) + "/"
+        paths: dict[str, str] = {}
+        for position, value in enumerate(files):
+            entry = _object(value, f"skill Graph file {position}")
+            _exact_keys(
+                entry,
+                {"path", "sha256", "size_bytes"},
+                f"skill Graph file {position}",
+            )
+            artifact_path = _artifact_path(entry["path"], f"skill Graph file {position}")
+            if not artifact_path.startswith(component_prefix):
+                raise RuntimeError("skill Graph file escapes its component")
+            artifact = manifest.artifact(artifact_path)
+            if (
+                artifact is None
+                or artifact.kind != "graph"
+                or artifact.sha256 != _sha(entry["sha256"], f"skill Graph file {position}")
+                or artifact.size_bytes
+                != _integer(entry["size_bytes"], f"skill Graph file {position} size")
+            ):
+                raise RuntimeError("skill Graph file is absent or differs")
+            name = Path(artifact_path).name
+            if name in paths:
+                raise RuntimeError("skill Graph contains duplicate file names")
+            paths[name] = artifact_path
+        if set(paths) != expected_names:
+            raise RuntimeError("skill Graph component files differ from the serving contract")
+        _validate_graph_candidate_inventory(runtime_root, manifest, paths)
+        return cls(
+            paths["job-skills.jsonl"],
+            paths["duty-skills.jsonl"],
+            paths["skill-relations.jsonl"],
+        )
+
+
+def _validate_graph_evidence(runtime_root: Path, manifest: RuntimeManifest) -> None:
+    graph = manifest.skill_graph
+    if graph is None:
+        raise RuntimeError("Graph evidence requires an enabled manifest challenger")
+    candidate_path = runtime_root / graph.candidate_manifest_path
+    report_path = runtime_root / graph.promotion.report_path
+    attestation_path = runtime_root / graph.organizer_attestation_path
+    if (
+        hashlib.sha256(candidate_path.read_bytes()).hexdigest() != graph.candidate_manifest_sha256
+        or hashlib.sha256(report_path.read_bytes()).hexdigest() != graph.promotion.report_sha256
+        or hashlib.sha256(attestation_path.read_bytes()).hexdigest()
+        != graph.organizer_attestation_sha256
+    ):
+        raise RuntimeError("Graph promotion evidence bytes differ")
+    report = _json_object(report_path, "Graph promotion report")
+    _exact_keys(
+        report,
+        {
+            "schema_version",
+            "complete",
+            "publication_allowed",
+            "evaluation_split_sha256",
+            "baseline_run_sha256",
+            "candidate_run_sha256",
+            "primary_metric",
+            "baseline_value",
+            "candidate_value",
+            "absolute_delta",
+        },
+        "Graph promotion report",
+    )
+    promotion = graph.promotion
+    if (
+        report["schema_version"] != 1
+        or report["complete"] is not True
+        or report["publication_allowed"] is not True
+        or report["evaluation_split_sha256"] != promotion.evaluation_split_sha256
+        or report["baseline_run_sha256"] != promotion.baseline_run_sha256
+        or report["candidate_run_sha256"] != promotion.candidate_run_sha256
+        or report["primary_metric"] != "ndcg_at_10"
+        or report["absolute_delta"] != promotion.absolute_delta
+        or type(report["baseline_value"]) not in {int, float}
+        or type(report["candidate_value"]) not in {int, float}
+        or not math.isclose(
+            float(report["candidate_value"]) - float(report["baseline_value"]),
+            promotion.absolute_delta,
+            rel_tol=0,
+            abs_tol=1e-12,
+        )
+    ):
+        raise RuntimeError("Graph promotion report differs from runtime lineage")
+    attestation = _json_object(attestation_path, "Graph organizer attestation")
+    _exact_keys(
+        attestation,
+        {
+            "schema_version",
+            "complete",
+            "attestation_kind",
+            "candidate_manifest_sha256",
+            "ablation_report_sha256",
+            "publication_allowed",
+            "evaluator_id",
+            "evaluator_kind",
+            "significant",
+            "primary_metric",
+            "baseline_value",
+            "candidate_value",
+            "absolute_delta",
+            "evaluation_split_sha256",
+            "baseline_run_sha256",
+            "candidate_run_sha256",
+            "serving_algorithm",
+            "serving_policy_sha256",
+            "serving_implementation_sha256",
+            "evaluation_implementation_sha256",
+        },
+        "Graph organizer attestation",
+    )
+    if (
+        attestation["schema_version"] != 1
+        or attestation["complete"] is not True
+        or attestation["attestation_kind"] != "fixed-input-graph-promotion"
+        or attestation["candidate_manifest_sha256"] != graph.candidate_manifest_sha256
+        or attestation["ablation_report_sha256"] != graph.source_ablation_report_sha256
+        or attestation["publication_allowed"] is not True
+        or not isinstance(attestation["evaluator_id"], str)
+        or not attestation["evaluator_id"].strip()
+        or attestation["evaluator_kind"] != "organizer"
+        or attestation["significant"] is not True
+        or attestation["primary_metric"] != "ndcg_at_10"
+        or attestation["absolute_delta"] != promotion.absolute_delta
+        or attestation["evaluation_split_sha256"] != promotion.evaluation_split_sha256
+        or attestation["baseline_run_sha256"] != promotion.baseline_run_sha256
+        or attestation["candidate_run_sha256"] != promotion.candidate_run_sha256
+        or attestation["serving_algorithm"] != GRAPH_SERVING_ALGORITHM
+        or attestation["serving_policy_sha256"] != GRAPH_SERVING_POLICY_SHA256
+        or attestation["serving_implementation_sha256"] != GRAPH_SERVING_IMPLEMENTATION_SHA256
+        or attestation["evaluation_implementation_sha256"] != graph.evaluation_implementation_sha256
+        or attestation["baseline_value"] != report["baseline_value"]
+        or attestation["candidate_value"] != report["candidate_value"]
+    ):
+        raise RuntimeError("Graph organizer attestation differs from runtime lineage")
+
+
+def _validate_graph_candidate_inventory(
+    runtime_root: Path,
+    manifest: RuntimeManifest,
+    serving_paths: Mapping[str, str],
+) -> None:
+    graph = manifest.skill_graph
+    if graph is None:
+        raise RuntimeError("Graph candidate inventory requires an enabled challenger")
+    candidate = _json_object(
+        runtime_root / graph.candidate_manifest_path,
+        "Graph candidate manifest",
+    )
+    inventory = candidate.get("artifacts")
+    if not isinstance(inventory, list):
+        raise RuntimeError("Graph candidate artifact inventory is missing")
+    candidate_files: dict[str, tuple[str, int]] = {}
+    for position, value in enumerate(inventory):
+        entry = _object(value, f"Graph candidate artifact {position}")
+        _exact_keys(
+            entry,
+            {"path", "kind", "sha256", "size_bytes"},
+            f"Graph candidate artifact {position}",
+        )
+        path = _artifact_path(entry["path"], f"Graph candidate artifact {position}")
+        name = Path(path).name
+        if path != name or entry["kind"] != "graph" or name in candidate_files:
+            raise RuntimeError("Graph candidate artifact inventory differs")
+        candidate_files[name] = (
+            _sha(entry["sha256"], f"Graph candidate artifact {position}"),
+            _integer(entry["size_bytes"], f"Graph candidate artifact {position} size"),
+        )
+    serving_files: dict[str, tuple[str, int]] = {}
+    for name, path in serving_paths.items():
+        artifact = manifest.artifact(path)
+        if artifact is None:
+            raise RuntimeError("Graph serving artifact is missing")
+        serving_files[name] = (artifact.sha256, artifact.size_bytes)
+    if candidate_files != serving_files:
+        raise RuntimeError("Graph serving files differ from the evaluated candidate inventory")
+
+
+def graph_conditioned_retriever(
+    *,
+    runtime_root: Path,
+    layout: SkillGraphLayout,
+    baseline: TantivyBm25Retriever,
+    taxonomy: FilterTaxonomy,
+) -> GraphConditionedRetriever:
+    return GraphConditionedRetriever(
+        baseline,
+        SkillGraphIndex.from_paths(
+            runtime_root / layout.job_skills_path,
+            runtime_root / layout.duty_skills_path,
+            runtime_root / layout.skill_relations_path,
+        ),
+        duty_terms=lambda codes: taxonomy.resolve_duties(codes) or (),
+    )
+
+
 class TantivyBm25Retriever:
     """Fielded full-JD BM25 whose visibility, taxonomy, and time filters precede Top-K."""
 
@@ -711,11 +994,9 @@ class TantivyBm25Retriever:
                 )
             )
             han_bigrams = [
-                token
-                for token in tokens
-                if len(token) >= 2 and all(_is_han(char) for char in token)
+                token for token in tokens if len(token) >= 2 and all(is_han(char) for char in token)
             ]
-            non_han = [token for token in tokens if not all(_is_han(char) for char in token)]
+            non_han = [token for token in tokens if not all(is_han(char) for char in token)]
             terms = han_bigrams + non_han or tokens
             if not terms:
                 return tantivy.Query.empty_query()
@@ -1181,46 +1462,6 @@ def _aware_timestamp(value: object, field: str) -> datetime:
 
 def _constant(query: tantivy.Query) -> tantivy.Query:
     return tantivy.Query.const_score_query(query, 0.0)
-
-
-def lexical_tokens(text: str | None) -> list[str]:
-    value = text or ""
-    if value.strip().casefold() == "null":
-        return []
-    value = html.unescape(value)
-    value = HTML_TAG.sub(" ", value)
-    value = ZERO_WIDTH.sub("", value)
-    value = URL.sub(" ", value)
-    value = " ".join(unicodedata.normalize("NFKC", value).casefold().split())
-    tokens: list[str] = []
-    han_run: list[str] = []
-
-    def flush_han() -> None:
-        if not han_run:
-            return
-        word = "".join(han_run)
-        tokens.extend(word)
-        tokens.extend(word[index : index + 2] for index in range(len(word) - 1))
-        if len(word) <= 8:
-            tokens.append(word)
-        han_run.clear()
-
-    for character in value:
-        if _is_han(character):
-            han_run.append(character)
-        else:
-            flush_han()
-    flush_han()
-    for match in LATIN.finditer(value):
-        token = match.group()
-        tokens.append(token)
-        tokens.extend(part for part in re.split(r"[+#.\-]+", token) if part != token and part)
-    return list(dict.fromkeys(tokens))
-
-
-def _is_han(character: str) -> bool:
-    code = ord(character)
-    return 0x3400 <= code <= 0x4DBF or 0x4E00 <= code <= 0x9FFF
 
 
 def _json_object(path: Path, field: str) -> dict[str, Any]:

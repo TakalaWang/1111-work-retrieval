@@ -596,15 +596,28 @@ def test_multiview_cannot_publish_incomplete(release_fixture: object) -> None:
         promotion.validate_runtime_manifest(manifest, documents)
 
 
-def test_schema_accepts_publishable_multiview_while_graph_stays_disabled(
+def test_schema_accepts_publishable_multiview_and_graph(
     release_fixture: object,
 ) -> None:
     source, spec, documents = release_fixture
     manifest, _ = promotion.build_manifest(source, spec, documents, HEX["e"])
     multiview_data_path = "embeddings/qwen3-embedding-8b/multiview-1024/vectors.f16.npy"
-    graph_data_path = "graphs/skill-graph/graph.jsonl"
     multiview_data = b"multiview"
-    graph_data = b"graph"
+    graph_files = {f"graphs/skill-graph/{name}": b"{}\n" for name in promotion.GRAPH_SERVING_FILES}
+    graph_candidate_path = "evidence/skill-graph/candidate-manifest.json"
+    graph_candidate = encoded(
+        {
+            "artifacts": [
+                {
+                    "path": path.rsplit("/", 1)[-1],
+                    "kind": "graph",
+                    "sha256": digest(payload),
+                    "size_bytes": len(payload),
+                }
+                for path, payload in sorted(graph_files.items())
+            ]
+        }
+    )
     mrl_report = encoded(
         {
             "stable_result_sha256": HEX["c"],
@@ -648,6 +661,31 @@ def test_schema_accepts_publishable_multiview_while_graph_stays_disabled(
             "absolute_delta": 0.002,
         }
     )
+    graph_attestation_path = "evidence/skill-graph/organizer-attestation.json"
+    graph_attestation = encoded(
+        {
+            "schema_version": 1,
+            "complete": True,
+            "attestation_kind": "fixed-input-graph-promotion",
+            "candidate_manifest_sha256": digest(graph_candidate),
+            "ablation_report_sha256": HEX["b"],
+            "publication_allowed": True,
+            "evaluator_id": "organizer-v1",
+            "evaluator_kind": "organizer",
+            "significant": True,
+            "primary_metric": "ndcg_at_10",
+            "baseline_value": 0.3,
+            "candidate_value": 0.302,
+            "absolute_delta": 0.002,
+            "evaluation_split_sha256": HEX["d"],
+            "baseline_run_sha256": HEX["e"],
+            "candidate_run_sha256": HEX["f"],
+            "serving_algorithm": promotion.GRAPH_SERVING_ALGORITHM,
+            "serving_policy_sha256": promotion.GRAPH_SERVING_POLICY_SHA256,
+            "serving_implementation_sha256": promotion.GRAPH_SERVING_IMPLEMENTATION_SHA256,
+            "evaluation_implementation_sha256": HEX["c"],
+        }
+    )
     multiview_document = encoded(
         {
             "complete": True,
@@ -685,12 +723,24 @@ def test_schema_accepts_publishable_multiview_while_graph_stays_disabled(
             "source_jd_sha256": promotion.APPROVED_GRAPH_SOURCE_JD_SHA256,
             "source_policy": "train_jd_only",
             "test_jd_used": False,
+            "candidate_manifest_path": graph_candidate_path,
+            "candidate_manifest_sha256": digest(graph_candidate),
+            "source_ablation_report_sha256": HEX["b"],
+            "serving_algorithm": promotion.GRAPH_SERVING_ALGORITHM,
+            "serving_policy_sha256": promotion.GRAPH_SERVING_POLICY_SHA256,
+            "serving_implementation_sha256": promotion.GRAPH_SERVING_IMPLEMENTATION_SHA256,
+            "evaluation_implementation_sha256": HEX["c"],
+            "promotion_report_path": "evidence/skill-graph/report.json",
+            "promotion_report_sha256": digest(graph_promotion),
+            "organizer_attestation_path": graph_attestation_path,
+            "organizer_attestation_sha256": digest(graph_attestation),
             "files": [
                 {
-                    "path": graph_data_path,
-                    "sha256": digest(graph_data),
-                    "size_bytes": len(graph_data),
+                    "path": path,
+                    "sha256": digest(payload),
+                    "size_bytes": len(payload),
                 }
+                for path, payload in sorted(graph_files.items())
             ],
         }
     )
@@ -726,10 +776,23 @@ def test_schema_accepts_publishable_multiview_while_graph_stays_disabled(
                 "sha256": digest(graph_promotion),
                 "size_bytes": len(graph_promotion),
             },
-            graph_data_path: {
-                "kind": "graph",
-                "sha256": digest(graph_data),
-                "size_bytes": len(graph_data),
+            graph_attestation_path: {
+                "kind": "evidence",
+                "sha256": digest(graph_attestation),
+                "size_bytes": len(graph_attestation),
+            },
+            graph_candidate_path: {
+                "kind": "evidence",
+                "sha256": digest(graph_candidate),
+                "size_bytes": len(graph_candidate),
+            },
+            **{
+                path: {
+                    "kind": "graph",
+                    "sha256": digest(payload),
+                    "size_bytes": len(payload),
+                }
+                for path, payload in graph_files.items()
             },
         }
     )
@@ -773,6 +836,15 @@ def test_schema_accepts_publishable_multiview_while_graph_stays_disabled(
         "source_jd_sha256": promotion.APPROVED_GRAPH_SOURCE_JD_SHA256,
         "source_policy": "train_jd_only",
         "test_jd_used": False,
+        "candidate_manifest_path": graph_candidate_path,
+        "candidate_manifest_sha256": digest(graph_candidate),
+        "source_ablation_report_sha256": HEX["b"],
+        "serving_algorithm": promotion.GRAPH_SERVING_ALGORITHM,
+        "serving_policy_sha256": promotion.GRAPH_SERVING_POLICY_SHA256,
+        "serving_implementation_sha256": promotion.GRAPH_SERVING_IMPLEMENTATION_SHA256,
+        "evaluation_implementation_sha256": HEX["c"],
+        "organizer_attestation_path": graph_attestation_path,
+        "organizer_attestation_sha256": digest(graph_attestation),
         "promotion_evidence": {
             "decision": "accepted",
             "report_path": "evidence/skill-graph/report.json",
@@ -784,13 +856,6 @@ def test_schema_accepts_publishable_multiview_while_graph_stays_disabled(
             "absolute_delta": 0.002,
         },
     }
-    for path in (
-        "graphs/skill-graph/manifest.json",
-        "evidence/skill-graph/report.json",
-        graph_data_path,
-    ):
-        manifest["artifacts"].pop(path)
-    manifest["challengers"]["skill_graph"] = {"enabled": False}
     reseal(manifest)
     optional_documents = {
         **documents,
@@ -799,12 +864,44 @@ def test_schema_accepts_publishable_multiview_while_graph_stays_disabled(
         "evidence/qwen-mrl/report.json": mrl_report,
         "evidence/qwen-multiview-promotion/report.json": multiview_promotion,
         "graphs/skill-graph/manifest.json": graph_document,
-        graph_data_path: graph_data,
+        **graph_files,
         "evidence/skill-graph/report.json": graph_promotion,
+        graph_attestation_path: graph_attestation,
+        graph_candidate_path: graph_candidate,
     }
 
     validate_schema(manifest)
     promotion.validate_runtime_manifest(manifest, optional_documents)
+
+    tampered_manifest = json.loads(json.dumps(manifest))
+    tampered_documents = dict(optional_documents)
+    tampered_path = sorted(graph_files)[0]
+    tampered_payload = b'{"tampered":true}\n'
+    tampered_component = json.loads(graph_document)
+    for file in tampered_component["files"]:
+        if file["path"] == tampered_path:
+            file["sha256"] = digest(tampered_payload)
+            file["size_bytes"] = len(tampered_payload)
+    tampered_component_payload = encoded(tampered_component)
+    tampered_documents[tampered_path] = tampered_payload
+    tampered_documents["graphs/skill-graph/manifest.json"] = tampered_component_payload
+    tampered_manifest["artifacts"][tampered_path] = {
+        "kind": "graph",
+        "sha256": digest(tampered_payload),
+        "size_bytes": len(tampered_payload),
+    }
+    tampered_manifest["artifacts"]["graphs/skill-graph/manifest.json"] = {
+        "kind": "graph",
+        "sha256": digest(tampered_component_payload),
+        "size_bytes": len(tampered_component_payload),
+    }
+    tampered_manifest["challengers"]["skill_graph"]["manifest_sha256"] = digest(
+        tampered_component_payload
+    )
+    reseal(tampered_manifest)
+
+    with pytest.raises(RuntimeError, match="evaluated candidate inventory"):
+        promotion.validate_runtime_manifest(tampered_manifest, tampered_documents)
 
 
 def test_enabled_challenger_requires_positive_promotion_evidence(
@@ -919,8 +1016,8 @@ def test_graph_cutoff_must_precede_demo_as_of(release_fixture: object) -> None:
         },
     }
 
-    with pytest.raises(RuntimeError, match="skill_graph has no production adapter"):
-        promotion.validate_runtime_manifest(manifest, documents)
+    with pytest.raises(ValidationError):
+        validate_schema(manifest)
 
 
 def test_graph_source_is_pinned_to_approved_train_snapshot(release_fixture: object) -> None:
@@ -950,8 +1047,8 @@ def test_graph_source_is_pinned_to_approved_train_snapshot(release_fixture: obje
         },
     }
 
-    with pytest.raises(RuntimeError, match="skill_graph has no production adapter"):
-        promotion.validate_runtime_manifest(manifest, documents)
+    with pytest.raises(ValidationError):
+        validate_schema(manifest)
 
 
 def test_component_manifest_must_match_selected_object(release_fixture: object) -> None:
@@ -1467,6 +1564,10 @@ def test_aws_cli_retries_only_transient_network_errors(monkeypatch: pytest.Monke
 def test_deploy_downloads_and_validates_v2_manifest_body() -> None:
     workflow = (ROOT / ".github/workflows/deploy.yml").read_text(encoding="utf-8")
 
+    assert "push:\n    branches: [main]" in workflow
+    assert "github.event_name == 'push'" in workflow
+    assert "inputs.artifact_manifest_sha || vars.ARTIFACT_MANIFEST_SHA" in workflow
+    assert "inputs.compute_profile || vars.COMPUTE_PROFILE || 'cpu-incumbent'" in workflow
     assert "compute_profile:" in workflow
     assert "default: cpu-incumbent" in workflow
     assert "options:" in workflow
@@ -1492,7 +1593,8 @@ def test_deploy_downloads_and_validates_v2_manifest_body() -> None:
     platform_step = workflow.split("- name: Deploy the application stack", 1)[1].split(
         "- name: Publish the static web application", 1
     )[0]
-    assert "ALARM_EMAIL: ${{ inputs.alarm_email }}" in platform_step
+    assert '--parameters "WorkRetrievalPlatform:AlarmEmail=$ALARM_EMAIL"' in platform_step
+    assert "printf 'ARTIFACT_MANIFEST_SHA=%s\\n'" in workflow
 
 
 def test_bootstrap_stages_source_and_deploys_promoted_runtime_sha() -> None:
@@ -1512,8 +1614,8 @@ def test_bootstrap_stages_source_and_deploys_promoted_runtime_sha() -> None:
 
     workflow = (ROOT / ".github/workflows/deploy.yml").read_text(encoding="utf-8")
     assert (
-        "run-name: Deploy ${{ inputs.artifact_manifest_sha }} ${{ inputs.deployment_id }}"
-        in workflow
+        "github.event_name == 'push' && github.sha || "
+        "format('{0} {1}', inputs.artifact_manifest_sha, inputs.deployment_id)" in workflow
     )
     assert "deployment_id=$(uv run python -c 'import uuid; print(uuid.uuid4())')" in bootstrap
     assert "-f compute_profile=cpu-incumbent" in bootstrap

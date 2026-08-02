@@ -27,6 +27,7 @@ from work_retrieval_core.adapters import (
     EmbeddingShard,
     FilterTaxonomy,
     SageMakerQueryEncoder,
+    SkillGraphLayout,
     TantivyBm25Retriever,
     TantivyLayout,
     WholeEmbeddingLayout,
@@ -34,10 +35,16 @@ from work_retrieval_core.adapters import (
     lexical_tokens,
     load_job_ids,
 )
+from work_retrieval_core.graph_policy import (
+    GRAPH_SERVING_IMPLEMENTATION_SHA256,
+    GRAPH_SERVING_POLICY_SHA256,
+)
 from work_retrieval_core.manifest import (
     WHOLE_DOCUMENT_FIELDS,
     WHOLE_DOCUMENT_POLICY_VERSION,
     WHOLE_DOCUMENT_TEMPLATE_SHA256,
+    GraphPromotionEvidence,
+    SkillGraph,
     TemporalTantivy,
     WholeEmbedding,
 )
@@ -487,6 +494,7 @@ def test_whole_layout_requires_sealed_source_lineage(tmp_path: Path) -> None:
         WholeEmbedding(component_path, "b" * 64, 3, 1024, HEX, HEX, HEX),
         TemporalTantivy("indexes/x/manifest.json", HEX, HEX, HEX, HEX, "before Top-K"),
         None,
+        None,
     )
     component = {
         "schema_version": 1,
@@ -555,6 +563,7 @@ def test_tantivy_layout_pins_lexical_policy_and_build_lineage(tmp_path: Path) ->
         WholeEmbedding("embeddings/x/manifest.json", HEX, 3, 1024, HEX, HEX, HEX),
         TemporalTantivy(component_path, "b" * 64, HEX, HEX, HEX, semantics),
         None,
+        None,
     )
     component = {
         "schema_version": 1,
@@ -597,3 +606,157 @@ def test_tantivy_layout_pins_lexical_policy_and_build_lineage(tmp_path: Path) ->
     path.write_text(json.dumps(component), encoding="utf-8")
     with pytest.raises(RuntimeError, match="source_fields"):
         TantivyLayout.from_path(path, manifest)
+
+
+def test_skill_graph_layout_requires_the_sealed_six_file_contract(tmp_path: Path) -> None:
+    prefix = "graphs/skill-graph"
+    component_path = f"{prefix}/manifest.json"
+    names = (
+        "jobs.jsonl",
+        "skills.jsonl",
+        "job-skills.jsonl",
+        "duty-skills.jsonl",
+        "skill-relations.jsonl",
+        "relation-evidence.jsonl",
+    )
+    files = [
+        {"path": f"{prefix}/{name}", "sha256": str(index) * 64, "size_bytes": index}
+        for index, name in enumerate(names, start=1)
+    ]
+    report_path = "evidence/skill-graph/report.json"
+    candidate_path = "evidence/skill-graph/candidate-manifest.json"
+    attestation_path = "evidence/skill-graph/organizer-attestation.json"
+    candidate_file = tmp_path / candidate_path
+    candidate_file.parent.mkdir(parents=True)
+    candidate_file.write_text(
+        json.dumps(
+            {
+                "artifacts": [
+                    {
+                        "path": entry["path"].rsplit("/", 1)[-1],
+                        "kind": "graph",
+                        "sha256": entry["sha256"],
+                        "size_bytes": entry["size_bytes"],
+                    }
+                    for entry in files
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    candidate_sha256 = hashlib.sha256(candidate_file.read_bytes()).hexdigest()
+    promotion = {
+        "schema_version": 1,
+        "complete": True,
+        "publication_allowed": True,
+        "evaluation_split_sha256": "d" * 64,
+        "baseline_run_sha256": "e" * 64,
+        "candidate_run_sha256": "f" * 64,
+        "primary_metric": "ndcg_at_10",
+        "baseline_value": 0.3,
+        "candidate_value": 0.302,
+        "absolute_delta": 0.002,
+    }
+    report_file = tmp_path / report_path
+    report_file.parent.mkdir(parents=True, exist_ok=True)
+    report_file.write_text(json.dumps(promotion), encoding="utf-8")
+    report_sha256 = hashlib.sha256(report_file.read_bytes()).hexdigest()
+    attestation = {
+        "schema_version": 1,
+        "complete": True,
+        "attestation_kind": "fixed-input-graph-promotion",
+        "candidate_manifest_sha256": candidate_sha256,
+        "ablation_report_sha256": "c" * 64,
+        "publication_allowed": True,
+        "evaluator_id": "organizer-v1",
+        "evaluator_kind": "organizer",
+        "significant": True,
+        "primary_metric": "ndcg_at_10",
+        "baseline_value": 0.3,
+        "candidate_value": 0.302,
+        "absolute_delta": 0.002,
+        "evaluation_split_sha256": "d" * 64,
+        "baseline_run_sha256": "e" * 64,
+        "candidate_run_sha256": "f" * 64,
+        "serving_algorithm": "graph-conditioned-temporal-bridge-retrieval-protected-rrf-v3",
+        "serving_policy_sha256": GRAPH_SERVING_POLICY_SHA256,
+        "serving_implementation_sha256": GRAPH_SERVING_IMPLEMENTATION_SHA256,
+        "evaluation_implementation_sha256": "9" * 64,
+    }
+    attestation_file = tmp_path / attestation_path
+    attestation_file.write_text(json.dumps(attestation), encoding="utf-8")
+    attestation_sha256 = hashlib.sha256(attestation_file.read_bytes()).hexdigest()
+    manifest = RuntimeManifest(
+        tuple(
+            [
+                (component_path, Artifact("graph", "a" * 64, 1)),
+                (
+                    candidate_path,
+                    Artifact("evidence", candidate_sha256, candidate_file.stat().st_size),
+                ),
+                (report_path, Artifact("evidence", report_sha256, report_file.stat().st_size)),
+                (
+                    attestation_path,
+                    Artifact("evidence", attestation_sha256, attestation_file.stat().st_size),
+                ),
+            ]
+            + [
+                (entry["path"], Artifact("graph", entry["sha256"], entry["size_bytes"]))
+                for entry in files
+            ]
+        ),
+        WholeEmbedding("embeddings/x/manifest.json", HEX, 3, 1024, HEX, HEX, HEX),
+        TemporalTantivy("indexes/x/manifest.json", HEX, HEX, HEX, HEX, "before Top-K"),
+        None,
+        SkillGraph(
+            component_path,
+            "a" * 64,
+            candidate_path,
+            candidate_sha256,
+            "c" * 64,
+            "9" * 64,
+            attestation_path,
+            attestation_sha256,
+            GraphPromotionEvidence(
+                report_path,
+                report_sha256,
+                "d" * 64,
+                "e" * 64,
+                "f" * 64,
+                0.002,
+            ),
+        ),
+    )
+    component = {
+        "complete": True,
+        "publication_allowed": True,
+        "schema_version": 1,
+        "train_cutoff_exclusive": "2026-06-08T00:00:00+08:00",
+        "max_source_timestamp": "2026-06-07T23:51:07.143000+08:00",
+        "source_jd_sha256": "53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089",
+        "source_policy": "train_jd_only",
+        "test_jd_used": False,
+        "candidate_manifest_path": candidate_path,
+        "candidate_manifest_sha256": candidate_sha256,
+        "source_ablation_report_sha256": "c" * 64,
+        "serving_algorithm": "graph-conditioned-temporal-bridge-retrieval-protected-rrf-v3",
+        "serving_policy_sha256": GRAPH_SERVING_POLICY_SHA256,
+        "serving_implementation_sha256": GRAPH_SERVING_IMPLEMENTATION_SHA256,
+        "evaluation_implementation_sha256": "9" * 64,
+        "promotion_report_path": report_path,
+        "promotion_report_sha256": report_sha256,
+        "organizer_attestation_path": attestation_path,
+        "organizer_attestation_sha256": attestation_sha256,
+        "files": files,
+    }
+    path = tmp_path / component_path
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(component), encoding="utf-8")
+
+    layout = SkillGraphLayout.from_path(path, manifest, runtime_root=tmp_path)
+
+    assert layout.job_skills_path == f"{prefix}/job-skills.jsonl"
+    component["files"] = files[:-1]
+    path.write_text(json.dumps(component), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="files differ"):
+        SkillGraphLayout.from_path(path, manifest, runtime_root=tmp_path)

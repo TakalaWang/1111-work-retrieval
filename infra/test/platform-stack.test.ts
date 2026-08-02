@@ -42,6 +42,11 @@ describe('platform stack', () => {
       Default: 'cpu-incumbent',
       AllowedValues: ['cpu-incumbent', 'gpu-shadow']
     });
+    template.hasParameter('EnableGraph', {
+      Type: 'String',
+      Default: 'false',
+      AllowedValues: ['false', 'true']
+    });
     template.hasParameter('GpuInstanceType', { Type: 'String' });
     for (const id of [
       'CpuServiceDesiredCount',
@@ -182,11 +187,15 @@ describe('platform stack', () => {
           }),
           expect.objectContaining({
             Name: 'SEARCH_ENABLE_DENSE_SHADOW',
-            Value: 'true'
+            Value: 'false'
           }),
           expect.objectContaining({
             Name: 'SEARCH_ENABLE_RERANKER',
-            Value: 'shadow'
+            Value: 'off'
+          }),
+          expect.objectContaining({
+            Name: 'SEARCH_ENABLE_GRAPH',
+            Value: { Ref: 'EnableGraph' }
           }),
           expect.objectContaining({
             Name: 'RERANKER_ENDPOINT_NAME',
@@ -283,6 +292,7 @@ describe('platform stack', () => {
   test('routes only CloudFront-authorized API traffic and monitors targets', () => {
     template.hasResourceProperties('AWS::CloudFront::Distribution', {
       DistributionConfig: Match.objectLike({
+        Aliases: ['1111.takalawang.dev'],
         CacheBehaviors: Match.arrayWith([
           Match.objectLike({
             PathPattern: '/api/*',
@@ -290,7 +300,13 @@ describe('platform stack', () => {
           }),
           Match.objectLike({ PathPattern: '/healthz' }),
           Match.objectLike({ PathPattern: '/readyz' })
-        ])
+        ]),
+        ViewerCertificate: {
+          AcmCertificateArn:
+            'arn:aws:acm:us-east-1:378849533305:certificate/c76499fc-2946-41f4-bc40-3cec2859fffe',
+          MinimumProtocolVersion: 'TLSv1.2_2021',
+          SslSupportMethod: 'sni-only'
+        }
       })
     });
     template.hasResourceProperties('AWS::EC2::SecurityGroupIngress', {
@@ -412,6 +428,12 @@ describe('platform stack', () => {
   });
 
   test('exports all deployment and operational identifiers', () => {
+    template.hasOutput('ApiBaseUrl', {
+      Value: 'https://1111.takalawang.dev/api/v1'
+    });
+    template.hasOutput('WebUrl', {
+      Value: 'https://1111.takalawang.dev'
+    });
     for (const output of [
       'ApiRepositoryUri',
       'ApiBaseUrl',

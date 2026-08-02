@@ -32,6 +32,7 @@ METADATA_RESERVE_SECONDS = 1.0
 MAX_INFLIGHT_SEARCHES = 8
 RERANK_POOL_LIMIT = 50
 RRF_K = 60
+INCUMBENT_LANES = {"tantivy_bm25_full_jd", "graph_conditioned_tantivy"}
 SEARCH_TIMEZONE = ZoneInfo("Asia/Taipei")
 
 
@@ -291,6 +292,7 @@ class ProductionSearchEngine:
         *,
         enable_dense_shadow: bool = False,
         enable_multiview_maxsim: bool = False,
+        enable_graph: bool = False,
         multiview_artifact_key: str | None = None,
         reranker_mode: str = "off",
         max_inflight_searches: int = MAX_INFLIGHT_SEARCHES,
@@ -304,6 +306,8 @@ class ProductionSearchEngine:
             raise TypeError("enabled dense shadow port does not satisfy CandidateRetriever")
         if not isinstance(ports.metadata, JobMetadataLookup):
             raise TypeError("metadata port does not satisfy JobMetadataLookup")
+        if enable_graph and manifest.skill_graph is None:
+            raise RuntimeError("enabled Graph requires its manifest artifact")
         artifact = manifest.artifact(multiview_artifact_key or "")
         if enable_multiview_maxsim and (
             artifact is None or artifact.kind not in {"embedding", "index"}
@@ -324,6 +328,7 @@ class ProductionSearchEngine:
         self._enable_dense_shadow = enable_dense_shadow
         self._enable_multiview_maxsim = enable_multiview_maxsim
         self._reranker_mode = reranker_mode
+        self._enable_graph = enable_graph
         self._clock = clock or (lambda: datetime.now(UTC))
         lane_count = 1 + int(enable_dense_shadow) + int(enable_multiview_maxsim)
         self._executor = ThreadPoolExecutor(
@@ -404,7 +409,7 @@ class ProductionSearchEngine:
             if failure := lane_failures.get(lane_name):
                 lane_traces.append(LaneTrace(lane_name, "failed", failure, 0))
                 continue
-            incumbent = lane_name == "tantivy_bm25_full_jd"
+            incumbent = lane_name in INCUMBENT_LANES
             dense_ranking_evidence = (
                 self._reranker_mode == "active" and lane_name == "qwen_dense_whole_jd"
             )
@@ -508,9 +513,10 @@ class ProductionSearchEngine:
                 )
         elif self._reranker_mode == "shadow":
             reranker_trace = LaneTrace("reranker", "failed", "dense_shadow_failed", 0)
+        if not self._enable_graph:
+            lane_traces.append(LaneTrace("graph", "disabled", "feature_flag_disabled", 0))
         lane_traces.extend(
             (
-                LaneTrace("graph", "disabled", "ablation_not_approved", 0),
                 reranker_trace,
                 LaneTrace("ltr", "disabled", "calibration_not_approved", 0),
                 LaneTrace("guardrail", "disabled", "calibration_not_approved", 0),
@@ -560,7 +566,10 @@ class ProductionSearchEngine:
         float,
     ]:
         lanes: list[tuple[str, CandidateRetriever]] = [
-            ("tantivy_bm25_full_jd", self._ports.lexical_full_jd),
+            (
+                "graph_conditioned_tantivy" if self._enable_graph else "tantivy_bm25_full_jd",
+                self._ports.lexical_full_jd,
+            ),
         ]
         if self._enable_dense_shadow:
             assert self._ports.dense_whole_jd is not None
@@ -803,7 +812,7 @@ def _reranker_pool_ids(candidates: Mapping[str, _RankedCandidate]) -> tuple[str,
             (evidence.rank, job_id)
             for job_id, candidate in indexed
             for evidence in candidate.evidence
-            if evidence.lane == "tantivy_bm25_full_jd"
+            if evidence.lane in INCUMBENT_LANES
         ),
         key=lambda item: (item[0], item[1]),
     )
@@ -816,7 +825,7 @@ def _reranker_pool_ids(candidates: Mapping[str, _RankedCandidate]) -> tuple[str,
         evidence = tuple(
             item
             for item in candidate.evidence
-            if item.lane in {"tantivy_bm25_full_jd", "qwen_dense_whole_jd"}
+            if item.lane in {*INCUMBENT_LANES, "qwen_dense_whole_jd"}
         )
         if evidence:
             remaining.append(
@@ -827,9 +836,7 @@ def _reranker_pool_ids(candidates: Mapping[str, _RankedCandidate]) -> tuple[str,
 
 
 def _serving_order(item: ResultTrace) -> tuple[int, int, float, str]:
-    lexical = [
-        evidence.rank for evidence in item.evidence if evidence.lane == "tantivy_bm25_full_jd"
-    ]
+    lexical = [evidence.rank for evidence in item.evidence if evidence.lane in INCUMBENT_LANES]
     if lexical:
         return (0, min(lexical), -item.freshness_score, item.job_id)
     shadow = [evidence.rank for evidence in item.evidence]
