@@ -187,11 +187,11 @@ describe('platform stack', () => {
           }),
           expect.objectContaining({
             Name: 'SEARCH_ENABLE_DENSE_SHADOW',
-            Value: 'false'
+            Value: 'true'
           }),
           expect.objectContaining({
             Name: 'SEARCH_ENABLE_RERANKER',
-            Value: 'off'
+            Value: 'shadow'
           }),
           expect.objectContaining({
             Name: 'SEARCH_ENABLE_GRAPH',

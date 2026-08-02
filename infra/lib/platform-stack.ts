@@ -224,10 +224,10 @@ export class PlatformStack extends Stack {
       EMBEDDING_ENDPOINT_CONFIG_NAME,
       EMBEDDING_MODEL_NAME,
       RERANKER_ENDPOINT_NAME,
-      SEARCH_ENABLE_DENSE_SHADOW: 'false',
+      SEARCH_ENABLE_DENSE_SHADOW: 'true',
       SEARCH_ENABLE_GRAPH: enableGraph.valueAsString,
       SEARCH_ENABLE_MULTIVIEW_MAXSIM: 'false',
-      SEARCH_ENABLE_RERANKER: 'off',
+      SEARCH_ENABLE_RERANKER: 'shadow',
       SEARCH_PORT_FACTORY:
         'work_retrieval_api.production:create_production_ports',
       SEARCH_RUNTIME_MANIFEST_PATH: '/tmp/work-retrieval-runtime/manifest.json',
