@@ -30,10 +30,12 @@
 ### Task 1: Lock the approved brand contract
 
 **Files:**
+
 - Create: `apps/web/src/lib/branding.test.ts`
 - Modify: `apps/web/src/routes/+page.svelte`
 
 **Interfaces:**
+
 - Consumes: the existing Svelte page source and Vitest Node environment.
 - Produces: source-level brand assertions that later visual tasks must keep passing.
 
@@ -59,7 +61,10 @@ describe('Big Fruit Tree page identity', () => {
   });
 
   it('keeps the competition identity out of the hero', () => {
-    const hero = page.slice(page.indexOf('<section class="search"'), page.indexOf('</section>'));
+    const hero = page.slice(
+      page.indexOf('<section class="search"'),
+      page.indexOf('</section>')
+    );
     expect(hero).not.toContain('蝦咪係Ai');
     expect(hero).not.toContain('雲湧智生');
     expect(hero).not.toContain('1111 智慧求職');
@@ -122,11 +127,13 @@ git commit -m "feat(web): introduce Big Fruit Tree identity"
 ### Task 2: Build the integrated search shell
 
 **Files:**
+
 - Modify: `apps/web/src/routes/+page.svelte`
 - Modify: `apps/web/src/lib/MultiSelectChecklist.svelte`
 - Test: `apps/web/src/lib/search.test.ts`
 
 **Interfaces:**
+
 - Consumes: `MultiSelectChecklist` props (`id`, `label`, `searchPlaceholder`, `options`, bindable `selected`, `disabled`, `align`) and `searchJobDetails(SearchForm)`.
 - Produces: one responsive `.search-shell` with unchanged bound variables `dutyCodes`, `locationCodes`, `searchDate`, and `query`.
 
@@ -182,14 +189,33 @@ Replace `.query-row` and `.controls` with this structure:
   />
   <label class="date-field" for="search-date">
     <span>搜尋日期</span>
-    <input id="search-date" bind:value={searchDate} type="date" name="search_date" disabled={loading} />
+    <input
+      id="search-date"
+      bind:value={searchDate}
+      type="date"
+      name="search_date"
+      disabled={loading}
+    />
   </label>
   <label class="query-field" for="job-query">
     <span class="sr-only">搜尋職缺</span>
     <span class="search-icon" aria-hidden="true">⌕</span>
-    <input id="job-query" bind:value={query} type="search" name="query" required maxlength="512" autocomplete="off" placeholder="職務、技能或工作地點" />
+    <input
+      id="job-query"
+      bind:value={query}
+      type="search"
+      name="query"
+      required
+      maxlength="512"
+      autocomplete="off"
+      placeholder="職務、技能或工作地點"
+    />
   </label>
-  <button class="search-button" type="submit" disabled={loading || !query.trim()}>
+  <button
+    class="search-button"
+    type="submit"
+    disabled={loading || !query.trim()}
+  >
     {loading ? '搜尋中…' : '搜尋職缺'}
   </button>
 </div>
@@ -211,12 +237,39 @@ In `MultiSelectChecklist.svelte`:
 Apply these essential declarations:
 
 ```css
-.field { position: relative; min-width: 0; padding: 0.7rem 0.9rem; border-right: 1px solid #d7dfd8; }
-.field-label { color: #748078; font-size: 0.68rem; font-weight: 850; letter-spacing: 0.06em; }
-.trigger { min-height: 1.5rem; border: 0; padding: 0; background: transparent; color: #263b2c; font-weight: 800; }
-.trigger:focus-visible { outline: 3px solid rgb(36 74 48 / 22%); outline-offset: 4px; border-radius: 0.25rem; }
-.panel { border: 2px solid #244a30; border-radius: 0.85rem; box-shadow: 6px 7px 0 #b9d7b4; }
-.option input { accent-color: #f1a52a; }
+.field {
+  position: relative;
+  min-width: 0;
+  padding: 0.7rem 0.9rem;
+  border-right: 1px solid #d7dfd8;
+}
+.field-label {
+  color: #748078;
+  font-size: 0.68rem;
+  font-weight: 850;
+  letter-spacing: 0.06em;
+}
+.trigger {
+  min-height: 1.5rem;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: #263b2c;
+  font-weight: 800;
+}
+.trigger:focus-visible {
+  outline: 3px solid rgb(36 74 48 / 22%);
+  outline-offset: 4px;
+  border-radius: 0.25rem;
+}
+.panel {
+  border: 2px solid #244a30;
+  border-radius: 0.85rem;
+  box-shadow: 6px 7px 0 #b9d7b4;
+}
+.option input {
+  accent-color: #f1a52a;
+}
 ```
 
 - [ ] **Step 5: Run behavior and component checks**
@@ -240,10 +293,12 @@ git commit -m "feat(web): integrate Big Fruit Tree search controls"
 ### Task 3: Apply the Fresh Market visual system and responsive result states
 
 **Files:**
+
 - Modify: `apps/web/src/routes/+page.svelte`
 - Modify: `apps/web/src/lib/MultiSelectChecklist.svelte`
 
 **Interfaces:**
+
 - Consumes: the Task 2 `.search-shell`, existing Svelte state flags (`loading`, `searched`, `jobs`, `failedCount`, `error`, `requestId`), and existing result data.
 - Produces: responsive 320px-to-desktop presentation with unchanged state transitions.
 
@@ -280,15 +335,31 @@ Use this desktop grid and interaction contract:
   background: #fff;
   box-shadow: 0.45rem 0.5rem 0 var(--sprout);
 }
-.search-shell:focus-within { box-shadow: 0.45rem 0.5rem 0 var(--sprout), 0 0 0 4px rgb(36 74 48 / 12%); }
-.search-button { margin: 0.4rem; border: 2px solid var(--leaf); background: var(--fruit); color: var(--ink); font-weight: 900; }
+.search-shell:focus-within {
+  box-shadow:
+    0.45rem 0.5rem 0 var(--sprout),
+    0 0 0 4px rgb(36 74 48 / 12%);
+}
+.search-button {
+  margin: 0.4rem;
+  border: 2px solid var(--leaf);
+  background: var(--fruit);
+  color: var(--ink);
+  font-weight: 900;
+}
 ```
 
 Keep disabled buttons visibly disabled using a desaturated cream/green pair while maintaining readable text. Respect reduced motion:
 
 ```css
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 ```
 
@@ -307,9 +378,16 @@ At `max-width: 800px`, use two columns for filters and full-width query/action:
 
 ```css
 @media (max-width: 800px) {
-  .search-shell { grid-template-columns: 1fr 1fr; }
-  .date-field { grid-column: 1 / -1; }
-  .query-field, .search-button { grid-column: 1 / -1; }
+  .search-shell {
+    grid-template-columns: 1fr 1fr;
+  }
+  .date-field {
+    grid-column: 1 / -1;
+  }
+  .query-field,
+  .search-button {
+    grid-column: 1 / -1;
+  }
 }
 ```
 
@@ -349,9 +427,11 @@ git commit -m "feat(web): polish Big Fruit Tree search experience"
 ### Task 4: Final regression and branch handoff
 
 **Files:**
+
 - Verify only; no planned source changes.
 
 **Interfaces:**
+
 - Consumes: Tasks 1–3 commits.
 - Produces: a review-ready branch with evidence for behavior, type safety, build, and visual responsiveness.
 

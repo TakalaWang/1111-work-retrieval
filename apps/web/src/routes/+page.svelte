@@ -69,9 +69,7 @@
         <span>大果樹</span>
       </div>
       <h1 id="search-title">找工作，今天就有好結果。</h1>
-      <p class="intro-copy">
-        選好條件、輸入關鍵字，把適合的職缺「摘」回家。
-      </p>
+      <p class="intro-copy">選好條件、輸入關鍵字，把適合的職缺「摘」回家。</p>
     </header>
     <form
       role="search"
@@ -595,8 +593,7 @@
     margin: clamp(1.5rem, 3vw, 2.5rem) auto 0;
     color: var(--ink);
     font-family:
-      'Arial Rounded MT Bold', 'Noto Sans TC', ui-rounded, system-ui,
-      sans-serif;
+      'Arial Rounded MT Bold', 'Noto Sans TC', ui-rounded, system-ui, sans-serif;
     font-size: clamp(2.05rem, 5vw, 3.6rem);
     font-weight: 950;
     letter-spacing: -0.05em;
