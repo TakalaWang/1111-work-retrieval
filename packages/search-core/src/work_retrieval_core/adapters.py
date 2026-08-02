@@ -1564,4 +1564,14 @@ def _resolve_codes(
     missing = [code for code in codes if code not in mapping]
     if missing:
         return None
-    return tuple(sorted({term for code in codes for term in mapping[code]}))
+    selected = tuple(frozenset(mapping[code]) for code in codes)
+    return tuple(
+        sorted(
+            {
+                term
+                for candidate_terms in mapping.values()
+                if any(ancestors.issubset(candidate_terms) for ancestors in selected)
+                for term in candidate_terms
+            }
+        )
+    )
