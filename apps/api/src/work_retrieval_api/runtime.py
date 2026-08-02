@@ -27,9 +27,6 @@ DEMO_AS_OF_ENV = "SEARCH_DEMO_AS_OF"
 MULTIVIEW_ENABLED_ENV = "SEARCH_ENABLE_MULTIVIEW_MAXSIM"
 MULTIVIEW_ARTIFACT_ENV = "SEARCH_MULTIVIEW_ARTIFACT_KEY"
 DENSE_SHADOW_ENABLED_ENV = "SEARCH_ENABLE_DENSE_SHADOW"
-RERANKER_ENABLED_ENV = "SEARCH_ENABLE_RERANKER"
-RERANKER_ENDPOINT_ENV = "RERANKER_ENDPOINT_NAME"
-RERANKER_V7_ENDPOINT_NAME = "work-retrieval-qwen3-reranker-8b-v7"
 GRAPH_ENABLED_ENV = "SEARCH_ENABLE_GRAPH"
 DEMO_TIMEZONE = ZoneInfo("Asia/Taipei")
 
@@ -112,17 +109,6 @@ def runtime_from_environment(
         values.get(MULTIVIEW_ENABLED_ENV, "false"),
         name=MULTIVIEW_ENABLED_ENV,
     )
-    reranker_mode = _reranker_mode(values.get(RERANKER_ENABLED_ENV, "off"))
-    if reranker_mode != "off" and not enable_dense_shadow:
-        raise RuntimeError(f"{RERANKER_ENABLED_ENV} requires {DENSE_SHADOW_ENABLED_ENV}")
-    if reranker_mode != "off" and _required(values, RERANKER_ENDPOINT_ENV) != (
-        RERANKER_V7_ENDPOINT_NAME
-    ):
-        raise RuntimeError(f"{RERANKER_ENDPOINT_ENV} must identify the v7 endpoint")
-    if reranker_mode == "active":
-        raise RuntimeError(
-            f"{RERANKER_ENABLED_ENV}=active is blocked because the fixed339 v7 gate failed"
-        )
     raw_multiview_artifact = values.get(MULTIVIEW_ARTIFACT_ENV)
     if enable_multiview:
         multiview_artifact = _required(values, MULTIVIEW_ARTIFACT_ENV)
@@ -158,7 +144,6 @@ def runtime_from_environment(
         enable_multiview_maxsim=enable_multiview,
         enable_graph=enable_graph,
         multiview_artifact_key=multiview_artifact,
-        reranker_mode=reranker_mode,
         clock=clock,
     )
     return ProductionRuntime(engine, ports.metadata, artifact_manifest_sha256)
@@ -210,9 +195,3 @@ def _boolean(value: str, *, name: str) -> bool:
     if value == "false":
         return False
     raise RuntimeError(f"{name} must be true or false")
-
-
-def _reranker_mode(value: str) -> str:
-    if value in {"off", "shadow", "active"}:
-        return value
-    raise RuntimeError(f"{RERANKER_ENABLED_ENV} must be off, shadow, or active")

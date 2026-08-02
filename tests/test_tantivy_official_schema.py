@@ -13,28 +13,13 @@ from work_retrieval_core.adapters import (
     TantivyBm25Retriever,
     load_job_ids,
 )
-from work_retrieval_core.constraints import (
-    EducationConstraint,
-    JobAttributeConstraint,
-    ManagementConstraint,
-    MonthlySalaryConstraint,
-    NoExperienceConstraint,
-    QueryConstraints,
-    WorkShiftConstraint,
-)
 from work_retrieval_core.engine import CandidateRequest
 from work_retrieval_core.serialization import FULL_JOB_FIELDS
 
 
 def test_official_csv_builds_with_taxonomies_and_numeric_filters(tmp_path: Path) -> None:
     source = tmp_path / "職缺.csv"
-    fields = [
-        *(label for label, _field in FULL_JOB_FIELDS),
-        "職缺編號",
-        "職缺最後修改時間",
-        pipeline.SALARY_LOWER_SOURCE_FIELD,
-        pipeline.SALARY_UPPER_SOURCE_FIELD,
-    ]
+    fields = [*(label for label, _field in FULL_JOB_FIELDS), "職缺編號", "職缺最後修改時間"]
     with source.open("w", encoding="utf-8", newline="") as target:
         writer = csv.DictWriter(target, fieldnames=fields)
         writer.writeheader()
@@ -47,14 +32,6 @@ def test_official_csv_builds_with_taxonomies_and_numeric_filters(tmp_path: Path)
                 "職務中類": "軟體工程",
                 "職務小類": "後端工程師",
                 "工作城市": "台北市",
-                "薪資": "月薪",
-                "薪資下限": "50000",
-                "薪資上限": "70000",
-                "學歷需求": "大學,碩士",
-                "職缺屬性": "兼職",
-                "工時": "晚班,輪班",
-                "工作經驗需求": "不拘",
-                "管理人數": "需管理人數10人以下",
                 "職務內容": "使用 Python 建置 API",
                 "職缺最後修改時間": "2026-06-07 10:00:00.000",
             }
@@ -126,14 +103,6 @@ def test_official_csv_builds_with_taxonomies_and_numeric_filters(tmp_path: Path)
             as_of=datetime(2026, 6, 8, tzinfo=UTC),
             minimum_updated_at=datetime(2025, 12, 10, tzinfo=UTC),
             lexical_texts=("Python",),
-            constraints=QueryConstraints(
-                education=EducationConstraint("大學"),
-                monthly_salary=MonthlySalaryConstraint(50_000, strict=True),
-                job_attribute=JobAttributeConstraint("兼職"),
-                work_shift=WorkShiftConstraint("晚班"),
-                no_experience=NoExperienceConstraint(),
-                management=ManagementConstraint(),
-            ),
         ),
         limit=10,
     )

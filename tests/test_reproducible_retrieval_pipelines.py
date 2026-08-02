@@ -160,8 +160,6 @@ def _graph_search_jobs_csv(tmp_path: Path) -> Path:
         tantivy_pipeline.DEFAULT_DUTY_CODE_FIELD,
         tantivy_pipeline.DEFAULT_VISIBILITY_FIELD,
         tantivy_pipeline.DEFAULT_MODIFIED_AT_FIELD,
-        tantivy_pipeline.SALARY_LOWER_SOURCE_FIELD,
-        tantivy_pipeline.SALARY_UPPER_SOURCE_FIELD,
     )
     fields = list(dict.fromkeys([*(label for label, _field in FULL_JOB_FIELDS), *extra]))
     rows = (
@@ -186,14 +184,6 @@ def _graph_search_jobs_csv(tmp_path: Path) -> Path:
                     "職務中類": "資訊軟體",
                     "職務大類": "資訊科技",
                     "電腦技能資料": skills,
-                    "薪資": "月薪",
-                    "薪資下限": "40000",
-                    "薪資上限": "60000",
-                    "學歷需求": "不拘",
-                    "職缺屬性": "全職",
-                    "工時": "日班",
-                    "工作經驗需求": "不拘",
-                    "管理人數": "需管理人數10人以下",
                     "工作城市": city,
                     "職務內容": f"使用 {skills} 建立資料平台",
                     tantivy_pipeline.DEFAULT_LOCATION_CODE_FIELD: city_code,
@@ -1165,8 +1155,6 @@ def _full_jobs_csv(tmp_path: Path) -> Path:
         tantivy_pipeline.DEFAULT_DUTY_CODE_FIELD,
         tantivy_pipeline.DEFAULT_VISIBILITY_FIELD,
         tantivy_pipeline.DEFAULT_MODIFIED_AT_FIELD,
-        tantivy_pipeline.SALARY_LOWER_SOURCE_FIELD,
-        tantivy_pipeline.SALARY_UPPER_SOURCE_FIELD,
     )
     fields = list(dict.fromkeys([*(label for label, _field in FULL_JOB_FIELDS), *extra]))
     with path.open("w", encoding="utf-8", newline="") as target:
@@ -1185,14 +1173,6 @@ def _full_jobs_csv(tmp_path: Path) -> Path:
                     "職務中類": "資訊軟體",
                     "職務大類": "資訊科技",
                     "電腦技能資料": "Python SQL",
-                    "薪資": "月薪",
-                    "薪資下限": "40000" if job_id == "101" else "0.1",
-                    "薪資上限": "60000",
-                    "學歷需求": "不拘",
-                    "職缺屬性": "全職",
-                    "工時": "日班",
-                    "工作經驗需求": "不拘",
-                    "管理人數": "需管理人數10人以下",
                     "工作城市": "台北市",
                     "職務內容": "使用 Python 與 SQL 建立資料平台",
                     tantivy_pipeline.DEFAULT_LOCATION_CODE_FIELD: "100100",
@@ -1566,12 +1546,6 @@ def test_tantivy_builder_is_independent_with_corrections_explicitly_disabled(
     assert validation["rows"] == 2
     assert component["lexical_policy_sha256"] == tantivy_pipeline.lexical_policy_sha256()
     assert set(component["source_fields"]) == set(tantivy_pipeline.TEXT_FIELDS)
-    assert component["schema_fields"] == tantivy_pipeline.SCHEMA_FIELDS
-    assert component["filter_semantics"] == tantivy_pipeline.FILTER_SEMANTICS
-    build = json.loads((output / "build-manifest.json").read_text())
-    assert tantivy_pipeline.SALARY_LOWER_SOURCE_FIELD in build["source_csv_fields"]
-    assert tantivy_pipeline.SALARY_UPPER_SOURCE_FIELD in build["source_csv_fields"]
-    assert build["salary_filter_excluded_rows"] == 1
     assert component["build_manifest_path"].endswith("/build-manifest.json")
     assert component["query_corrections"] == {"enabled": False}
     assert not (output / "query-corrections.json").exists()
@@ -1629,7 +1603,7 @@ def test_tantivy_graph_off_is_generated_from_canonical_queries_and_index(
 
     rows = (output / "graph-off.run").read_text(encoding="utf-8").splitlines()
     assert [row.split()[0] for row in rows] == ["q1", "q1"]
-    assert {row.split()[2] for row in rows} == {"101", "102"}
+    assert [row.split()[2] for row in rows] == ["101", "102"]
     assert manifest["run_sha256"] == contract.sha256_file(output / "graph-off.run")
     assert manifest["canonical_qids"] == ["q1", "q2"]
     assert manifest["zero_result_qids"] == ["q2"]

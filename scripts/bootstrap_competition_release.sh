@@ -1,21 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -lt 5 || $# -gt 6 || $5 != DEPLOY ]]; then
-  echo "usage: $0 COMPETITION_ZIP NEW_WORK_ROOT TYPED_V3_ATTESTATION APPROVED_ATTESTATION_SHA256 DEPLOY [ALARM_EMAIL]" >&2
+if [[ $# -lt 3 || $# -gt 4 || $3 != DEPLOY ]]; then
+  echo "usage: $0 COMPETITION_ZIP NEW_WORK_ROOT DEPLOY [ALARM_EMAIL]" >&2
   exit 64
 fi
 
 competition_zip=$1
 work_root=$2
-typed_v3_attestation=$3
-approved_attestation_sha256=$4
-alarm_email=${6:-}
+alarm_email=${4:-}
 source_manifest_sha=f762cc4d676e16aa04789e1573713ef30d66e72f3a7f96c5bcd7e7e6133a2adb
 source_root="s3://jobbank-data-bucket/one111-search/runtime/$source_manifest_sha"
 
 [[ -f $competition_zip ]] || { echo "competition ZIP is missing" >&2; exit 66; }
-[[ -f $typed_v3_attestation ]] || { echo "typed-v3 promotion attestation is missing" >&2; exit 66; }
 [[ ! -e $work_root ]] || { echo "work root must not exist" >&2; exit 73; }
 [[ -z $alarm_email || $alarm_email =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]] || {
   echo "alarm email is invalid" >&2
@@ -52,6 +49,8 @@ aws s3 sync \
   --region us-west-2 \
   --only-show-errors
 
+uv run --all-packages python scripts/import_jobs_to_aws.py \
+  "$work_root/dataset/職缺.csv"
 uv run --all-packages python scripts/tantivy_index_pipeline.py build \
   --jobs-csv "$work_root/dataset/職缺.csv" \
   --location-taxonomy-csv "$work_root/dataset/城市對照表.csv" \
@@ -61,15 +60,6 @@ uv run --all-packages python scripts/tantivy_index_pipeline.py build \
 component_sha=$(uv run python -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$work_root/tantivy/manifest.json")
 build_sha=$(uv run python -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$work_root/tantivy/build-manifest.json")
 index_sha=$(uv run python -c 'import json,sys; print(json.load(open(sys.argv[1]))["index_sha256"])' "$work_root/tantivy/manifest.json")
-
-uv run --all-packages python scripts/verify_temporal_v3_promotion.py verify \
-  --attestation "$typed_v3_attestation" \
-  --approved-attestation-sha256 "$approved_attestation_sha256" \
-  --candidate-manifest "$work_root/tantivy/manifest.json" \
-  --candidate-build-manifest "$work_root/tantivy/build-manifest.json"
-
-uv run --all-packages python scripts/import_jobs_to_aws.py \
-  "$work_root/dataset/職缺.csv"
 
 scripts/reproduce_runtime_release.sh \
   "$work_root/whole-qwen" \
