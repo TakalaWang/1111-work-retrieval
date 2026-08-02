@@ -50,22 +50,23 @@
 </script>
 
 <svelte:head>
-  <title>AI 精準職缺搜尋｜2026 雲湧智生</title>
-  <meta name="description" content="輸入關鍵字，搜尋最相關的 1111 職缺。" />
+  <title>大果樹｜職缺搜尋</title>
+  <meta
+    name="description"
+    content="選好條件、輸入關鍵字，在大果樹找到適合你的職缺。"
+  />
 </svelte:head>
 
 <main>
   <section class="search" aria-labelledby="search-title">
     <header class="intro">
-      <div class="identity" aria-label="蝦咪係Ai，1111 智慧求職">
-        <span class="identity-mark" aria-hidden="true">AI</span>
-        <div>
-          <p class="identity-name">蝦咪係Ai</p>
-          <p class="competition-name">2026 雲湧智生 · 1111 智慧求職</p>
-        </div>
+      <div class="brand" aria-label="大果樹">
+        <span class="brand-mark" aria-hidden="true">果</span>
+        <span>大果樹</span>
       </div>
-      <h1 id="search-title">AI 精準神算，快速找到工作</h1>
-      <p class="intro-copy">輸入職務、技能或地點，探索最相關的職缺。</p>
+      <p class="brand-promise">讓每一次搜尋，都更接近好結果</p>
+      <h1 id="search-title">找工作，今天就有好結果。</h1>
+      <p class="intro-copy">選好條件、輸入關鍵字，把適合的職缺摘回家。</p>
     </header>
     <form
       role="search"
@@ -211,6 +212,11 @@
       <p class="request-id">Request ID：{requestId}</p>
     {/if}
   </section>
+
+  <footer>
+    <span>大果樹職缺搜尋</span>
+    <span>2026 雲湧智生 · 1111 智慧求職</span>
+  </footer>
 </main>
 
 <style>
