@@ -543,7 +543,7 @@
     border: 2px solid var(--leaf);
     border-top: 0.75rem solid var(--sun);
     border-radius: 1.5rem;
-    padding: clamp(1.5rem, 4vw, 3.5rem) clamp(1rem, 5vw, 4rem)
+    padding: clamp(1rem, 2vw, 1.5rem) clamp(1rem, 5vw, 4rem)
       clamp(2rem, 5vw, 4rem);
     background:
       radial-gradient(circle at 100% 0, #e0efd5 0 8rem, transparent 8.05rem),
@@ -594,7 +594,7 @@
 
   h1 {
     max-width: 46rem;
-    margin: clamp(2.75rem, 7vw, 5rem) auto 0;
+    margin: clamp(1.5rem, 3vw, 2.5rem) auto 0;
     color: var(--ink);
     font-family:
       'Arial Rounded MT Bold', 'Noto Sans TC', ui-rounded, system-ui,

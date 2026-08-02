@@ -59,4 +59,11 @@ describe('Big Fruit Tree page identity', () => {
     expect(searchStyles).toContain('overflow: visible;');
     expect(searchStyles).not.toContain('overflow: hidden;');
   });
+
+  it('uses compact desktop spacing between the brand and headline', () => {
+    expect(page).toContain(
+      'padding: clamp(1rem, 2vw, 1.5rem) clamp(1rem, 5vw, 4rem)'
+    );
+    expect(page).toContain("margin: clamp(1.5rem, 3vw, 2.5rem) auto 0;");
+  });
 });
