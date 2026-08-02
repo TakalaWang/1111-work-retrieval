@@ -243,10 +243,7 @@ class StubReranker:
         self.calls.append((query, job_ids))
         if self.error is not None:
             raise self.error
-        return {
-            job_id: 0.95 + position / 1000
-            for position, job_id in enumerate(job_ids)
-        }
+        return {job_id: 0.95 + position / 1000 for position, job_id in enumerate(job_ids)}
 
     def close(self) -> None:
         self.closed = True

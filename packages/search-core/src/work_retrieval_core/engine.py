@@ -522,8 +522,7 @@ class ProductionSearchEngine:
                             request=request,
                             suitability=float(scores[job_id]),
                             hard_constraints_match=(
-                                constraint_filter
-                                != "relaxed_query_text_constraints_after_zero"
+                                constraint_filter != "relaxed_query_text_constraints_after_zero"
                             ),
                         )
                         for job_id in pool
@@ -871,9 +870,7 @@ def _candidate_gate(
         ),
         bm25_supported="tantivy_bm25_full_jd" in lanes,
         dense_supported=bool(
-            lanes.intersection(
-                {"qwen_dense_whole_jd", "qwen_dense_multiview_maxsim"}
-            )
+            lanes.intersection({"qwen_dense_whole_jd", "qwen_dense_multiview_maxsim"})
         ),
         business=BusinessEvidence(popularity=0.0, completeness=0.0),
     )

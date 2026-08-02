@@ -83,8 +83,7 @@ def _mean(rows: list[dict[str, float]]) -> dict[str, float]:
 
 def _significant(off: list[dict[str, float]], on: list[dict[str, float]]) -> bool:
     deltas = [
-        after["ndcg_at_10"] - before["ndcg_at_10"]
-        for before, after in zip(off, on, strict=True)
+        after["ndcg_at_10"] - before["ndcg_at_10"] for before, after in zip(off, on, strict=True)
     ]
     generator = random.Random(20260802)
     samples = sorted(
