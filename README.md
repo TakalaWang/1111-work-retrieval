@@ -11,8 +11,8 @@
 - Web 與 API 目前可由 [https://1111.takalawang.dev](https://1111.takalawang.dev)
   同源存取。
 - Qwen3 Embedding endpoint `qwen3-embedding-8b-20260801-031826` 與 reranker endpoint
-  `work-retrieval-qwen3-reranker-8b` 均為 `InService`。
-- `main` commit `6d2bd0e8aaace42ed043f673ad4efd66587131bd` 已由 production workflow
+  `work-retrieval-qwen3-reranker-8b-v7` 均為 `InService`。
+- 下列 live readback 對應 `main` commit `6d2bd0e8aaace42ed043f673ad4efd66587131bd`，由 production workflow
   [run 30718253906](https://github.com/TakalaWang/1111-work-retrieval/actions/runs/30718253906) 成功部署；runtime
   manifest 為 `964ae7e235bfdf90f639a216991757f905554ce35b83f4069aa68cb2d8d2ddbf`，ECS 使用的
   digest-pinned image 為 `sha256:6fa7c4814e1abee26da888868cd1f064828c48bae6f49d3a1617395069f1392b`。
@@ -129,8 +129,9 @@ size/SHA inventory，從 qrels 與 run bytes 重算指標，而且只在所有 g
    全部成功才結束。
 
 `NEW_WORK_ROOT` 必須不存在；中途失敗時保留該目錄供稽核，不會偷偷沿用 partial output。這個 production
-bootstrap 只發布已核准的 temporal BM25 incumbent；Whole-Dense 與 Graph serving adapter 預設關閉，
-multi-view、LTR 與 reranker 目前沒有 production serving adapter。Graph 的建置與 Graph-on/off 實驗是下方
+bootstrap 只發布已核准的 temporal BM25 incumbent；Whole-Dense 與 Qwen v7 reranker 有 production shadow
+adapter，但不得在沒有正向 promotion evidence 時改排。multi-view 與 LTR 目前沒有 production serving
+adapter；Graph 預設關閉。Graph 的建置與 Graph-on/off 實驗是下方
 獨立的 offline 流程，不會由這個命令產生；只有含正向 promotion evidence 的 Graph runtime bundle 才能配合
 `SEARCH_ENABLE_GRAPH=true` 開進 Top-10。
 
@@ -190,12 +191,14 @@ ARTIFACT_BUCKET, ARTIFACT_MANIFEST_SHA256, AWS_REGION
 SEARCH_RUNTIME_ROOT, SEARCH_RUNTIME_MANIFEST_PATH, SEARCH_PORT_FACTORY
 SEARCH_ENABLE_DENSE_SHADOW, SEARCH_ENABLE_MULTIVIEW_MAXSIM
 EMBEDDING_ENDPOINT_NAME, EMBEDDING_ENDPOINT_CONFIG_NAME, EMBEDDING_MODEL_NAME
+SEARCH_ENABLE_RERANKER, RERANKER_ENDPOINT_NAME
 ```
 
 公開路徑：
 
-- `POST /api/v1/jobs/search`：Tantivy full-JD BM25 incumbent Top 10；whole-Qwen dense 預設關閉，啟用時僅作
-  shadow/tail evidence，不得改排 incumbent Top 10。
+- `POST /api/v1/jobs/search`：Tantivy full-JD BM25 incumbent Top 10；whole-Qwen Dense 與 Qwen v7 reranker
+  預設為 shadow。active rerank 只允許 relevance score ≥ 0.9，且同 duty 或同時具有 BM25／Dense 證據的
+  candidate；BM25 Top-1 固定保護，Graph／skill-only candidate 不能單獨升位。
 - `GET /healthz`：process health；`GET /readyz`：initialized-runtime health 與實際載入的 root manifest SHA-256。
 
 Aurora credentials 由 ECS 經 Secrets Manager 注入，不保存於 image、Git 或 workflow。
@@ -219,7 +222,7 @@ Query hard-filter grammar、JD/query-log coverage、外派與年資不進 produc
 | Database schema           | Alembic `0002_create_jobs`；Aurora PostgreSQL 16                                                                                                                                                  |
 | Runtime manifest contract | [`runtime-manifest.schema.json`](packages/contract/runtime-manifest.schema.json)，repository schema version `2`；live manifest `964ae7e235bfdf90f639a216991757f905554ce35b83f4069aa68cb2d8d2ddbf` |
 | Embedding endpoint        | `qwen3-embedding-8b-20260801-031826`；`InService`                                                                                                                                                 |
-| Reranker endpoint         | `work-retrieval-qwen3-reranker-8b`；`InService`                                                                                                                                                   |
+| Reranker endpoint         | `work-retrieval-qwen3-reranker-8b-v7`；`InService`                                                                                                                                                |
 | Production retrieval      | temporal BM25 `cpu-incumbent` 已部署；main `6d2bd0e8aaace42ed043f673ad4efd66587131bd`、run `30718253906`、CPU `1/1/0`、GPU `0/0/0`、public smoke 通過                                             |
 
 Runtime v2 promotion 只接受一份已固定 source manifest SHA、selected inventory SHA、component
