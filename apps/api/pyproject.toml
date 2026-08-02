@@ -5,8 +5,9 @@ description = "HTTP contract for the 1111 job retrieval platform."
 requires-python = "==3.12.*"
 dependencies = [
     "fastapi>=0.116,<1",
-    "psycopg[binary]>=3.2,<4",
     "work-retrieval-core",
+    "work-retrieval-database",
+    "uvicorn[standard]>=0.35,<1",
 ]
 
 [build-system]
@@ -18,3 +19,4 @@ packages = ["src/work_retrieval_api"]
 
 [tool.uv.sources]
 work-retrieval-core = { workspace = true }
+work-retrieval-database = { workspace = true }

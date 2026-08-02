@@ -9,6 +9,11 @@ node_modules/
 build/
 coverage/
 cdk.out/
+cdk-outputs.json
+data-outputs.json
+platform-outputs.json
 *.pyc
 *.log
 .env
+artifacts/
+inputs/*.zip

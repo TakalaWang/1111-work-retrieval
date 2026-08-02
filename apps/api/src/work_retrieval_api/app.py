@@ -5,7 +5,7 @@ import logging
 import time
 import uuid
 from collections import deque
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, cast
 
@@ -17,32 +17,32 @@ from starlette.datastructures import Headers, MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
-from work_retrieval_core import SearchEngine, SearchQuery, SearchUnavailableError
-
-from work_retrieval_api.jobs import (
-    JobImporter,
-    JobImportUnavailableError,
-    JobNotFoundError,
+from work_retrieval_core import (
+    SearchAuditTrace,
+    SearchEngine,
+    SearchQuery,
+    SearchResult,
+    SearchUnavailableError,
 )
+
 from work_retrieval_api.models import (
     ErrorBody,
     ErrorDetail,
     ErrorResponse,
     JobId,
     JobResponse,
-    PullJobRequest,
     SearchRequest,
     SearchResponse,
     SearchResultItem,
     validation_details,
 )
+from work_retrieval_api.runtime import RetrievalRuntime, RuntimeFactory
 
-EngineFactory = Callable[[], SearchEngine]
-JobImporterFactory = Callable[[], JobImporter]
 MAX_BODY_BYTES = 16 * 1024
 MAX_RESULTS = 10
+MAX_AUDIT_HEADER_BYTES = 7 * 1024
 SEARCH_PATH = "/api/v1/jobs/search"
-PULL_PATH = "/api/v1/jobs/pull"
+SEARCH_AUDIT_HEADER = "X-Search-Audit"
 logger = logging.getLogger("work_retrieval.access")
 internal_logger = logging.getLogger("work_retrieval.internal")
 
@@ -53,6 +53,17 @@ class EngineContractError(RuntimeError):
 
 def _request_id(request: Request) -> str:
     return cast(str, request.state.request_id)
+
+
+def _artifact_manifest_sha256(engine: RetrievalRuntime) -> str:
+    value = engine.artifact_manifest_sha256
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise TypeError("runtime must expose a lowercase artifact manifest SHA-256")
+    return value
 
 
 def _error(
@@ -69,16 +80,29 @@ def _error(
     return JSONResponse(status_code=status, content=payload.model_dump())
 
 
-def _validate_engine_output(job_ids: object) -> tuple[str, ...]:
+def _validate_engine_output(result: object) -> tuple[tuple[str, ...], str]:
+    if not isinstance(result, SearchResult):
+        raise EngineContractError("engine result must be SearchResult")
+    job_ids = result.job_ids
     if not isinstance(job_ids, tuple):
-        raise EngineContractError("engine result must be a tuple")
+        raise EngineContractError("engine job_ids must be a tuple")
     if len(job_ids) > MAX_RESULTS:
         raise EngineContractError("engine returned too many jobs")
-    if any(not isinstance(job_id, str) or not job_id.strip() for job_id in job_ids):
+    if any(
+        not isinstance(job_id, str) or not job_id.isascii() or not job_id.isdecimal()
+        for job_id in job_ids
+    ):
         raise EngineContractError("engine returned an invalid job_id")
     if len(job_ids) != len(set(job_ids)):
         raise EngineContractError("engine returned duplicate job_id")
-    return job_ids
+    if not isinstance(result.trace, SearchAuditTrace):
+        raise EngineContractError("engine returned an invalid audit trace")
+    if tuple(item.job_id for item in result.trace.results) != job_ids:
+        raise EngineContractError("audit result order does not match engine job_ids")
+    audit_json = result.trace.to_json()
+    if len(audit_json.encode("ascii")) > MAX_AUDIT_HEADER_BYTES:
+        raise EngineContractError("audit trace exceeds the response header budget")
+    return job_ids, audit_json
 
 
 class RequestContextMiddleware:
@@ -111,30 +135,36 @@ class RequestContextMiddleware:
             await send(message)
 
         headers = Headers(scope=scope)
+        content_type = headers.get("content-type", "").split(";", 1)[0].lower()
         response: Response | None = None
-        if method == "POST" and path in {SEARCH_PATH, PULL_PATH}:
-            content_type = headers.get("content-type", "").split(";", 1)[0].lower()
-            request = Request(scope)
-            if content_type != "application/json":
+        declared_length: int | None = None
+        if (length := headers.get("content-length")) is not None:
+            if not length.isdecimal() or int(length) > MAX_BODY_BYTES:
                 response = _error(
-                    request,
-                    415,
-                    "unsupported_media_type",
-                    "Content-Type must be application/json.",
-                )
-            elif (length := headers.get("content-length")) is not None and (
-                not length.isdecimal() or int(length) > MAX_BODY_BYTES
-            ):
-                response = _error(
-                    request,
+                    Request(scope),
                     413,
                     "payload_too_large",
                     f"Request body must not exceed {MAX_BODY_BYTES} bytes.",
                 )
+            else:
+                declared_length = int(length)
+
+        requires_json = method == "POST" and path == SEARCH_PATH
+        if (
+            response is None
+            and (requires_json or (declared_length or 0) > 0)
+            and content_type != "application/json"
+        ):
+            response = _error(
+                Request(scope),
+                415,
+                "unsupported_media_type",
+                "Content-Type must be application/json.",
+            )
 
         buffered: deque[Message] = deque()
-        if response is None and method == "POST" and path in {SEARCH_PATH, PULL_PATH}:
-            consumed = 0
+        consumed = 0
+        if response is None:
             while True:
                 message = await receive()
                 buffered.append(message)
@@ -152,6 +182,15 @@ class RequestContextMiddleware:
                     break
                 if not message.get("more_body", False):
                     break
+
+        if response is None and consumed > 0 and content_type != "application/json":
+            response = _error(
+                Request(scope),
+                415,
+                "unsupported_media_type",
+                "Content-Type must be application/json.",
+            )
+            buffered.clear()
 
         async def replay_receive() -> Message:
             return buffered.popleft() if buffered else await receive()
@@ -179,25 +218,17 @@ class RequestContextMiddleware:
             )
 
 
-def create_app(
-    engine_factory: EngineFactory,
-    job_importer_factory: JobImporterFactory | None = None,
-) -> FastAPI:
+def create_app(runtime_factory: RuntimeFactory) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        engine = engine_factory()
-        if not isinstance(engine, SearchEngine):
-            raise TypeError("engine_factory must return a SearchEngine")
-        app.state.engine = engine
-        job_importer = job_importer_factory() if job_importer_factory is not None else None
-        if job_importer is not None and not isinstance(job_importer, JobImporter):
-            raise TypeError("job_importer_factory must return a JobImporter")
-        app.state.job_importer = job_importer
+        engine = runtime_factory()
+        if not isinstance(engine, RetrievalRuntime):
+            raise TypeError("runtime_factory must return a RetrievalRuntime")
         try:
+            app.state.artifact_manifest_sha256 = _artifact_manifest_sha256(engine)
+            app.state.engine = engine
             yield
         finally:
-            if job_importer is not None:
-                job_importer.close()
             engine.close()
 
     app = FastAPI(title="1111 Work Retrieval API", version="1.0.0", lifespan=lifespan)
@@ -222,16 +253,6 @@ def create_app(
             "The search engine is temporarily unavailable.",
         )
 
-    @app.exception_handler(JobImportUnavailableError)
-    async def job_import_unavailable(
-        request: Request, _error_value: JobImportUnavailableError
-    ) -> JSONResponse:
-        return _error(request, 503, "job_import_unavailable", "Job import is not configured.")
-
-    @app.exception_handler(JobNotFoundError)
-    async def job_not_found(request: Request, _error_value: JobNotFoundError) -> JSONResponse:
-        return _error(request, 404, "job_not_found", "The job ID was not found.")
-
     @app.exception_handler(StarletteHTTPException)
     async def http_error(request: Request, error: StarletteHTTPException) -> JSONResponse:
         code = "not_found" if error.status_code == 404 else "method_not_allowed"
@@ -255,7 +276,10 @@ def create_app(
     async def readyz(request: Request) -> dict[str, str]:
         if not hasattr(request.app.state, "engine"):
             raise SearchUnavailableError("engine was not initialized")
-        return {"status": "ready"}
+        return {
+            "status": "ready",
+            "artifact_manifest_sha256": cast(str, request.app.state.artifact_manifest_sha256),
+        }
 
     @app.post(
         SEARCH_PATH,
@@ -268,57 +292,50 @@ def create_app(
             503: {"model": ErrorResponse},
         },
     )
-    async def search(payload: SearchRequest, request: Request) -> SearchResponse:
+    async def search(
+        payload: SearchRequest, request: Request, response: Response
+    ) -> SearchResponse:
         request.state.query_len = len(payload.query)
         request.state.location_code_count = len(payload.location_code)
         request.state.duty_code_count = len(payload.duty_code)
         query = SearchQuery(
             text=payload.query,
+            search_date=payload.search_date,
             location_codes=tuple(payload.location_code),
             duty_codes=tuple(payload.duty_code),
         )
         engine = cast(SearchEngine, request.app.state.engine)
-        raw_job_ids = await run_in_threadpool(engine.search, query, limit=MAX_RESULTS)
-        job_ids = _validate_engine_output(raw_job_ids)
+        raw_result = await run_in_threadpool(engine.search, query, limit=MAX_RESULTS)
+        job_ids, audit_json = _validate_engine_output(raw_result)
+        response.headers[SEARCH_AUDIT_HEADER] = audit_json
         request.state.result_count = len(job_ids)
         return SearchResponse(
             request_id=_request_id(request),
             result=[
-                SearchResultItem(job_id=job_id, rank=rank)
-                for rank, job_id in enumerate(job_ids, 1)
+                SearchResultItem(job_id=job_id, rank=rank) for rank, job_id in enumerate(job_ids, 1)
             ],
         )
-
-    def configured_importer(request: Request) -> JobImporter:
-        importer = cast(JobImporter | None, request.app.state.job_importer)
-        if importer is None:
-            raise JobImportUnavailableError("JOB_CSV_PATH is not configured")
-        return importer
-
-    @app.post(
-        PULL_PATH,
-        response_model=JobResponse,
-        responses={
-            413: {"model": ErrorResponse},
-            415: {"model": ErrorResponse},
-            422: {"model": ErrorResponse},
-            404: {"model": ErrorResponse},
-            503: {"model": ErrorResponse},
-        },
-    )
-    async def import_job(payload: PullJobRequest, request: Request) -> JobResponse:
-        record = await run_in_threadpool(
-            configured_importer(request).import_job, payload.job_id
-        )
-        return JobResponse(job_id=record.job_id, details=dict(record.details))
 
     @app.get(
         "/api/v1/job-details/{job_id}",
         response_model=JobResponse,
-        responses={404: {"model": ErrorResponse}, 503: {"model": ErrorResponse}},
+        responses={
+            404: {"model": ErrorResponse},
+            422: {"model": ErrorResponse},
+            500: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
     )
-    async def get_job(job_id: JobId, request: Request) -> JobResponse:
-        record = await run_in_threadpool(configured_importer(request).get_job, job_id)
-        return JobResponse(job_id=record.job_id, details=dict(record.details))
+    async def job_detail(job_id: JobId, request: Request) -> JobResponse | JSONResponse:
+        runtime = cast(RetrievalRuntime, request.app.state.engine)
+        details = await run_in_threadpool(runtime.job_details, job_id)
+        if details is None:
+            return _error(
+                request,
+                404,
+                "job_not_found",
+                "The requested job was not found.",
+            )
+        return JobResponse(job_id=job_id, details=details)
 
     return app

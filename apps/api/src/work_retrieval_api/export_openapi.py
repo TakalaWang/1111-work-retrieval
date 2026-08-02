@@ -4,13 +4,12 @@ import argparse
 import json
 from pathlib import Path
 
-from work_retrieval_core import SearchEngine
-
 from work_retrieval_api import create_app
+from work_retrieval_api.runtime import RetrievalRuntime
 
 
-def _unavailable_factory() -> SearchEngine:
-    raise RuntimeError("OpenAPI generation must not initialize a search engine")
+def _unavailable_factory() -> RetrievalRuntime:
+    raise RuntimeError("OpenAPI generation must not initialize runtime dependencies")
 
 
 def rendered_openapi() -> bytes:

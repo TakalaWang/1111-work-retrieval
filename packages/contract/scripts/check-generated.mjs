@@ -2,8 +2,9 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
-const packageRoot = new URL('..', import.meta.url).pathname;
+const packageRoot = fileURLToPath(new URL('..', import.meta.url));
 const temporaryDirectory = await mkdtemp(
   join(tmpdir(), 'work-retrieval-contract-')
 );
@@ -12,7 +13,15 @@ try {
   const types = join(temporaryDirectory, 'types.d.ts');
   const result = spawnSync(
     'pnpm',
-    ['exec', 'openapi-typescript', 'openapi.json', '-o', types],
+    [
+      'exec',
+      'openapi-typescript',
+      'openapi.json',
+      '-o',
+      types,
+      '--default-non-nullable',
+      'false'
+    ],
     { cwd: packageRoot, stdio: 'inherit' }
   );
   if (result.status !== 0) process.exit(result.status ?? 1);

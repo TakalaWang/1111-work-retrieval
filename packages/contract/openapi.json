@@ -70,19 +70,6 @@
         "title": "ErrorResponse",
         "type": "object"
       },
-      "HTTPValidationError": {
-        "properties": {
-          "detail": {
-            "items": {
-              "$ref": "#/components/schemas/ValidationError"
-            },
-            "title": "Detail",
-            "type": "array"
-          }
-        },
-        "title": "HTTPValidationError",
-        "type": "object"
-      },
       "JobResponse": {
         "additionalProperties": false,
         "properties": {
@@ -101,6 +88,7 @@
             "type": "object"
           },
           "job_id": {
+            "pattern": "^[0-9]+$",
             "title": "Job Id",
             "type": "string"
           }
@@ -110,21 +98,6 @@
           "details"
         ],
         "title": "JobResponse",
-        "type": "object"
-      },
-      "PullJobRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "job_id": {
-            "pattern": "^[0-9]+$",
-            "title": "Job Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "job_id"
-        ],
-        "title": "PullJobRequest",
         "type": "object"
       },
       "SearchRequest": {
@@ -151,6 +124,19 @@
             "minLength": 1,
             "title": "Query",
             "type": "string"
+          },
+          "search_date": {
+            "anyOf": [
+              {
+                "description": "ISO date from 0001-07-01 through 9999-12-30 inclusive.",
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Search Date"
           }
         },
         "required": [
@@ -170,6 +156,7 @@
             "items": {
               "$ref": "#/components/schemas/SearchResultItem"
             },
+            "maxItems": 10,
             "title": "Result",
             "type": "array"
           }
@@ -185,6 +172,7 @@
         "additionalProperties": false,
         "properties": {
           "job_id": {
+            "pattern": "^[0-9]+$",
             "title": "Job Id",
             "type": "string"
           },
@@ -201,46 +189,6 @@
         ],
         "title": "SearchResultItem",
         "type": "object"
-      },
-      "ValidationError": {
-        "properties": {
-          "ctx": {
-            "title": "Context",
-            "type": "object"
-          },
-          "input": {
-            "title": "Input"
-          },
-          "loc": {
-            "items": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "integer"
-                }
-              ]
-            },
-            "title": "Location",
-            "type": "array"
-          },
-          "msg": {
-            "title": "Message",
-            "type": "string"
-          },
-          "type": {
-            "title": "Error Type",
-            "type": "string"
-          }
-        },
-        "required": [
-          "loc",
-          "msg",
-          "type"
-        ],
-        "title": "ValidationError",
-        "type": "object"
       }
     }
   },
@@ -252,7 +200,7 @@
   "paths": {
     "/api/v1/job-details/{job_id}": {
       "get": {
-        "operationId": "get_job_api_v1_job_details__job_id__get",
+        "operationId": "job_detail_api_v1_job_details__job_id__get",
         "parameters": [
           {
             "in": "path",
@@ -290,90 +238,22 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Service Unavailable"
-          }
-        },
-        "summary": "Get Job"
-      }
-    },
-    "/api/v1/jobs/pull": {
-      "post": {
-        "operationId": "import_job_api_v1_jobs_pull_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/PullJobRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JobResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Not Found"
-          },
-          "413": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Request Entity Too Large"
-          },
-          "415": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Unsupported Media Type"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
                   "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             },
             "description": "Unprocessable Entity"
           },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -385,7 +265,7 @@
             "description": "Service Unavailable"
           }
         },
-        "summary": "Import Job"
+        "summary": "Job Detail"
       }
     },
     "/api/v1/jobs/search": {

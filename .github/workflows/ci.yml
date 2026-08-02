@@ -25,6 +25,7 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --frozen --all-packages
+      - run: uv run ruff format --check .
       - run: uv run ruff check .
       - run: uv run mypy
       - run: uv run pytest
@@ -67,7 +68,7 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d work_retrieval"
+          --health-cmd "psql -U postgres -d work_retrieval -Atqc 'SELECT 1'"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -83,12 +84,15 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --frozen --all-packages
-      - name: Upgrade twice and reject domain tables
+      - name: Upgrade twice and verify the job schema
         run: |
           uv run alembic -c database/alembic.ini upgrade head
           uv run alembic -c database/alembic.ini upgrade head
           test "$(psql -h localhost -U postgres -d work_retrieval -Atc \
-            "SELECT count(*) FROM pg_tables WHERE schemaname = 'public' AND tablename <> 'alembic_version'")" = "0"
+            "SELECT string_agg(tablename, ',' ORDER BY tablename) FROM pg_tables WHERE schemaname = 'public'")" = "alembic_version,jobs"
+          test "$(psql -h localhost -U postgres -d work_retrieval -Atc \
+            "SELECT version_num FROM alembic_version")" = "0002_create_jobs"
+          uv run alembic -c database/alembic.ini check
 
   infrastructure:
     name: Infrastructure
@@ -106,3 +110,15 @@ jobs:
       - run: pnpm --dir infra test
       - run: pnpm --dir infra build
       - run: pnpm --dir infra synth
+
+  container:
+    name: API container
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Build the production image
+        run: |
+          docker build --platform linux/amd64 --tag work-retrieval-api:ci .
+          test "$(docker image inspect work-retrieval-api:ci --format '{{.Architecture}}')" = amd64
+          docker run --rm --entrypoint /app/.venv/bin/python work-retrieval-api:ci \
+            -c 'import ssl, numpy, psycopg, tantivy, uvicorn, work_retrieval_api'
