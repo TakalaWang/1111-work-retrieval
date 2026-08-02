@@ -1,10 +1,11 @@
 <script lang="ts">
-  type Option = { code: string; path: string[] };
+  import { tick } from 'svelte';
+
+  import { childRows, type TaxonomyOption } from './taxonomy';
 
   let {
     id,
     label,
-    searchPlaceholder,
     options,
     selected = $bindable([]),
     disabled = false,
@@ -12,8 +13,7 @@
   }: {
     id: string;
     label: string;
-    searchPlaceholder: string;
-    options: readonly Option[];
+    options: readonly TaxonomyOption[];
     selected?: string[];
     disabled?: boolean;
     align?: 'start' | 'end';
@@ -21,23 +21,10 @@
 
   let root: HTMLDivElement;
   let trigger: HTMLButtonElement;
+  let navigationHeading = $state<HTMLHeadingElement>();
   let open = $state(false);
-  let keyword = $state('');
-  let normalizedKeyword = $derived(keyword.trim().toLocaleLowerCase('zh-TW'));
-  let matchedOptions = $derived(
-    normalizedKeyword
-      ? options.filter(
-          (option) =>
-            option.code.includes(normalizedKeyword) ||
-            option.path.some((part) =>
-              part.toLocaleLowerCase('zh-TW').includes(normalizedKeyword)
-            )
-        )
-      : options.filter((option) => selected.includes(option.code))
-  );
-  let visibleOptions = $derived(
-    normalizedKeyword ? matchedOptions.slice(0, 100) : matchedOptions
-  );
+  let currentPath = $state<string[]>([]);
+  let visibleRows = $derived(childRows(options, currentPath));
   let firstSelection = $derived(
     options.find((option) => option.code === selected[0])
   );
@@ -57,8 +44,14 @@
 
   function close(returnFocus = true) {
     open = false;
-    keyword = '';
+    currentPath = [];
     if (returnFocus) trigger?.focus();
+  }
+
+  async function navigate(path: string[]) {
+    currentPath = path;
+    await tick();
+    navigationHeading?.focus();
   }
 
   function togglePanel() {
@@ -97,55 +90,72 @@
     onclick={togglePanel}
   >
     <span id={`${id}-summary`}>{summary}</span>
-    <span class="chevron" aria-hidden="true">⌄</span>
+    <svg class="chevron" aria-hidden="true" viewBox="0 0 20 20">
+      <path d="m5 7.5 5 5 5-5" />
+    </svg>
   </button>
 
   {#if open}
     <div class="panel" id={`${id}-panel`}>
-      <label class="search-label" for={`${id}-search`}>
-        <span class="sr-only">{searchPlaceholder}</span>
-        <input
-          id={`${id}-search`}
-          bind:value={keyword}
-          type="search"
-          autocomplete="off"
-          placeholder={searchPlaceholder}
-          onkeydown={(event) => {
-            if (event.key === 'Enter') event.preventDefault();
-          }}
-        />
-      </label>
-
-      {#if normalizedKeyword}
-        <p class="match-count">
-          找到 {matchedOptions.length} 項{matchedOptions.length > 100
-            ? '，顯示前 100 項'
-            : ''}
-        </p>
-      {/if}
+      <div class="navigation">
+        {#if currentPath.length > 0}
+          <button
+            type="button"
+            class="back"
+            onclick={() => void navigate(currentPath.slice(0, -1))}
+          >
+            <svg aria-hidden="true" viewBox="0 0 20 20">
+              <path d="m12.5 5-5 5 5 5" />
+            </svg>
+            上一層
+          </button>
+        {/if}
+        <h3 bind:this={navigationHeading} tabindex="-1">
+          {currentPath.length > 0 ? currentPath.join(' / ') : '全部分類'}
+        </h3>
+      </div>
 
       <fieldset>
         <legend class="sr-only">{label}</legend>
         <div class="options">
-          {#each visibleOptions as option (option.code)}
-            <label class="option">
-              <input
-                type="checkbox"
-                checked={selected.includes(option.code)}
-                onchange={(event) =>
-                  toggle(option.code, event.currentTarget.checked)}
-              />
-              <span>
-                <span class="option-path">{option.path.join(' / ')}</span>
-                <code>{option.code}</code>
-              </span>
-            </label>
+          {#each visibleRows as row (row.key)}
+            <div class="option">
+              {#if row.option}
+                <label class="selection">
+                  <input
+                    type="checkbox"
+                    checked={selected.includes(row.option.code)}
+                    onchange={(event) => {
+                      if (row.option)
+                        toggle(row.option.code, event.currentTarget.checked);
+                    }}
+                  />
+                  <span>
+                    <span class="option-name">{row.path.at(-1)}</span>
+                    <code>{row.option.code}</code>
+                  </span>
+                </label>
+              {:else}
+                <div class="group-label">
+                  <span class="option-name">{row.path.at(-1)}</span>
+                  <span class="group-kind">分類</span>
+                </div>
+              {/if}
+              {#if row.hasChildren}
+                <button
+                  type="button"
+                  class="drill"
+                  aria-label={`查看 ${row.path.at(-1)} 子分類`}
+                  onclick={() => void navigate(row.path)}
+                >
+                  <svg aria-hidden="true" viewBox="0 0 20 20">
+                    <path d="m7.5 5 5 5-5 5" />
+                  </svg>
+                </button>
+              {/if}
+            </div>
           {:else}
-            <p class="empty">
-              {normalizedKeyword
-                ? '找不到符合的選項'
-                : '輸入名稱或代碼開始搜尋'}
-            </p>
+            <p class="empty">此分類沒有下一層選項</p>
           {/each}
         </div>
       </fieldset>
@@ -210,7 +220,9 @@
   }
 
   .trigger:focus-visible,
-  .panel input:focus-visible,
+  .selection input:focus-visible,
+  .navigation button:focus-visible,
+  .drill:focus-visible,
   .actions button:focus-visible {
     outline: 3px solid rgb(36 74 48 / 22%);
     outline-offset: 4px;
@@ -224,7 +236,13 @@
 
   .chevron {
     color: #617267;
-    font-size: 1.1rem;
+    width: 1.1rem;
+    height: 1.1rem;
+    fill: none;
+    stroke: currentcolor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.8;
   }
 
   .panel {
@@ -245,13 +263,50 @@
     left: auto;
   }
 
-  .search-label input {
-    width: 100%;
+  .navigation {
+    display: grid;
+    gap: 0.35rem;
     min-height: 2.75rem;
-    border: 1px solid #aebcaf;
-    border-radius: 0.45rem;
-    padding: 0.5rem 0.65rem;
-    color: #203b29;
+    align-content: center;
+    padding: 0 0.35rem 0.55rem;
+    border-bottom: 1px solid #ececef;
+  }
+
+  .navigation h3 {
+    margin: 0;
+    color: #263b2c;
+    font-size: 0.85rem;
+    line-height: 1.4;
+  }
+
+  .navigation h3:focus-visible {
+    outline: 3px solid rgb(36 74 48 / 22%);
+    outline-offset: 2px;
+  }
+
+  .back {
+    display: inline-flex;
+    width: fit-content;
+    min-height: 2.75rem;
+    align-items: center;
+    gap: 0.2rem;
+    border: 0;
+    padding: 0 0.25rem;
+    background: transparent;
+    color: #617267;
+    font-weight: 700;
+    cursor: pointer;
+  }
+
+  .back svg,
+  .drill svg {
+    width: 1.1rem;
+    height: 1.1rem;
+    fill: none;
+    stroke: currentcolor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.8;
   }
 
   fieldset {
@@ -267,37 +322,74 @@
     margin-top: 0.5rem;
   }
 
-  .match-count {
-    margin: 0.45rem 0 0;
-    color: #6d796f;
-    font-size: 0.75rem;
-  }
-
   .option {
     display: grid;
-    grid-template-columns: auto 1fr;
+    grid-template-columns: minmax(0, 1fr) auto;
     min-height: 2.75rem;
     align-items: center;
-    gap: 0.65rem;
     border-radius: 0.4rem;
-    padding: 0.45rem 0.5rem;
     color: #263b2c;
-    cursor: pointer;
   }
 
   .option:hover {
     background: #edf5e8;
   }
 
-  .option input {
+  .selection {
+    display: grid;
+    min-width: 0;
+    min-height: 2.75rem;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 0.65rem;
+    padding: 0.45rem 0.5rem;
+    cursor: pointer;
+  }
+
+  .group-label {
+    display: grid;
+    min-width: 0;
+    min-height: 2.75rem;
+    align-content: center;
+    gap: 0.1rem;
+    padding: 0.45rem 0.5rem;
+    font-weight: 700;
+  }
+
+  .group-kind {
+    color: #6d796f;
+    font-size: 0.72rem;
+    font-weight: 400;
+  }
+
+  .selection input {
     width: 1.1rem;
     height: 1.1rem;
     accent-color: #f1a52a;
   }
 
-  .option-path {
+  .option-name {
     display: block;
     line-height: 1.35;
+    overflow-wrap: anywhere;
+  }
+
+  .drill {
+    display: grid;
+    width: 2.75rem;
+    height: 2.75rem;
+    place-items: center;
+    border: 0;
+    border-radius: 0.4rem;
+    padding: 0;
+    background: transparent;
+    color: #617267;
+    cursor: pointer;
+  }
+
+  .drill:hover {
+    background: #edf5e8;
+    color: #244a30;
   }
 
   code {

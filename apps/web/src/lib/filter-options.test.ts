@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 import filterOptions from './filter-options.json';
+import { childRows } from './taxonomy';
 
 describe('filter option asset', () => {
   it('keeps the fully verified taxonomy snapshot byte-exact', () => {
@@ -48,5 +49,20 @@ describe('filter option asset', () => {
     expect(
       filterOptions.duties.find(({ code }) => code === '140201')?.path
     ).toEqual(['電腦系統／資訊／軟硬體', '軟體工程', '軟體專案主管']);
+  });
+
+  it('keeps descendants reachable when a source parent has no code', () => {
+    const topLevel = '電腦系統／資訊／軟硬體';
+    const networkGroup = childRows(filterOptions.duties, [topLevel]).find(
+      ({ path }) => path.at(-1) === '網路管理'
+    );
+
+    expect(networkGroup?.option).toBeUndefined();
+    expect(networkGroup?.hasChildren).toBe(true);
+    expect(
+      childRows(filterOptions.duties, networkGroup?.path ?? []).map(
+        ({ option }) => option?.code
+      )
+    ).toEqual(['140401', '140402', '140403', '140405']);
   });
 });

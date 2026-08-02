@@ -84,7 +84,6 @@
         <MultiSelectChecklist
           id="duty-codes"
           label="工作"
-          searchPlaceholder="搜尋工作名稱或代碼"
           options={filterOptions.duties}
           bind:selected={dutyCodes}
           disabled={loading}
@@ -92,7 +91,6 @@
         <MultiSelectChecklist
           id="location-codes"
           label="區域"
-          searchPlaceholder="搜尋區域名稱或代碼"
           options={filterOptions.locations}
           bind:selected={locationCodes}
           disabled={loading}
