@@ -99,7 +99,7 @@ def test_graph_conditioned_retriever_uses_bounded_bridge_terms_and_protects_head
     assert bridge.minimum_updated_at == request.minimum_updated_at
 
     retriever.close()
-    assert baseline.closed
+    assert not baseline.closed
 
 
 def test_graph_index_rejects_nonfinite_relation_weight(tmp_path: Path) -> None:

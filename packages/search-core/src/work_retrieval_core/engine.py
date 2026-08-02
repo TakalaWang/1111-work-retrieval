@@ -1,27 +1,48 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 from math import isfinite
 from threading import BoundedSemaphore, Lock
 from time import monotonic
 from typing import Protocol, runtime_checkable
-from zoneinfo import ZoneInfo
 
-from work_retrieval_core.manifest import RuntimeManifest
+from work_retrieval_core.constraints import (
+    QueryConstraints,
+    compile_constraints,
+    education_requirement_allows,
+    job_attribute_allows,
+    management_requirement_allows,
+    monthly_salary_allows,
+    no_experience_allows,
+    work_shift_allows,
+)
+from work_retrieval_core.manifest import (
+    RERANKER_BM25_WEIGHT,
+    RERANKER_CANDIDATE_DEPTH,
+    RERANKER_RANK_WEIGHT,
+    RERANKER_WHOLE_DENSE_WEIGHT,
+    RuntimeManifest,
+)
+from work_retrieval_core.ranking import (
+    BusinessEvidence,
+    CandidateEvidenceGate,
+    evidence_preserving_rank,
+    weighted_rrf_pool,
+)
 from work_retrieval_core.serialization import canonical_code
 
 CANDIDATE_LIMIT = 200
 MAX_AGE_DAYS = 180
-LANE_TIMEOUT_SECONDS = 5.0
-SHADOW_COLLECTION_SECONDS = 1.0
+LANE_TIMEOUT_SECONDS = 8.0
+SHADOW_COLLECTION_SECONDS = 6.5
 METADATA_RESERVE_SECONDS = 1.0
 MAX_INFLIGHT_SEARCHES = 8
-INCUMBENT_LANES = {"tantivy_bm25_full_jd", "graph_conditioned_tantivy"}
-SEARCH_TIMEZONE = ZoneInfo("Asia/Taipei")
+RERANKER_TIMEOUT_SECONDS = 8.0
+INCUMBENT_LANES = {"tantivy_bm25_full_jd"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,7 +52,6 @@ class SearchQuery:
     text: str
     location_codes: tuple[str, ...] = ()
     duty_codes: tuple[str, ...] = ()
-    search_date: date | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +65,7 @@ class CandidateRequest:
     minimum_updated_at: datetime
     lexical_texts: tuple[str, ...] = ()
     query_rewrites: tuple[QueryRewrite, ...] = ()
+    constraints: QueryConstraints = field(default_factory=QueryConstraints)
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +97,14 @@ class JobMetadata:
     source_modified_at: datetime
     location_codes: tuple[str, ...]
     duty_codes: tuple[str, ...]
+    education_requirement: str | None = None
+    salary_period: str | None = None
+    salary_min: int | None = None
+    salary_max: int | None = None
+    job_attribute: str | None = None
+    work_hours: str | None = None
+    experience_requirement: str | None = None
+    management_count: str | None = None
 
 
 @runtime_checkable
@@ -99,6 +128,18 @@ class QueryCompiler(Protocol):
     def compile(self, text: str) -> CompiledQuery: ...
 
 
+@runtime_checkable
+class CandidateReranker(Protocol):
+    def score(self, query: str, job_ids: tuple[str, ...]) -> Mapping[str, float]: ...
+
+    def close(self) -> None: ...
+
+
+@runtime_checkable
+class DenseCapacityPreflight(Protocol):
+    def preflight(self, request: CandidateRequest) -> bool: ...
+
+
 @dataclass(frozen=True, slots=True)
 class RetrievalPorts:
     lexical_full_jd: CandidateRetriever
@@ -106,6 +147,8 @@ class RetrievalPorts:
     metadata: JobMetadataLookup
     dense_multiview_maxsim: CandidateRetriever | None = None
     query_compiler: QueryCompiler | None = None
+    reranker: CandidateReranker | None = None
+    graph: CandidateRetriever | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,6 +214,8 @@ class SearchAuditTrace:
     query_rewrites: tuple[QueryRewrite, ...]
     lanes: tuple[LaneTrace, ...]
     results: tuple[ResultTrace, ...]
+    constraints: QueryConstraints = field(default_factory=QueryConstraints)
+    constraint_filter: str = "not_requested"
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -184,7 +229,43 @@ class SearchAuditTrace:
                 "source_modified_at_lower_bound": (
                     "verified_on_returned_candidates" if self.results else "no_returned_candidates"
                 ),
+                "source_modified_at_upper_bound": (
+                    "not_applied_snapshot_timestamp_is_not_creation_time"
+                ),
+                "source_visibility": "not_available_in_authoritative_39_column_snapshot",
+                "recruitment_status": "not_available_in_authoritative_39_column_snapshot",
+                "education": (
+                    self.constraint_filter
+                    if self.constraints.education is not None
+                    else "not_requested"
+                ),
+                "monthly_salary": (
+                    self.constraint_filter
+                    if self.constraints.monthly_salary is not None
+                    else "not_requested"
+                ),
+                "job_attribute": (
+                    self.constraint_filter
+                    if self.constraints.job_attribute is not None
+                    else "not_requested"
+                ),
+                "work_shift": (
+                    self.constraint_filter
+                    if self.constraints.work_shift is not None
+                    else "not_requested"
+                ),
+                "no_experience": (
+                    self.constraint_filter
+                    if self.constraints.no_experience is not None
+                    else "not_requested"
+                ),
+                "management": (
+                    self.constraint_filter
+                    if self.constraints.management is not None
+                    else "not_requested"
+                ),
             },
+            "constraints": self.constraints.as_dict(),
             "query_rewrites": [rewrite.as_dict() for rewrite in self.query_rewrites],
             "lanes": [lane.as_dict() for lane in self.lanes],
             "results": [result.as_dict() for result in self.results],
@@ -229,6 +310,7 @@ class ProductionSearchEngine:
         enable_multiview_maxsim: bool = False,
         enable_graph: bool = False,
         multiview_artifact_key: str | None = None,
+        reranker_mode: str = "off",
         max_inflight_searches: int = MAX_INFLIGHT_SEARCHES,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -242,6 +324,8 @@ class ProductionSearchEngine:
             raise TypeError("metadata port does not satisfy JobMetadataLookup")
         if enable_graph and manifest.skill_graph is None:
             raise RuntimeError("enabled Graph requires its manifest artifact")
+        if enable_graph and not isinstance(ports.graph, CandidateRetriever):
+            raise TypeError("enabled Graph port does not satisfy CandidateRetriever")
         artifact = manifest.artifact(multiview_artifact_key or "")
         if enable_multiview_maxsim and (
             artifact is None or artifact.kind not in {"embedding", "index"}
@@ -251,13 +335,26 @@ class ProductionSearchEngine:
             ports.dense_multiview_maxsim, CandidateRetriever
         ):
             raise RuntimeError("enabled multi-view MaxSim requires its configured retrieval port")
+        if reranker_mode not in {"off", "shadow", "active"}:
+            raise ValueError("reranker_mode must be off, shadow, or active")
+        if reranker_mode != "off" and not enable_dense_shadow:
+            raise RuntimeError("reranker requires whole-Dense candidate evidence")
+        if reranker_mode != "off" and not isinstance(ports.reranker, CandidateReranker):
+            raise TypeError("enabled reranker port does not satisfy CandidateReranker")
+        if reranker_mode != "off" and manifest.semantic_reranker is None:
+            raise RuntimeError("reranker requires promoted manifest lineage")
+        if reranker_mode == "active" and not isinstance(
+            ports.dense_whole_jd, DenseCapacityPreflight
+        ):
+            raise TypeError("active reranker requires dense capacity preflight")
 
         self._ports = ports
         self._enable_dense_shadow = enable_dense_shadow
         self._enable_multiview_maxsim = enable_multiview_maxsim
+        self._reranker_mode = reranker_mode
         self._enable_graph = enable_graph
         self._clock = clock or (lambda: datetime.now(UTC))
-        lane_count = 1 + int(enable_dense_shadow) + int(enable_multiview_maxsim)
+        lane_count = 1 + int(enable_dense_shadow) + int(enable_multiview_maxsim) + int(enable_graph)
         self._executor = ThreadPoolExecutor(
             max_workers=lane_count * max_inflight_searches,
             thread_name_prefix="retrieval-lane",
@@ -280,13 +377,10 @@ class ProductionSearchEngine:
             self._inflight.release()
 
     def _search_once(self, query: SearchQuery, *, limit: int) -> SearchResult:
-        as_of = (
-            _request_as_of(query.search_date)
-            if query.search_date is not None
-            else _aware(self._clock(), field="as_of")
-        )
+        as_of = _aware(self._clock(), field="as_of")
         eligible_from = as_of - timedelta(days=MAX_AGE_DAYS)
         compiled = self._compile_query(query.text)
+        constraints = compile_constraints(query.text)
         request = CandidateRequest(
             text=query.text,
             location_codes=tuple(canonical_code(value) for value in query.location_codes),
@@ -295,66 +389,18 @@ class ProductionSearchEngine:
             minimum_updated_at=eligible_from,
             lexical_texts=compiled.lexical_texts,
             query_rewrites=compiled.rewrites,
+            constraints=constraints,
         )
-        lanes: list[tuple[str, CandidateRetriever]] = [
-            (
-                "graph_conditioned_tantivy" if self._enable_graph else "tantivy_bm25_full_jd",
-                self._ports.lexical_full_jd,
-            ),
-        ]
-        if self._enable_dense_shadow:
-            assert self._ports.dense_whole_jd is not None
-            lanes.append(("qwen_dense_whole_jd", self._ports.dense_whole_jd))
-        if self._enable_multiview_maxsim:
-            assert self._ports.dense_multiview_maxsim is not None
-            lanes.append(("qwen_dense_multiview_maxsim", self._ports.dense_multiview_maxsim))
-
-        futures = {
-            name: self._executor.submit(
-                retriever.retrieve,
-                request,
-                limit=CANDIDATE_LIMIT,
-            )
-            for name, retriever in lanes
-        }
-        lane_results: list[tuple[str, tuple[CandidateEvidence, ...]]] = []
-        lane_failures: dict[str, str] = {}
-        deadline = monotonic() + LANE_TIMEOUT_SECONDS
-        try:
-            lane_results.append(
-                (lanes[0][0], futures[lanes[0][0]].result(timeout=_remaining(deadline)))
-            )
-        except Exception as error:
-            for future in futures.values():
-                future.cancel()
-            raise SearchUnavailableError("a required retrieval lane failed") from error
-
-        shadow_deadline = min(
-            monotonic() + SHADOW_COLLECTION_SECONDS,
-            deadline - METADATA_RESERVE_SECONDS,
+        validated_lane_results, lane_failures, deadline = self._retrieve_lanes(request)
+        constraint_filter = (
+            "tantivy_pre_topk_and_postgres_revalidated"
+            if constraints.requested()
+            else "not_requested"
         )
-        for name, _retriever in lanes[1:]:
-            try:
-                lane_results.append(
-                    (name, futures[name].result(timeout=_remaining(shadow_deadline)))
-                )
-            except Exception:
-                futures[name].cancel()
-                lane_failures[name] = "shadow_lane_failed"
-                lane_results.append((name, ()))
-
-        validated_lane_results = [
-            (
-                lane_results[0][0],
-                self._validate_lane(lane_results[0][0], lane_results[0][1]),
-            )
-        ]
-        for name, candidates in lane_results[1:]:
-            try:
-                validated_lane_results.append((name, self._validate_lane(name, candidates)))
-            except SearchUnavailableError:
-                lane_failures[name] = "shadow_lane_failed"
-                validated_lane_results.append((name, ()))
+        if constraints.requested() and not validated_lane_results[0][1]:
+            request = replace(request, constraints=QueryConstraints())
+            validated_lane_results, lane_failures, deadline = self._retrieve_lanes(request)
+            constraint_filter = "relaxed_query_text_constraints_after_zero"
         candidate_ids = tuple(
             dict.fromkeys(
                 candidate.job_id
@@ -381,14 +427,34 @@ class ProductionSearchEngine:
         lane_traces: list[LaneTrace] = []
         for lane_name, validated in validated_lane_results:
             if failure := lane_failures.get(lane_name):
-                lane_traces.append(LaneTrace(lane_name, "failed", failure, 0))
+                lane_traces.append(
+                    LaneTrace(
+                        lane_name,
+                        (
+                            "capacity_skipped"
+                            if failure == "eligible_universe_exceeds_exact_scan_limit"
+                            else "failed"
+                        ),
+                        failure,
+                        0,
+                    )
+                )
                 continue
-            incumbent = lane_name == lanes[0][0]
+            incumbent = lane_name in INCUMBENT_LANES
+            dense_ranking_evidence = (
+                self._reranker_mode == "active" and lane_name == "qwen_dense_whole_jd"
+            )
             lane_traces.append(
                 LaneTrace(
                     lane_name,
                     "enabled",
-                    "top10_incumbent" if incumbent else "shadow_tail_only",
+                    (
+                        "top10_incumbent"
+                        if incumbent
+                        else "reranker_candidate_evidence"
+                        if dense_ranking_evidence
+                        else "shadow_tail_only"
+                    ),
                     len(validated),
                 )
             )
@@ -406,6 +472,12 @@ class ProductionSearchEngine:
                     )
                 else:
                     existing.evidence.append(rank_evidence)
+
+        ranked_candidates = {
+            job_id: candidate
+            for job_id, candidate in ranked_candidates.items()
+            if any(item.lane == "tantivy_bm25_full_jd" for item in candidate.evidence)
+        }
 
         if not self._enable_dense_shadow:
             lane_traces.append(
@@ -425,19 +497,142 @@ class ProductionSearchEngine:
                     0,
                 )
             )
-        if not self._enable_graph:
-            lane_traces.append(LaneTrace("graph", "disabled", "feature_flag_disabled", 0))
-        lane_traces.extend(
-            LaneTrace(name, "disabled", "calibration_not_approved", 0)
-            for name in ("reranker", "ltr", "guardrail")
-        )
-
         scored = [
             self._result_trace(job_id, candidate, as_of=as_of)
             for job_id, candidate in ranked_candidates.items()
         ]
         scored.sort(key=_serving_order)
+        reranker_trace = LaneTrace("reranker", "disabled", "feature_flag_disabled", 0)
+        dense_failure = lane_failures.get("qwen_dense_whole_jd")
+        if self._reranker_mode != "off" and dense_failure in {
+            None,
+            "eligible_universe_exceeds_exact_scan_limit",
+        }:
+            assert self._ports.reranker is not None
+            pool = _reranker_pool_ids(ranked_candidates)
+            if pool:
+                reranker_failed = False
+                future = None
+                try:
+                    future = self._executor.submit(self._ports.reranker.score, query.text, pool)
+                    scores = future.result(timeout=RERANKER_TIMEOUT_SECONDS)
+                except Exception as error:
+                    if future is not None:
+                        future.cancel()
+                    if self._reranker_mode == "active":
+                        raise SearchUnavailableError("reranker failed") from error
+                    reranker_trace = LaneTrace("reranker", "failed", "shadow_call_failed", 0)
+                    reranker_failed = True
+                    scores = {}
+                invalid = (
+                    not isinstance(scores, Mapping)
+                    or set(scores) != set(pool)
+                    or any(
+                        not isinstance(score, (int, float))
+                        or isinstance(score, bool)
+                        or not isfinite(score)
+                        or not 0.0 <= score <= 1.0
+                        for score in scores.values()
+                    )
+                )
+                if not reranker_failed and invalid:
+                    if self._reranker_mode == "active":
+                        raise SearchUnavailableError("reranker violated its serving contract")
+                    reranker_trace = LaneTrace("reranker", "failed", "shadow_contract_violation", 0)
+                    scores = {}
+                if scores:
+                    prior_rank = {job_id: rank for rank, job_id in enumerate(pool)}
+                    reranked = tuple(
+                        sorted(
+                            pool,
+                            key=lambda job_id: (-scores[job_id], prior_rank[job_id], job_id),
+                        )
+                    )
+                else:
+                    reranked = ()
+            else:
+                reranked = ()
+            if reranked:
+                if self._reranker_mode == "active":
+                    pool_set = set(pool)
+                    gates = {
+                        job_id: _candidate_gate(
+                            job_id,
+                            ranked_candidates[job_id],
+                            request=request,
+                            suitability=float(scores[job_id]),
+                            hard_constraints_match=(
+                                constraint_filter != "relaxed_query_text_constraints_after_zero"
+                            ),
+                        )
+                        for job_id in pool
+                    }
+                    fused = evidence_preserving_rank(
+                        pool,
+                        reranked,
+                        gates,
+                        protected_prefix=0,
+                        protected_job_ids=_lane_ids(ranked_candidates, "tantivy_bm25_full_jd")[:1],
+                        suitability_threshold=0.9,
+                        reranker_weight=RERANKER_RANK_WEIGHT,
+                        business_weight=0.0,
+                    )
+                    ordered_ids = (
+                        *fused,
+                        *(item.job_id for item in scored if item.job_id not in pool_set),
+                    )
+                    by_id = {item.job_id: item for item in scored}
+                    scored = [by_id[job_id] for job_id in ordered_ids]
+                    reranker_trace = LaneTrace(
+                        "reranker",
+                        "enabled",
+                        "relevance_gated_rank_fusion_top1_protected",
+                        len(pool),
+                    )
+                else:
+                    reranker_trace = LaneTrace("reranker", "enabled", "shadow_scored", len(pool))
+            elif not pool:
+                reranker_trace = LaneTrace(
+                    "reranker",
+                    "enabled",
+                    "ranking_active" if self._reranker_mode == "active" else "shadow_scored",
+                    0,
+                )
+        elif self._reranker_mode == "shadow":
+            reranker_trace = LaneTrace("reranker", "failed", "dense_shadow_failed", 0)
+        if not self._enable_graph:
+            lane_traces.append(LaneTrace("graph", "disabled", "feature_flag_disabled", 0))
+        lane_traces.extend(
+            (
+                reranker_trace,
+                LaneTrace("ltr", "disabled", "calibration_not_approved", 0),
+                LaneTrace("guardrail", "disabled", "calibration_not_approved", 0),
+            )
+        )
         selected = tuple(scored[:limit])
+        if self._reranker_mode == "active" and selected:
+            selected_ids = tuple(item.job_id for item in selected)
+            try:
+                final_metadata = self._executor.submit(
+                    self._ports.metadata.get_many,
+                    selected_ids,
+                ).result(timeout=METADATA_RESERVE_SECONDS)
+            except Exception as error:
+                raise SearchUnavailableError("final job metadata revalidation failed") from error
+            current = self._validate_metadata(
+                selected_ids,
+                final_metadata,
+                request=request,
+                required_ids=set(selected_ids),
+            )
+            selected = tuple(
+                self._result_trace(
+                    job_id,
+                    _RankedCandidate(current[job_id], ranked_candidates[job_id].evidence),
+                    as_of=as_of,
+                )
+                for job_id in selected_ids
+            )
         return SearchResult(
             job_ids=tuple(item.job_id for item in selected),
             trace=SearchAuditTrace(
@@ -450,6 +645,8 @@ class ProductionSearchEngine:
                 query_rewrites=request.query_rewrites,
                 lanes=tuple(lane_traces),
                 results=selected,
+                constraints=constraints,
+                constraint_filter=constraint_filter,
             ),
         )
 
@@ -465,10 +662,91 @@ class ProductionSearchEngine:
             self._ports.dense_whole_jd,
             self._ports.metadata,
             self._ports.dense_multiview_maxsim,
+            self._ports.reranker,
+            self._ports.graph,
         ):
             if retriever is not None and id(retriever) not in seen:
                 seen.add(id(retriever))
                 retriever.close()
+
+    def _retrieve_lanes(
+        self, request: CandidateRequest
+    ) -> tuple[
+        list[tuple[str, tuple[CandidateEvidence, ...]]],
+        dict[str, str],
+        float,
+    ]:
+        lanes: list[tuple[str, CandidateRetriever]] = [
+            ("tantivy_bm25_full_jd", self._ports.lexical_full_jd),
+        ]
+        if self._enable_graph:
+            assert self._ports.graph is not None
+            lanes.append(("graph_conditioned_tantivy", self._ports.graph))
+        if self._enable_dense_shadow:
+            assert self._ports.dense_whole_jd is not None
+            dense_supported = True
+            if isinstance(self._ports.dense_whole_jd, DenseCapacityPreflight):
+                try:
+                    dense_supported = self._ports.dense_whole_jd.preflight(request)
+                except Exception as error:
+                    raise SearchUnavailableError("dense capacity preflight failed") from error
+            if dense_supported:
+                lanes.append(("qwen_dense_whole_jd", self._ports.dense_whole_jd))
+        if self._enable_multiview_maxsim:
+            assert self._ports.dense_multiview_maxsim is not None
+            lanes.append(("qwen_dense_multiview_maxsim", self._ports.dense_multiview_maxsim))
+        futures = {
+            name: self._executor.submit(retriever.retrieve, request, limit=CANDIDATE_LIMIT)
+            for name, retriever in lanes
+        }
+        lane_results: list[tuple[str, tuple[CandidateEvidence, ...]]] = []
+        failures: dict[str, str] = {}
+        if self._enable_dense_shadow and not dense_supported:
+            failures["qwen_dense_whole_jd"] = "eligible_universe_exceeds_exact_scan_limit"
+        deadline = monotonic() + LANE_TIMEOUT_SECONDS
+        try:
+            lane_results.append(
+                (lanes[0][0], futures[lanes[0][0]].result(timeout=_remaining(deadline)))
+            )
+        except Exception as error:
+            for future in futures.values():
+                future.cancel()
+            raise SearchUnavailableError("a required retrieval lane failed") from error
+        shadow_deadline = min(
+            monotonic() + SHADOW_COLLECTION_SECONDS,
+            deadline - METADATA_RESERVE_SECONDS,
+        )
+        for name, _retriever in lanes[1:]:
+            try:
+                lane_results.append(
+                    (name, futures[name].result(timeout=_remaining(shadow_deadline)))
+                )
+            except Exception as error:
+                futures[name].cancel()
+                if self._reranker_mode == "active" and name == "qwen_dense_whole_jd":
+                    raise SearchUnavailableError("a required ranking lane failed") from error
+                failures[name] = "shadow_lane_failed"
+                lane_results.append((name, ()))
+        validated = [
+            (
+                lane_results[0][0],
+                self._validate_lane(lane_results[0][0], lane_results[0][1]),
+            )
+        ]
+        for name, candidates in lane_results[1:]:
+            try:
+                validated.append((name, self._validate_lane(name, candidates)))
+            except SearchUnavailableError as error:
+                if self._reranker_mode == "active" and name == "qwen_dense_whole_jd":
+                    raise SearchUnavailableError("a required ranking lane failed") from error
+                failures[name] = "shadow_lane_failed"
+                validated.append((name, ()))
+        if self._enable_dense_shadow and not dense_supported:
+            validated.insert(
+                1 + int(self._enable_graph),
+                ("qwen_dense_whole_jd", ()),
+            )
+        return validated, failures, deadline
 
     def _validate_lane(
         self,
@@ -531,6 +809,51 @@ class ProductionSearchEngine:
                 if item.job_id in required_ids:
                     raise SearchUnavailableError("candidate violated the duty hard filter")
                 continue
+            education = request.constraints.education
+            if education is not None and not education_requirement_allows(
+                item.education_requirement,
+                education.degree,
+            ):
+                if item.job_id in required_ids:
+                    raise SearchUnavailableError("candidate violated the education hard filter")
+                continue
+            salary = request.constraints.monthly_salary
+            if salary is not None and not monthly_salary_allows(
+                item.salary_period,
+                item.salary_min,
+                item.salary_max,
+                salary,
+            ):
+                if item.job_id in required_ids:
+                    raise SearchUnavailableError(
+                        "candidate violated the monthly salary hard filter"
+                    )
+                continue
+            job_attribute = request.constraints.job_attribute
+            if job_attribute is not None and not job_attribute_allows(
+                item.job_attribute,
+                job_attribute,
+            ):
+                if item.job_id in required_ids:
+                    raise SearchUnavailableError("candidate violated the job attribute hard filter")
+                continue
+            work_shift = request.constraints.work_shift
+            if work_shift is not None and not work_shift_allows(item.work_hours, work_shift):
+                if item.job_id in required_ids:
+                    raise SearchUnavailableError("candidate violated the work shift hard filter")
+                continue
+            if request.constraints.no_experience is not None and not no_experience_allows(
+                item.experience_requirement
+            ):
+                if item.job_id in required_ids:
+                    raise SearchUnavailableError("candidate violated the experience hard filter")
+                continue
+            if request.constraints.management is not None and not management_requirement_allows(
+                item.management_count
+            ):
+                if item.job_id in required_ids:
+                    raise SearchUnavailableError("candidate violated the management hard filter")
+                continue
             by_id[item.job_id] = item
         if not required_ids.issubset(by_id):
             raise SearchUnavailableError(
@@ -589,10 +912,6 @@ def _aware(value: datetime, *, field: str) -> datetime:
     return value
 
 
-def _request_as_of(value: date) -> datetime:
-    return datetime.combine(value, time(23, 59, 59, 999_000), SEARCH_TIMEZONE).astimezone(UTC)
-
-
 def _isoformat(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
@@ -605,6 +924,53 @@ def _filter_status(requested: tuple[str, ...], returned: int) -> str:
 
 def _remaining(deadline: float) -> float:
     return max(0.0, deadline - monotonic())
+
+
+def _candidate_gate(
+    job_id: str,
+    candidate: _RankedCandidate,
+    *,
+    request: CandidateRequest,
+    suitability: float,
+    hard_constraints_match: bool,
+) -> CandidateEvidenceGate:
+    lanes = {item.lane for item in candidate.evidence}
+    return CandidateEvidenceGate(
+        job_id=job_id,
+        llm_suitability=suitability,
+        hard_constraints_match=hard_constraints_match,
+        occupation_match=bool(
+            request.duty_codes
+            and set(request.duty_codes).intersection(candidate.metadata.duty_codes)
+        ),
+        bm25_supported="tantivy_bm25_full_jd" in lanes,
+        dense_supported="qwen_dense_whole_jd" in lanes,
+        business=BusinessEvidence(popularity=0.0, completeness=0.0),
+    )
+
+
+def _reranker_pool_ids(candidates: Mapping[str, _RankedCandidate]) -> tuple[str, ...]:
+    return weighted_rrf_pool(
+        {
+            "bm25": _lane_ids(candidates, "tantivy_bm25_full_jd"),
+            "whole_dense": _lane_ids(candidates, "qwen_dense_whole_jd"),
+        },
+        {"bm25": RERANKER_BM25_WEIGHT, "whole_dense": RERANKER_WHOLE_DENSE_WEIGHT},
+        limit=RERANKER_CANDIDATE_DEPTH,
+    )
+
+
+def _lane_ids(candidates: Mapping[str, _RankedCandidate], name: str) -> tuple[str, ...]:
+    ranked = sorted(
+        (
+            (evidence.rank, job_id)
+            for job_id, candidate in candidates.items()
+            for evidence in candidate.evidence
+            if evidence.lane == name
+        ),
+        key=lambda item: (item[0], item[1]),
+    )
+    return tuple(job_id for _rank, job_id in ranked)
 
 
 def _serving_order(item: ResultTrace) -> tuple[int, int, float, str]:

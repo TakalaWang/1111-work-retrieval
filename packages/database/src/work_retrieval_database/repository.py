@@ -4,13 +4,19 @@ import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal
+from typing import cast
 
 from sqlalchemy import URL, Engine, create_engine, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool
+from work_retrieval_core.serialization import FULL_JOB_FIELDS, serialize_full_job
 
 from .models import Job
+
+FULL_JOB_FIELD_NAMES = tuple(field for _label, field in FULL_JOB_FIELDS)
+FULL_JOB_COLUMNS = tuple(getattr(Job, field) for field in FULL_JOB_FIELD_NAMES)
 
 
 class JobStoreUnavailableError(RuntimeError):
@@ -25,6 +31,14 @@ class JobMetadataRecord:
     duty_middle: str | None
     duty_minor: str | None
     source_modified_at: datetime
+    job_attribute: str | None
+    work_hours: str | None
+    experience_requirement: str | None
+    management_count: str | None
+    education_requirement: str | None
+    salary_text: str
+    salary_min: Decimal | None
+    salary_max: Decimal | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,10 +109,7 @@ class SqlAlchemyJobReader:
         return cls(engine)
 
     def metadata_for_job_ids(self, job_ids: tuple[str, ...]) -> tuple[JobMetadataRecord, ...]:
-        if len(set(job_ids)) != len(job_ids) or any(
-            not job_id.isascii() or not job_id.isdecimal() for job_id in job_ids
-        ):
-            raise ValueError("job_ids must contain unique ASCII decimal identifiers")
+        _validate_job_ids(job_ids)
         if not job_ids:
             return ()
         try:
@@ -110,11 +121,42 @@ class SqlAlchemyJobReader:
                     Job.duty_middle,
                     Job.duty_minor,
                     Job.source_modified_at,
+                    Job.job_attribute,
+                    Job.work_hours,
+                    Job.experience_requirement,
+                    Job.management_count,
+                    Job.education_requirement,
+                    Job.salary_text,
+                    Job.salary_min,
+                    Job.salary_max,
                 ).where(Job.job_id.in_(job_ids))
                 rows = session.execute(statement).all()
         except SQLAlchemyError as error:
             raise JobStoreUnavailableError("PostgreSQL job metadata lookup failed") from error
         return tuple(JobMetadataRecord(*row) for row in rows)
+
+    def job_documents_for_job_ids(self, job_ids: tuple[str, ...]) -> Mapping[str, str]:
+        _validate_job_ids(job_ids)
+        if not job_ids:
+            return {}
+        try:
+            with self._session_factory() as session:
+                rows = session.execute(
+                    select(Job.job_id, *FULL_JOB_COLUMNS).where(Job.job_id.in_(job_ids))
+                ).all()
+        except SQLAlchemyError as error:
+            raise JobStoreUnavailableError("PostgreSQL full-job lookup failed") from error
+        documents: dict[str, str] = {}
+        for row in rows:
+            values = dict(
+                zip(
+                    FULL_JOB_FIELD_NAMES,
+                    cast(tuple[str | None, ...], tuple(row)[1:]),
+                    strict=True,
+                )
+            )
+            documents[cast(str, row[0])] = serialize_full_job(values)
+        return documents
 
     def job_details(self, job_id: str) -> dict[str, str | None] | None:
         if not job_id.isascii() or not job_id.isdecimal():
@@ -142,3 +184,10 @@ class SqlAlchemyJobReader:
 
     def close(self) -> None:
         self._engine.dispose()
+
+
+def _validate_job_ids(job_ids: tuple[str, ...]) -> None:
+    if len(set(job_ids)) != len(job_ids) or any(
+        not job_id.isascii() or not job_id.isdecimal() for job_id in job_ids
+    ):
+        raise ValueError("job_ids must contain unique ASCII decimal identifiers")

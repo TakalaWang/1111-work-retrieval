@@ -60,8 +60,8 @@ production ranking 以 golden parity test 鎖定。其他宣稱啟用但沒有 p
 - snapshot 中 `source_modified_at > as_of` 的資料保留，不設人為上界；其 freshness 固定為 `0`，並標記
   `future_updated_snapshot=true`。
 - location 內為 OR、duty 內為 OR、location 與 duty 之間為 AND；未知 taxonomy code 是確定的 no-match。
-- Tantivy 雖已 pre-filter，engine 仍以 PostgreSQL authoritative metadata 逐筆重驗時間、location 與 duty；
-  缺資料或任一不一致都 fail closed。
+- Tantivy 雖已 pre-filter，engine 仍以 PostgreSQL authoritative metadata 逐筆重驗 180 天下界、location、
+  duty 與所有已編譯 typed constraints；缺資料或任一不一致都 fail closed。
 
 這個設計避免把 freshness 當成 relevance，也避免「adapter 宣稱套用 filter、實際卻在 Top-K 後過濾」的
 不可觀測錯誤。
@@ -82,7 +82,9 @@ Tantivy 0.26 index 使用固定欄位與權重：
 
 所以職務內容不是只拿去 embedding；它同時可被 lexical retrieval 找到。索引另含 raw-tokenized
 `location_filter`、`duty_filter`、`visibility_filter`、unsigned `updated_at_epoch_ms` 與 fast
-`job_index`。
+`job_index`。官方競賽 CSV 沒有可見性欄位，因此競賽模式把已下載的封閉 JD pool 明確視為
+eligible corpus，並寫入常數 `visibility=1`；這是 corpus eligibility 假設，不是 CSV 提供的
+可見性事實。真實廠商 feed 必須另外提供並在回傳前重驗當下可見性。
 
 ### Whole-JD Qwen
 
@@ -113,7 +115,7 @@ Production container 啟動順序：
 1. 從 `s3://$ARTIFACT_BUCKET/runtime/$ARTIFACT_MANIFEST_SHA256/manifest.json` 下載 root manifest。
 2. 驗證 root manifest 完整 bytes 的 SHA-256。
 3. 解析嚴格 schema v2，拒絕 unknown keys、不完整 release、錯誤 model revision、row-order drift、未套
-   pre-Top-K filter 或 `future_jobs=exclude`。
+   pre-Top-K filter 或 `future_jobs=retained_with_zero_freshness`。
 4. 計算所需空間與最低 12 GiB runtime memory；容量不足即停止。
 5. 一律下載 BM25 component prefix；只在 dense shadow flag 開啟時下載 whole-embedding prefix。每一物件先寫
    `.partial`，驗證 size 與 SHA 後 atomic rename。

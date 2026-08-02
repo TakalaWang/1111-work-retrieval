@@ -31,19 +31,39 @@ from pipeline_contract import (
     verify_s3_object,
 )
 from work_retrieval_core.adapters import (
+    EDUCATION_FILTER_FIELD,
+    EXPERIENCE_FILTER_FIELD,
     FIELD_BOOSTS,
+    FILTER_SEMANTICS,
+    JOB_ATTRIBUTE_FILTER_FIELD,
     JOB_INDEX_FIELD,
     LEXICAL_POLICY_VERSION,
+    MANAGEMENT_FILTER_FIELD,
+    MONTHLY_SALARY_LOWER_FIELD,
+    MONTHLY_SALARY_RECALL_FIELD,
+    NUMERIC_FILTER_FIELDS,
     RAW_FILTER_FIELDS,
     SOURCE_FIELDS,
     TEXT_FIELDS,
     TOKENIZERS,
     UPDATED_AT_FIELD,
     VISIBILITY_FIELD,
+    WORK_SHIFT_FILTER_FIELD,
     CorpusQueryCompiler,
     lexical_policy_sha256,
     lexical_tokens,
 )
+from work_retrieval_core.constraints import (
+    education_filter_values,
+    job_attribute_filter_value,
+    management_filter_value,
+    monthly_salary_filter_values,
+    no_experience_filter_value,
+    normalize_salary_bound,
+    salary_period,
+    work_shift_filter_values,
+)
+from work_retrieval_core.manifest import TEMPORAL_FILTER_SEMANTICS
 from work_retrieval_core.serialization import FULL_JOB_FIELDS, canonical_code, canonical_text
 
 JOB_ID_FIELD = "職缺編號"
@@ -53,18 +73,18 @@ DEFAULT_DUTY_CODE_FIELD = "職務小類編號"
 DEFAULT_DUTY_TERM_FIELD = "職務小類"
 DEFAULT_VISIBILITY_FIELD = "是否公開"
 DEFAULT_MODIFIED_AT_FIELD = "職缺最後修改時間"
-DEFAULT_ARTIFACT_PREFIX = "indexes/tantivy-bm25-temporal-v2"
+SALARY_LOWER_SOURCE_FIELD = "薪資下限"
+SALARY_UPPER_SOURCE_FIELD = "薪資上限"
+DEFAULT_ARTIFACT_PREFIX = "indexes/tantivy-bm25-temporal-v3"
 SOURCE_TIMEZONE = ZoneInfo("Asia/Taipei")
 TAXONOMY_FIELDS = {"CodeNo", "CodeNameA", "CodeNameB", "CodeNameC"}
 ENGINE = "tantivy v0.26.0, index_format v7"
-FILTER_SEMANTICS = "visibility AND (location OR) AND (duty OR), applied before Top-K"
-TEMPORAL_SEMANTICS = (
-    "updated_at >= as_of - 180 days before Top-K; updated_at > as_of retained with freshness=0"
-)
+TEMPORAL_SEMANTICS = TEMPORAL_FILTER_SEMANTICS
 SCHEMA_FIELDS = [
     *TEXT_FIELDS,
     *RAW_FILTER_FIELDS,
     UPDATED_AT_FIELD,
+    *NUMERIC_FILTER_FIELDS,
     JOB_INDEX_FIELD,
 ]
 COMPONENT_KEYS = {
@@ -109,6 +129,7 @@ BUILD_KEYS = {
     "tokenizers",
     "source_fields",
     "source_csv_fields",
+    "salary_filter_excluded_rows",
 }
 
 
@@ -212,6 +233,8 @@ def _schema() -> tantivy.Schema:
     for field in RAW_FILTER_FIELDS:
         builder.add_text_field(field, tokenizer_name="raw")
     builder.add_unsigned_field(UPDATED_AT_FIELD, indexed=True, fast=True)
+    for field in NUMERIC_FILTER_FIELDS:
+        builder.add_unsigned_field(field, indexed=True)
     builder.add_unsigned_field(JOB_INDEX_FIELD, fast=True)
     return builder.build()
 
@@ -251,6 +274,7 @@ def build_tantivy(
         job_ids: list[str] = []
         seen: set[str] = set()
         order = hashlib.sha256()
+        salary_filter_excluded_rows = 0
         if location_taxonomy_csv is None:
             if location_code_field is None:
                 raise RuntimeError("location code field or taxonomy CSV is required")
@@ -270,6 +294,8 @@ def build_tantivy(
             location_term_field,
             duty_term_field,
             modified_at_field,
+            SALARY_LOWER_SOURCE_FIELD,
+            SALARY_UPPER_SOURCE_FIELD,
             *(label for label, _field in FULL_JOB_FIELDS),
         }
         if location_taxonomy_csv is None:
@@ -325,6 +351,18 @@ def build_tantivy(
                 epoch_ms = int(modified.timestamp() * 1000)
                 if epoch_ms < 0:
                     raise RuntimeError("job modified timestamp precedes the Unix epoch")
+                try:
+                    salary_lower = normalize_salary_bound(row[SALARY_LOWER_SOURCE_FIELD])
+                    salary_upper = normalize_salary_bound(row[SALARY_UPPER_SOURCE_FIELD])
+                except ValueError:
+                    salary_lower = None
+                    salary_upper = None
+                    salary_filter_excluded_rows += 1
+                indexed_salary_lower, indexed_salary_recall = monthly_salary_filter_values(
+                    salary_period(values["salary_text"]),
+                    salary_lower,
+                    salary_upper,
+                )
                 document = tantivy.Document()
                 for field in TEXT_FIELDS:
                     text = _serialized(values, SOURCE_FIELDS[field])
@@ -334,7 +372,21 @@ def build_tantivy(
                 if duty_term:
                     document.add_text("duty_filter", duty_term)
                 document.add_text(VISIBILITY_FIELD, visibility)
+                for education in education_filter_values(values["education_requirement"]):
+                    document.add_text(EDUCATION_FILTER_FIELD, education)
+                if attribute := job_attribute_filter_value(values["job_attribute"]):
+                    document.add_text(JOB_ATTRIBUTE_FILTER_FIELD, attribute)
+                for shift in work_shift_filter_values(values["work_hours"]):
+                    document.add_text(WORK_SHIFT_FILTER_FIELD, shift)
+                if experience := no_experience_filter_value(values["experience_requirement"]):
+                    document.add_text(EXPERIENCE_FILTER_FIELD, experience)
+                if management := management_filter_value(values["management_count"]):
+                    document.add_text(MANAGEMENT_FILTER_FIELD, management)
                 document.add_unsigned(UPDATED_AT_FIELD, epoch_ms)
+                if indexed_salary_lower is not None:
+                    document.add_unsigned(MONTHLY_SALARY_LOWER_FIELD, indexed_salary_lower)
+                if indexed_salary_recall is not None:
+                    document.add_unsigned(MONTHLY_SALARY_RECALL_FIELD, indexed_salary_recall)
                 document.add_unsigned(JOB_INDEX_FIELD, row_index)
                 writer.add_document(document)
         if not job_ids:
@@ -402,6 +454,7 @@ def build_tantivy(
             "tokenizers": TOKENIZERS,
             "source_fields": SOURCE_FIELDS,
             "source_csv_fields": sorted(required),
+            "salary_filter_excluded_rows": salary_filter_excluded_rows,
         }
         build_manifest_path = partial / "build-manifest.json"
         atomic_json(build_manifest_path, build_manifest)
@@ -564,9 +617,16 @@ def validate_tantivy(output: Path, *, jobs_csv: Path, artifact_prefix: str) -> d
         "lexical_policy_sha256": lexical_policy_sha256(),
         "tokenizers": TOKENIZERS,
         "source_fields": SOURCE_FIELDS,
+        "salary_filter_excluded_rows": build["salary_filter_excluded_rows"],
     }
     if any(build[name] != value for name, value in build_expected.items()):
         raise RuntimeError("Tantivy build lineage differs")
+    if (
+        not isinstance(build["salary_filter_excluded_rows"], int)
+        or isinstance(build["salary_filter_excluded_rows"], bool)
+        or not 0 <= build["salary_filter_excluded_rows"] <= len(job_ids)
+    ):
+        raise RuntimeError("Tantivy salary filter exclusion count is invalid")
     require_sha256(build["taxonomy_sha256"], "Tantivy build taxonomy SHA-256")
     taxonomy_path = _local(output, manifest["taxonomy_path"], prefix)
     if sha256_file(taxonomy_path) != build["taxonomy_sha256"]:

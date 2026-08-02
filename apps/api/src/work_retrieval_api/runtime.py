@@ -19,6 +19,15 @@ from work_retrieval_core import (
     SearchUnavailableError,
 )
 from work_retrieval_core.artifacts import S3RuntimeArtifacts, aws_s3_client
+from work_retrieval_core.reranker import (
+    ENDPOINT_CONFIG_NAME as RERANKER_V8_ENDPOINT_CONFIG_NAME,
+)
+from work_retrieval_core.reranker import (
+    ENDPOINT_MODEL_NAME as RERANKER_V8_MODEL_NAME,
+)
+from work_retrieval_core.reranker import (
+    ENDPOINT_NAME as RERANKER_V8_ENDPOINT_NAME,
+)
 from work_retrieval_database import JobStoreUnavailableError
 
 MANIFEST_PATH_ENV = "SEARCH_RUNTIME_MANIFEST_PATH"
@@ -27,6 +36,10 @@ DEMO_AS_OF_ENV = "SEARCH_DEMO_AS_OF"
 MULTIVIEW_ENABLED_ENV = "SEARCH_ENABLE_MULTIVIEW_MAXSIM"
 MULTIVIEW_ARTIFACT_ENV = "SEARCH_MULTIVIEW_ARTIFACT_KEY"
 DENSE_SHADOW_ENABLED_ENV = "SEARCH_ENABLE_DENSE_SHADOW"
+RERANKER_ENABLED_ENV = "SEARCH_ENABLE_RERANKER"
+RERANKER_ENDPOINT_ENV = "RERANKER_ENDPOINT_NAME"
+RERANKER_ENDPOINT_CONFIG_ENV = "RERANKER_ENDPOINT_CONFIG_NAME"
+RERANKER_MODEL_ENV = "RERANKER_MODEL_NAME"
 GRAPH_ENABLED_ENV = "SEARCH_ENABLE_GRAPH"
 DEMO_TIMEZONE = ZoneInfo("Asia/Taipei")
 
@@ -109,6 +122,20 @@ def runtime_from_environment(
         values.get(MULTIVIEW_ENABLED_ENV, "false"),
         name=MULTIVIEW_ENABLED_ENV,
     )
+    reranker_mode = _reranker_mode(values.get(RERANKER_ENABLED_ENV, "off"))
+    if reranker_mode != "off" and not enable_dense_shadow:
+        raise RuntimeError(f"{RERANKER_ENABLED_ENV} requires {DENSE_SHADOW_ENABLED_ENV}")
+    if reranker_mode != "off":
+        if manifest.semantic_reranker is None:
+            raise RuntimeError(f"{RERANKER_ENABLED_ENV} requires promoted manifest lineage")
+        expected = {
+            RERANKER_ENDPOINT_ENV: RERANKER_V8_ENDPOINT_NAME,
+            RERANKER_ENDPOINT_CONFIG_ENV: RERANKER_V8_ENDPOINT_CONFIG_NAME,
+            RERANKER_MODEL_ENV: RERANKER_V8_MODEL_NAME,
+        }
+        for name, value in expected.items():
+            if _required(values, name) != value:
+                raise RuntimeError(f"{name} differs from promoted reranker lineage")
     raw_multiview_artifact = values.get(MULTIVIEW_ARTIFACT_ENV)
     if enable_multiview:
         multiview_artifact = _required(values, MULTIVIEW_ARTIFACT_ENV)
@@ -127,6 +154,7 @@ def runtime_from_environment(
     if not isinstance(ports, RetrievalPorts):
         raise TypeError("SEARCH_PORT_FACTORY must return RetrievalPorts")
     if not isinstance(ports.metadata, JobDetailLookup):
+        _close_ports(ports)
         raise TypeError("production metadata port must support job detail lookup")
 
     clock: Callable[[], datetime] | None = None
@@ -137,16 +165,36 @@ def runtime_from_environment(
             return demo_as_of
 
         clock = fixed_demo_clock
-    engine = ProductionSearchEngine(
-        manifest,
-        ports,
-        enable_dense_shadow=enable_dense_shadow,
-        enable_multiview_maxsim=enable_multiview,
-        enable_graph=enable_graph,
-        multiview_artifact_key=multiview_artifact,
-        clock=clock,
-    )
+    try:
+        engine = ProductionSearchEngine(
+            manifest,
+            ports,
+            enable_dense_shadow=enable_dense_shadow,
+            enable_multiview_maxsim=enable_multiview,
+            enable_graph=enable_graph,
+            multiview_artifact_key=multiview_artifact,
+            reranker_mode=reranker_mode,
+            clock=clock,
+        )
+    except Exception:
+        _close_ports(ports)
+        raise
     return ProductionRuntime(engine, ports.metadata, artifact_manifest_sha256)
+
+
+def _close_ports(ports: RetrievalPorts) -> None:
+    seen: set[int] = set()
+    for port in (
+        ports.lexical_full_jd,
+        ports.dense_whole_jd,
+        ports.metadata,
+        ports.dense_multiview_maxsim,
+        ports.reranker,
+        ports.graph,
+    ):
+        if port is not None and id(port) not in seen:
+            seen.add(id(port))
+            port.close()
 
 
 def _load_port_factory(spec: str) -> PortFactory:
@@ -195,3 +243,9 @@ def _boolean(value: str, *, name: str) -> bool:
     if value == "false":
         return False
     raise RuntimeError(f"{name} must be true or false")
+
+
+def _reranker_mode(value: str) -> str:
+    if value in {"off", "shadow", "active"}:
+        return value
+    raise RuntimeError(f"{RERANKER_ENABLED_ENV} must be off, shadow, or active")

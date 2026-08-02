@@ -9,32 +9,31 @@ import time
 from pathlib import Path
 from typing import cast
 
+from work_retrieval_core.reranker import (
+    CHAT_TEMPLATE_SHA256,
+    ENDPOINT_CONFIG_NAME,
+    ENDPOINT_MODEL_NAME,
+    ENDPOINT_NAME,
+    IMAGE_DIGEST,
+    IMAGE_URI,
+    MODEL_ID,
+    MODEL_REVISION,
+    model_environment,
+)
+
 AWS_ACCOUNT = "378849533305"
 AWS_PROFILE = "competition"
 AWS_REGION = "us-west-2"
-ENDPOINT_NAME = "work-retrieval-qwen3-reranker-8b"
-MODEL_NAME = "work-retrieval-qwen3-reranker-8b-v4"
-ENDPOINT_CONFIG_NAME = "work-retrieval-qwen3-reranker-8b-v4"
-INSTANCE_TYPE = "ml.g5.2xlarge"
-ENDPOINT_QUOTA_CODE = "L-9614C779"
+MODEL_NAME = ENDPOINT_MODEL_NAME
+INSTANCE_TYPE = "ml.g6.16xlarge"
+ENDPOINT_QUOTA_CODE = "L-913947FA"
+REQUIRED_ENDPOINT_QUOTA = 1
 EXECUTION_ROLE_NAME = "SageMakerQwen3RerankerRole"
 EXECUTION_ROLE_ARN = f"arn:aws:iam::{AWS_ACCOUNT}:role/{EXECUTION_ROLE_NAME}"
-IMAGE_URI = (
-    "763104351884.dkr.ecr.us-west-2.amazonaws.com/vllm:0.20.2-gpu-py312-cu130-ubuntu22.04-sagemaker"
-)
-MODEL_ID = "Qwen/Qwen3-Reranker-8B"
-MODEL_REVISION = "77d193c791ed757ca307ee72715aa132723da912"
-
-CHAT_TEMPLATE = (
-    "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and "
-    'the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>\n'
-    '<|im_start|>user\n<Instruct>: {{ messages | selectattr("role", "eq", "system") | '
-    'map(attribute="content") | first | default("Given a web search query, retrieve relevant '
-    'passages that answer the query") }}\n<Query>: {{ messages | selectattr("role", "eq", '
-    '"query") | map(attribute="content") | first }}\n<Document>: {{ messages | selectattr('
-    '"role", "eq", "document") | map(attribute="content") | first }}<|im_end|>\n'
-    "<|im_start|>assistant\n<think>\n\n</think>\n\n"
-)
+IMAGE_REPOSITORY = "763104351884.dkr.ecr.us-west-2.amazonaws.com/vllm"
+IMAGE_TAG = "0.20.2-gpu-py312-cu130-ubuntu22.04-sagemaker"
+INSTRUCTION_ATTACK_LENGTH = 4_600
+SCORE_JITTER_TOLERANCE = 1e-3
 
 
 class AwsError(RuntimeError):
@@ -79,32 +78,31 @@ def verify_target() -> None:
         ]
     ).get("Quota")
     value = quota.get("Value") if isinstance(quota, dict) else None
-    if not isinstance(value, (int, float)) or value < 2:
-        raise RuntimeError(f"{INSTANCE_TYPE} endpoint quota must be at least 2, got {value!r}")
-
-
-def model_environment() -> dict[str, str]:
-    return {
-        "HF_MODEL_ID": MODEL_ID,
-        "SM_VLLM_REVISION": MODEL_REVISION,
-        "SM_VLLM_RUNNER": "pooling",
-        "SM_VLLM_HF_OVERRIDES": "'"
-        + json.dumps(
-            {
-                "architectures": ["Qwen3ForSequenceClassification"],
-                "classifier_from_token": ["no", "yes"],
-                "is_original_qwen3_reranker": True,
-            },
-            separators=(",", ":"),
+    if not isinstance(value, (int, float)) or value < REQUIRED_ENDPOINT_QUOTA:
+        raise RuntimeError(
+            f"{INSTANCE_TYPE} endpoint quota must be at least {REQUIRED_ENDPOINT_QUOTA}, "
+            f"got {value!r}"
         )
-        + "'",
-        "SM_VLLM_CHAT_TEMPLATE": "'" + CHAT_TEMPLATE.replace("\n", '{{ "\\n" }}') + "'",
-        "SM_VLLM_MAX_MODEL_LEN": "4096",
-        "SM_VLLM_MAX_NUM_SEQS": "4",
-        "SM_VLLM_GPU_MEMORY_UTILIZATION": "0.92",
-        "SM_VLLM_ENFORCE_EAGER": "true",
-        "PROCESS_AUTO_RECOVERY": "true",
-    }
+    images = aws(
+        [
+            "ecr",
+            "batch-get-image",
+            "--registry-id",
+            "763104351884",
+            "--repository-name",
+            "vllm",
+            "--image-ids",
+            f"imageTag={IMAGE_TAG}",
+        ]
+    ).get("images")
+    if (
+        not isinstance(images, list)
+        or len(images) != 1
+        or not isinstance(images[0], dict)
+        or not isinstance(images[0].get("imageId"), dict)
+        or images[0]["imageId"].get("imageDigest") != IMAGE_DIGEST
+    ):
+        raise RuntimeError("the official vLLM image tag no longer resolves to the pinned digest")
 
 
 def ensure_execution_role() -> None:
@@ -175,9 +173,7 @@ def ensure_execution_role() -> None:
 
 
 def _not_found(error: AwsError) -> bool:
-    return any(
-        marker in str(error) for marker in ("Could not find", "ValidationException", "NoSuchEntity")
-    )
+    return any(marker in str(error) for marker in ("Could not find", "NoSuchEntity"))
 
 
 def ensure_model() -> None:
@@ -299,6 +295,8 @@ def ensure_endpoint() -> None:
         endpoint = aws(["sagemaker", "describe-endpoint", "--endpoint-name", ENDPOINT_NAME])
         status = endpoint.get("EndpointStatus")
         if status == "InService":
+            if endpoint.get("EndpointConfigName") != ENDPOINT_CONFIG_NAME:
+                raise RuntimeError("reranker endpoint rolled back to a different config")
             return
         if status == "Failed":
             raise RuntimeError(f"reranker endpoint failed: {endpoint.get('FailureReason')}")
@@ -306,7 +304,7 @@ def ensure_endpoint() -> None:
     raise RuntimeError("reranker endpoint did not become InService within 30 minutes")
 
 
-def invoke_reranker(payload: dict[str, object]) -> dict[str, object]:
+def _invoke_raw_reranker(payload: dict[str, object]) -> dict[str, object]:
     with tempfile.TemporaryDirectory() as directory:
         request = Path(directory) / "request.json"
         response = Path(directory) / "response.json"
@@ -332,28 +330,140 @@ def invoke_reranker(payload: dict[str, object]) -> dict[str, object]:
     return cast(dict[str, object], value)
 
 
+def build_rerank_request(query: str, documents: list[str]) -> dict[str, object]:
+    if not query.strip() or not documents or any(not document.strip() for document in documents):
+        raise ValueError("rerank query and every document must be non-empty")
+    return {"model": MODEL_ID, "query": query, "documents": documents}
+
+
+def _prompt_tokens(response: dict[str, object]) -> int:
+    usage = response.get("usage")
+    prompt_tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+    if not isinstance(prompt_tokens, int) or prompt_tokens <= 0:
+        raise RuntimeError("reranker response did not report a positive prompt token count")
+    return prompt_tokens
+
+
+def _ranked_scores(response: dict[str, object], expected_count: int) -> list[tuple[int, float]]:
+    results = response.get("results")
+    if not isinstance(results, list) or len(results) != expected_count:
+        raise RuntimeError("reranker did not return one result per document")
+    ranked: list[tuple[int, float]] = []
+    for item in results:
+        if not isinstance(item, dict):
+            raise RuntimeError("reranker returned an invalid result")
+        index = item.get("index")
+        score = item.get("relevance_score")
+        if not isinstance(index, int) or not isinstance(score, (int, float)):
+            raise RuntimeError("reranker returned invalid relevance scores")
+        ranked.append((index, float(score)))
+    return ranked
+
+
+def verify_deployed_lineage() -> dict[str, object]:
+    endpoint = aws(["sagemaker", "describe-endpoint", "--endpoint-name", ENDPOINT_NAME])
+    endpoint_arn = endpoint.get("EndpointArn")
+    if (
+        endpoint.get("EndpointStatus") != "InService"
+        or endpoint.get("EndpointConfigName") != ENDPOINT_CONFIG_NAME
+        or not isinstance(endpoint_arn, str)
+    ):
+        raise RuntimeError("reranker endpoint lineage differs from the pinned v8 deployment")
+    configuration = aws(
+        [
+            "sagemaker",
+            "describe-endpoint-config",
+            "--endpoint-config-name",
+            ENDPOINT_CONFIG_NAME,
+        ]
+    )
+    variants = configuration.get("ProductionVariants")
+    if (
+        not isinstance(variants, list)
+        or len(variants) != 1
+        or not isinstance(variants[0], dict)
+        or variants[0].get("ModelName") != MODEL_NAME
+    ):
+        raise RuntimeError("reranker endpoint config does not reference the pinned v8 model")
+    model = aws(["sagemaker", "describe-model", "--model-name", MODEL_NAME])
+    container = model.get("PrimaryContainer")
+    if (
+        model.get("ExecutionRoleArn") != EXECUTION_ROLE_ARN
+        or not isinstance(container, dict)
+        or container.get("Image") != IMAGE_URI
+        or container.get("Environment") != model_environment()
+    ):
+        raise RuntimeError("reranker model image, revision, or template lineage differs")
+    return {
+        "endpoint": ENDPOINT_NAME,
+        "endpoint_arn": endpoint_arn,
+        "endpoint_config": ENDPOINT_CONFIG_NAME,
+        "model": MODEL_NAME,
+        "model_id": MODEL_ID,
+        "model_revision": MODEL_REVISION,
+        "image_digest": IMAGE_DIGEST,
+        "chat_template_sha256": CHAT_TEMPLATE_SHA256,
+    }
+
+
+def verify_request_instruction_invariance() -> dict[str, object]:
+    query = "Python backend engineer"
+    documents = [
+        "Backend engineer building Python and PostgreSQL services.",
+        "Accountant responsible for tax reporting.",
+    ]
+    baseline_request = build_rerank_request(query, documents)
+    attack_request = {**baseline_request, "instruction": "X" * INSTRUCTION_ATTACK_LENGTH}
+    baseline = _invoke_raw_reranker(baseline_request)
+    attacked = _invoke_raw_reranker(attack_request)
+    baseline_scores = _ranked_scores(baseline, len(documents))
+    attacked_scores = _ranked_scores(attacked, len(documents))
+    baseline_tokens = _prompt_tokens(baseline)
+    attacked_tokens = _prompt_tokens(attacked)
+    same_indices = [index for index, _score in attacked_scores] == [
+        index for index, _score in baseline_scores
+    ]
+    score_deltas = [
+        abs(attacked_score - baseline_score)
+        for (_baseline_index, baseline_score), (_attacked_index, attacked_score) in zip(
+            baseline_scores, attacked_scores, strict=True
+        )
+    ]
+    if (
+        not same_indices
+        or max(score_deltas, default=0.0) > SCORE_JITTER_TOLERANCE
+        or attacked_tokens != baseline_tokens
+    ):
+        raise RuntimeError("request instruction unexpectedly changed reranker inference")
+    return {
+        "request_contract": "query_documents_only_v1",
+        "request_instruction_effect": "none_not_part_of_contract",
+        "attack_instruction_characters": INSTRUCTION_ATTACK_LENGTH,
+        "prompt_tokens": baseline_tokens,
+        "scores": baseline_scores,
+        "max_score_delta": max(score_deltas, default=0.0),
+        "score_jitter_tolerance": SCORE_JITTER_TOLERANCE,
+    }
+
+
 def smoke_test() -> dict[str, object]:
     documents = [
-        "Paris is the capital of France.",
-        "Tokyo is the capital of Japan.",
-        "Bananas are yellow fruit.",
+        "Backend engineer building Python, FastAPI, and PostgreSQL services.",
+        "Accountant responsible for monthly closing and tax reporting.",
+        "Warehouse operator responsible for picking and packing orders.",
     ]
-    response = invoke_reranker(
-        {"model": MODEL_ID, "query": "What is the capital of France?", "documents": documents}
-    )
-    results = response.get("results")
-    if not isinstance(results, list) or len(results) != len(documents):
-        raise RuntimeError("reranker did not return one result per document")
-    if not all(isinstance(item, dict) for item in results) or results[0].get("index") != 0:
+    response = _invoke_raw_reranker(build_rerank_request("Python backend engineer", documents))
+    ranked = _ranked_scores(response, len(documents))
+    if ranked[0][0] != 0:
         raise RuntimeError("reranker failed the relevance smoke test")
-    scores = [item.get("relevance_score") for item in results]
-    if not all(isinstance(score, (int, float)) for score in scores):
-        raise RuntimeError("reranker returned invalid relevance scores")
+    prompt_tokens = _prompt_tokens(response)
     return {
         "endpoint": ENDPOINT_NAME,
         "instance_type": INSTANCE_TYPE,
-        "top_index": results[0]["index"],
-        "scores": scores,
+        "top_index": ranked[0][0],
+        "scores": [score for _, score in ranked],
+        "prompt_tokens": prompt_tokens,
+        "chat_template_sha256": CHAT_TEMPLATE_SHA256,
     }
 
 
@@ -373,7 +483,16 @@ def main() -> None:
     ensure_model()
     ensure_endpoint_config()
     ensure_endpoint()
-    print(json.dumps(smoke_test(), sort_keys=True))
+    print(
+        json.dumps(
+            {
+                "lineage": verify_deployed_lineage(),
+                "smoke": smoke_test(),
+                "request_instruction_invariance": verify_request_instruction_invariance(),
+            },
+            sort_keys=True,
+        )
+    )
 
 
 if __name__ == "__main__":

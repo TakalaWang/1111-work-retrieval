@@ -1,5 +1,4 @@
 from collections.abc import Mapping, Sequence
-from datetime import date
 from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
@@ -10,41 +9,14 @@ Query = Annotated[
     StringConstraints(strict=True, strip_whitespace=True, min_length=1, max_length=512),
 ]
 JobId = Annotated[str, StringConstraints(strict=True, pattern=r"^[0-9]+$")]
-MIN_SEARCH_DATE = date(1, 7, 1)
-MAX_SEARCH_DATE = date(9999, 12, 30)
-SearchDate = Annotated[
-    date,
-    Field(
-        strict=True,
-        ge=MIN_SEARCH_DATE,
-        le=MAX_SEARCH_DATE,
-        description="ISO date from 0001-07-01 through 9999-12-30 inclusive.",
-    ),
-]
 
 
 class SearchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query: Query
-    search_date: SearchDate | None = None
     location_code: list[Code] = Field(default_factory=list)
     duty_code: list[Code] = Field(default_factory=list)
-
-    @field_validator("search_date", mode="before")
-    @classmethod
-    def parse_iso_date(cls, value: object) -> date | None:
-        if value is None:
-            return value
-        if not isinstance(value, str):
-            raise ValueError("search_date must be an ISO date")
-        try:
-            parsed = date.fromisoformat(value)
-        except ValueError as error:
-            raise ValueError("search_date must be an ISO date") from error
-        if parsed.isoformat() != value:
-            raise ValueError("search_date must be an ISO date")
-        return parsed
 
     @field_validator("location_code", "duty_code")
     @classmethod

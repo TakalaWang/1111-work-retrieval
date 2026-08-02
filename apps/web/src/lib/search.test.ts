@@ -11,31 +11,18 @@ import {
 
 const REQUEST = {
   query: '工程師',
-  search_date: '2026-06-08',
   location_code: [],
   duty_code: []
 };
 
 describe('search API boundary', () => {
-  it('trims the query and omits a blank search date', () => {
+  it('trims the query', () => {
     expect(
       serializeSearch({
-        query: '  後端工程師  ',
-        searchDate: ''
+        query: '  後端工程師  '
       })
     ).toEqual({
       query: '後端工程師',
-      location_code: [],
-      duty_code: []
-    });
-  });
-
-  it('serializes an explicitly selected search date', () => {
-    expect(
-      serializeSearch({ query: '工程師', searchDate: '2026-06-09' })
-    ).toEqual({
-      query: '工程師',
-      search_date: '2026-06-09',
       location_code: [],
       duty_code: []
     });
@@ -331,7 +318,7 @@ describe('search API boundary', () => {
     });
 
     await expect(
-      searchJobDetails({ query: ' 工程師 ', searchDate: '2026-06-08' }, fetcher)
+      searchJobDetails({ query: ' 工程師 ' }, fetcher)
     ).resolves.toEqual({
       requestId: 'req_1',
       failedCount: 1,
@@ -359,7 +346,7 @@ describe('search API boundary', () => {
     });
 
     await expect(
-      searchJobDetails({ query: '工程師', searchDate: '2026-06-08' }, fetcher)
+      searchJobDetails({ query: '工程師' }, fetcher)
     ).rejects.toEqual(
       new ApiError('找到職缺，但詳細資料目前無法載入。', 'req_all_failed')
     );

@@ -8,7 +8,6 @@ type ErrorResponse = components['schemas']['ErrorResponse'];
 
 export interface SearchForm {
   query: string;
-  searchDate?: string;
   locationCodes?: string[];
   dutyCodes?: string[];
 }
@@ -128,8 +127,7 @@ export function serializeSearch(form: SearchForm): SearchRequest {
   return {
     query: form.query.trim(),
     location_code: form.locationCodes ?? [],
-    duty_code: form.dutyCodes ?? [],
-    ...(form.searchDate ? { search_date: form.searchDate } : {})
+    duty_code: form.dutyCodes ?? []
   };
 }
 

@@ -1,6 +1,16 @@
+from work_retrieval_core.constraints import (
+    EducationConstraint,
+    JobAttributeConstraint,
+    ManagementConstraint,
+    MonthlySalaryConstraint,
+    NoExperienceConstraint,
+    QueryConstraints,
+    WorkShiftConstraint,
+)
 from work_retrieval_core.engine import (
     CandidateEvidence,
     CandidateRequest,
+    CandidateReranker,
     CandidateRetriever,
     CompiledQuery,
     JobMetadata,
@@ -19,18 +29,33 @@ from work_retrieval_core.engine import (
     SearchUnavailableError,
 )
 from work_retrieval_core.manifest import Artifact, RuntimeManifest
+from work_retrieval_core.ranking import (
+    BusinessEvidence,
+    CandidateEvidenceGate,
+    evidence_preserving_rank,
+    weighted_rrf_pool,
+)
 
 __all__ = [
     "Artifact",
+    "BusinessEvidence",
     "CandidateEvidence",
+    "CandidateEvidenceGate",
     "CandidateRequest",
+    "CandidateReranker",
     "CandidateRetriever",
     "CompiledQuery",
+    "EducationConstraint",
+    "JobAttributeConstraint",
     "JobMetadata",
     "JobMetadataLookup",
     "LaneTrace",
+    "ManagementConstraint",
+    "MonthlySalaryConstraint",
+    "NoExperienceConstraint",
     "ProductionSearchEngine",
     "QueryCompiler",
+    "QueryConstraints",
     "QueryRewrite",
     "RankEvidence",
     "ResultTrace",
@@ -41,4 +66,7 @@ __all__ = [
     "SearchQuery",
     "SearchResult",
     "SearchUnavailableError",
+    "WorkShiftConstraint",
+    "evidence_preserving_rank",
+    "weighted_rrf_pool",
 ]

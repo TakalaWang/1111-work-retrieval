@@ -1,0 +1,66 @@
+# Reranker Evidence Fusion Design
+
+## Decision
+
+The Qwen3 reranker remains a bounded second-stage signal. It must not replace the
+first-stage order without a measured promotion gate. The experiment compares the
+same frozen 339 queries, candidate membership, job text, and reranker scores while
+varying only candidate depth, fusion policy, and BM25 prefix protection.
+
+## Candidate and score contract
+
+- Build at most 50 unique candidates from the temporal BM25 and whole-JD Qwen
+  Dense rankings with weighted RRF (`BM25=4`, `Dense=1`, `k=60`).
+- Score the largest pool once with the pinned Qwen3-Reranker-8B v7 endpoint.
+- Reuse those immutable scores for depths 20, 30, and 50.
+- Never send history, labels, qrels, clicks, or applications to the endpoint.
+- Preserve hard-filter and 180-day eligibility before candidate generation.
+
+## Compared ranking policies
+
+1. `direct`: reranker rank replaces the candidate-pool order.
+2. `rank_fusion`: prior weighted-RRF rank and reranker rank are combined using
+   RRF; raw scores are not mixed across queries.
+3. `protected_rank_fusion`: the same fusion with BM25 prefix depths 1, 3, or 10
+   kept at their original positions. Protection depth 0 is the requested
+   unprotected variant. Depth 1 is required because the sealed Top-10 diagnostic
+   improved NDCG and MRR while preserving Top-1.
+
+The sweep changes one variable at a time: pool depth 20/30/50, BM25 protection
+0/1/3/10, and reranker rank weight. The first-stage weight and endpoint output stay
+fixed.
+
+## Promotion rule
+
+Primary selection uses GT1 NDCG@10, then Top-1 and MRR. A production-active
+variant must not regress NDCG@10, Precision@10, Top-1, or MRR against the sealed
+incumbent. If none passes, production keeps reranking in shadow; the winning
+non-regressing fusion code may be retained behind the active gate.
+
+## Serving behavior
+
+Production accepts no unverified fallback. The reranker pool is bounded at the
+experiment-selected depth, the response must be a permutation of the request,
+and failure is fail-closed. Shadow mode records the challenger trace without
+changing results. Active mode uses only the experimentally promoted fusion
+policy and appends the untouched suffix.
+
+## Relevance and business-signal boundary
+
+Qwen judges only query-to-JD suitability. It does not infer popularity. A job may
+be promoted only when hard constraints agree, the pinned Qwen suitability score
+passes the promoted threshold, and either occupation/title evidence agrees or
+both BM25 and whole-Dense support the candidate. Skill-only Graph or multi-view
+evidence for a different occupation remains tail evidence and an explanation
+trace; it cannot enter the promotable set.
+
+Popularity is a train-period, position-adjusted job prior with time cutoff,
+Bayesian smoothing, and bounded contribution. Completeness is deterministic from
+immutable JD fields such as title, location, salary, schedule, requirements,
+skills, and description. Neither signal can create candidates, bypass the
+relevance gate, or independently place a job in Top 3.
+
+BM25 remains the required incumbent lane. Graph and multi-view are independent
+candidate/evidence lanes rather than replacements for BM25. Exact multi-view
+MaxSim is not a production adapter; active multi-view requires a separately
+verified ANN index and identical eligibility filtering.

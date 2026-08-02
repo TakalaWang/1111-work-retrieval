@@ -19,6 +19,7 @@ from typing import cast
 import numpy as np
 import promote_runtime_artifacts as contract
 from work_retrieval_core.adapters import CorpusQueryCompiler
+from work_retrieval_core.manifest import semantic_reranker_manifest
 
 WHOLE_DESTINATION = Path("runtime") / contract.WHOLE_RUNTIME_PREFIX
 TANTIVY_DESTINATION = Path("runtime") / contract.TANTIVY_RUNTIME_PREFIX
@@ -69,6 +70,7 @@ TANTIVY_BUILD_KEYS = {
     "tokenizers",
     "source_fields",
     "source_csv_fields",
+    "salary_filter_excluded_rows",
 }
 
 
@@ -512,6 +514,12 @@ def materialize(
         tantivy_build = _read_object(tantivy_build_manifest_path, "Tantivy build manifest")
         if set(tantivy_build) != TANTIVY_BUILD_KEYS:
             raise RuntimeError("Tantivy build manifest schema differs")
+        if (
+            not isinstance(tantivy_build["salary_filter_excluded_rows"], int)
+            or isinstance(tantivy_build["salary_filter_excluded_rows"], bool)
+            or not 0 <= tantivy_build["salary_filter_excluded_rows"] <= rows
+        ):
+            raise RuntimeError("Tantivy salary filter exclusion count is invalid")
         contract._require_equal(
             "Tantivy build",
             {
@@ -771,7 +779,10 @@ def materialize(
                         "temporal_filter_semantics": contract.TEMPORAL_FILTER_SEMANTICS,
                     },
                 },
-                "challengers": {name: {"enabled": False} for name in contract.CHALLENGERS},
+                "challengers": {
+                    **{name: {"enabled": False} for name in contract.CHALLENGERS},
+                    "semantic_reranker": semantic_reranker_manifest(),
+                },
             },
         }
         _write_json(temporary / release_spec_path, release_spec)

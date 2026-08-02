@@ -34,7 +34,10 @@ import type { Construct } from 'constructs';
 const EMBEDDING_ENDPOINT_NAME = 'qwen3-embedding-8b-20260801-031826';
 const EMBEDDING_ENDPOINT_CONFIG_NAME = EMBEDDING_ENDPOINT_NAME;
 const EMBEDDING_MODEL_NAME = EMBEDDING_ENDPOINT_NAME;
-const RERANKER_ENDPOINT_NAME = 'work-retrieval-qwen3-reranker-8b';
+const RERANKER_ENDPOINT_NAME = 'work-retrieval-qwen3-reranker-8b-v8-business';
+const RERANKER_ENDPOINT_CONFIG_NAME =
+  'work-retrieval-qwen3-reranker-8b-v8-business-g6-16xl';
+const RERANKER_MODEL_NAME = 'work-retrieval-qwen3-reranker-8b-v8-business';
 const PRODUCTION_DOMAIN_NAME = '1111.takalawang.dev';
 const PRODUCTION_CERTIFICATE_ARN =
   'arn:aws:acm:us-east-1:378849533305:certificate/c76499fc-2946-41f4-bc40-3cec2859fffe';
@@ -224,9 +227,13 @@ export class PlatformStack extends Stack {
       EMBEDDING_ENDPOINT_CONFIG_NAME,
       EMBEDDING_MODEL_NAME,
       RERANKER_ENDPOINT_NAME,
-      SEARCH_ENABLE_DENSE_SHADOW: 'false',
+      RERANKER_ENDPOINT_CONFIG_NAME,
+      RERANKER_MODEL_NAME,
+      SEARCH_ENABLE_DENSE_SHADOW: 'true',
+      SEARCH_DEMO_AS_OF: '2026-06-08',
       SEARCH_ENABLE_GRAPH: enableGraph.valueAsString,
       SEARCH_ENABLE_MULTIVIEW_MAXSIM: 'false',
+      SEARCH_ENABLE_RERANKER: 'active',
       SEARCH_PORT_FACTORY:
         'work_retrieval_api.production:create_production_ports',
       SEARCH_RUNTIME_MANIFEST_PATH: '/tmp/work-retrieval-runtime/manifest.json',
@@ -676,7 +683,10 @@ function grantApiRuntimeAccess(
   taskDefinition.addToTaskRolePolicy(
     new iam.PolicyStatement({
       actions: ['sagemaker:DescribeEndpoint'],
-      resources: [sagemakerEndpointArn(stack, EMBEDDING_ENDPOINT_NAME)]
+      resources: [
+        sagemakerEndpointArn(stack, EMBEDDING_ENDPOINT_NAME),
+        sagemakerEndpointArn(stack, RERANKER_ENDPOINT_NAME)
+      ]
     })
   );
   taskDefinition.addToTaskRolePolicy(
@@ -687,6 +697,11 @@ function grantApiRuntimeAccess(
           service: 'sagemaker',
           resource: 'endpoint-config',
           resourceName: EMBEDDING_ENDPOINT_CONFIG_NAME
+        }),
+        stack.formatArn({
+          service: 'sagemaker',
+          resource: 'endpoint-config',
+          resourceName: RERANKER_ENDPOINT_CONFIG_NAME
         })
       ]
     })
@@ -699,6 +714,11 @@ function grantApiRuntimeAccess(
           service: 'sagemaker',
           resource: 'model',
           resourceName: EMBEDDING_MODEL_NAME
+        }),
+        stack.formatArn({
+          service: 'sagemaker',
+          resource: 'model',
+          resourceName: RERANKER_MODEL_NAME
         })
       ]
     })
