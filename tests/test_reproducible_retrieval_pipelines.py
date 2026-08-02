@@ -664,6 +664,8 @@ def test_graph_ablation_wrapper_generates_before_evaluation() -> None:
     assert source.count('--tantivy-output "$8"') == 3
     assert source.count('--evidence "$3"') == 2
     assert source.count('--extraction-manifest "$4"') == 2
+    assert "evaluate_trec_runs.py" in source
+    assert "GRAPH_EVALUATOR_KIND:-train_semantic_proxy" in source
     assert "OFF_RUN" not in source
 
 

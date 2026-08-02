@@ -310,7 +310,9 @@ Graph-on/off 的正式單一入口是 `scripts/run_graph_ablation.sh`：它只�
 JSONL（`qid`、`query`、含 timezone 的 `as_of`、`location_codes`、`duty_codes`），先由已驗證的 temporal-v3
 Tantivy 重建 `graph_off`，再由 train-only Graph 產生 bounded typed bridge terms，以相同時間、地區、職務、
 可見性與 180-day freshness 邊界回查該 Tantivy eligible universe；因此 `graph_on` 可納入不在 baseline
-或歷史 Graph Job 節點中的新職缺，但不能沿 train Job edge 直接回傳舊職缺。兩者最後交給外部 evaluator，
+或歷史 Graph Job 節點中的新職缺，但不能沿 train Job edge 直接回傳舊職缺。兩者預設交給 repository 內建的
+`scripts/evaluate_trec_runs.py` 計算 NDCG@10、Precision@10、Top-1 與 MRR；正式 organizer evaluator 可用
+`GRAPH_EVALUATOR_COMMAND`、`GRAPH_EVALUATOR_ID`、`GRAPH_EVALUATOR_KIND=organizer` 覆寫，
 runner 同時強制讀取 pinned extraction evidence 與 extraction manifest，重建並逐 bytes 驗證六張 Graph 表，
 不接受只在 Graph 內部自洽的預建 artifact。
 離線 runner 與 production adapter 共用同一份 Graph serving policy、implementation SHA 與固定輸入 golden

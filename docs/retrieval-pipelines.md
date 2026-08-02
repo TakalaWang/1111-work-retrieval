@@ -356,10 +356,16 @@ scripts/run_graph_ablation.sh \
   artifacts/evaluations/queries.canonical.jsonl \
   dataset/職缺.csv \
   artifacts/experiments/tantivy-bm25-temporal-v3 \
-  'uv run python <organizer-evaluator.py>' \
-  organizer-v1 organizer 0.001 \
+  0.001 \
   artifacts/evaluations/graph-ablation/<experiment-id>
 ```
+
+The default evaluator is the committed `scripts/evaluate_trec_runs.py`, which reports NDCG@10,
+Precision@10, Top-1 and MRR over the complete qrels query universe. To bind an organizer-owned
+evaluator and permit the separate promotion attestation, set
+`GRAPH_EVALUATOR_COMMAND`, `GRAPH_EVALUATOR_ID` and `GRAPH_EVALUATOR_KIND=organizer` for the same
+command. The default is deliberately recorded as `train_semantic_proxy`, never as an official
+organizer score.
 
 The output directory must not already exist. It contains `baseline/graph-off.run`, its immutable
 manifest, `generated/graph-on.run`, the Graph-on manifest, `generated/graph-traces.jsonl`, and
