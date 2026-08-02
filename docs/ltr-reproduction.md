@@ -11,11 +11,11 @@ exposed `(context, job)` pairs: 289 label-0 rows, 40 clicks and 9 applications. 
 contexts, 56 had fewer than two exposed candidates and 61 had no positive candidate. The GT1
 validation result regressed from the temporal BM25 baseline:
 
-| Variant | NDCG@10 | Precision@10 | Top-1 | MRR |
-| --- | ---: | ---: | ---: | ---: |
-| Temporal BM25 | 0.057719 | 0.029128 | 0.082569 | 0.101809 |
-| IPS LambdaRank, no Graph | 0.020470 | 0.015826 | 0.011468 | 0.058096 |
-| IPS LambdaRank, with Graph | 0.027741 | 0.020872 | 0.020642 | 0.066902 |
+| Variant                    |  NDCG@10 | Precision@10 |    Top-1 |      MRR |
+| -------------------------- | -------: | -----------: | -------: | -------: |
+| Temporal BM25              | 0.057719 |     0.029128 | 0.082569 | 0.101809 |
+| IPS LambdaRank, no Graph   | 0.020470 |     0.015826 | 0.011468 | 0.058096 |
+| IPS LambdaRank, with Graph | 0.027741 |     0.020872 | 0.020642 | 0.066902 |
 
 The five-context GT2 validation was too small for promotion, and GT3 had no strictly
 post-threshold validation searches. The model therefore failed promotion; this document is not a
@@ -88,11 +88,11 @@ Each JSONL input row has exactly these fields:
   "job_index": 123,
   "label": 1,
   "exposure_rank": 3,
-  "lane_ranks": {"lexical_temporal": 1, "dense_mrl_1024": 8},
+  "lane_ranks": { "lexical_temporal": 1, "dense_mrl_1024": 8 },
   "concept_count": 2,
-  "concept_ranks": {"python": 4},
+  "concept_ranks": { "python": 4 },
   "structured_intents": 1,
-  "graph_path_scores": {"python": 0.8},
+  "graph_path_scores": { "python": 0.8 },
   "freshness": 0.5,
   "future_snapshot": false
 }
