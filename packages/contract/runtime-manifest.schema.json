@@ -202,7 +202,7 @@
         "updated_at_field": { "const": "updated_at_epoch_ms" },
         "hard_filters": { "const": true },
         "temporal_filter_semantics": {
-          "const": "updated_at >= as_of - 180 days before Top-K; updated_at > as_of retained with freshness=0"
+          "const": "updated_at >= as_of - 180 days before Top-K; future snapshots retained with freshness 0"
         }
       }
     },
