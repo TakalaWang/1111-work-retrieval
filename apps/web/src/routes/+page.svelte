@@ -3,6 +3,8 @@
 
   let query = $state('');
   let searchDate = $state('2026-06-08');
+  let locationCodes = $state('');
+  let dutyCodes = $state('');
   let loading = $state(false);
   let searched = $state(false);
   /** @type {import('$lib/search').PresentedJob[]} */
@@ -24,7 +26,9 @@
     try {
       const outcome = await searchJobDetails({
         query,
-        searchDate: searchDate || undefined
+        searchDate: searchDate || undefined,
+        locationCodes,
+        dutyCodes
       });
       jobs = outcome.jobs;
       failedCount = outcome.failedCount;
@@ -66,31 +70,59 @@
         void submit();
       }}
     >
-      <label class="sr-only" for="job-query">搜尋職缺</label>
-      <input
-        id="job-query"
-        bind:value={query}
-        type="search"
-        name="query"
-        required
-        maxlength="512"
-        autocomplete="off"
-        placeholder="輸入職務、技能或工作地點"
-      />
-      <button type="submit" disabled={loading || !query.trim()}>
-        {loading ? '搜尋中…' : '搜尋'}
-      </button>
+      <div class="query-row">
+        <label class="sr-only" for="job-query">搜尋職缺</label>
+        <input
+          id="job-query"
+          bind:value={query}
+          type="search"
+          name="query"
+          required
+          maxlength="512"
+          autocomplete="off"
+          placeholder="輸入職務、技能或工作地點"
+        />
+        <button type="submit" disabled={loading || !query.trim()}>
+          {loading ? '搜尋中…' : '搜尋'}
+        </button>
+      </div>
+      <div class="controls">
+        <label for="search-date">
+          <span>搜尋日期（競賽 Demo）</span>
+          <input
+            id="search-date"
+            bind:value={searchDate}
+            type="date"
+            name="search_date"
+            disabled={loading}
+          />
+        </label>
+        <label for="location-codes">
+          <span>區域代碼（選填）</span>
+          <input
+            id="location-codes"
+            bind:value={locationCodes}
+            type="text"
+            name="location_code"
+            autocomplete="off"
+            placeholder="100100, 100200"
+            disabled={loading}
+          />
+        </label>
+        <label for="duty-codes">
+          <span>工作代碼（選填）</span>
+          <input
+            id="duty-codes"
+            bind:value={dutyCodes}
+            type="text"
+            name="duty_code"
+            autocomplete="off"
+            placeholder="140200, 140300"
+            disabled={loading}
+          />
+        </label>
+      </div>
     </form>
-    <div class="controls">
-      <label for="search-date">搜尋日期（競賽 Demo）</label>
-      <input
-        id="search-date"
-        bind:value={searchDate}
-        type="date"
-        name="search_date"
-        disabled={loading}
-      />
-    </div>
   </section>
 
   <section class="results" aria-live="polite" aria-busy={loading}>
@@ -273,7 +305,7 @@
     line-height: 1.55;
   }
 
-  form {
+  .query-row {
     display: flex;
     padding: 0.35rem;
     border: 1px solid #cfd1d5;
@@ -285,14 +317,14 @@
       box-shadow 160ms ease;
   }
 
-  form:focus-within {
+  .query-row:focus-within {
     border-color: #d7195f;
     box-shadow:
       0 0 0 3px rgb(215 25 95 / 12%),
       0 8px 28px rgb(32 33 36 / 9%);
   }
 
-  form input {
+  .query-row input {
     min-width: 0;
     min-height: 3.25rem;
     flex: 1;
@@ -303,7 +335,7 @@
     color: inherit;
   }
 
-  form input::placeholder {
+  .query-row input::placeholder {
     color: #767980;
   }
 
@@ -341,19 +373,25 @@
   }
 
   .controls {
-    display: flex;
-    align-items: center;
-    gap: 0.65rem;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    align-items: end;
+    gap: 0.75rem;
     margin-top: 0.75rem;
     color: #686b72;
     font-size: 0.82rem;
   }
 
   .controls label {
+    display: grid;
+    min-width: 0;
+    gap: 0.4rem;
     font-weight: 700;
   }
 
   .controls input {
+    width: 100%;
+    min-width: 0;
     min-height: 2.75rem;
     border: 1px solid #cfd1d5;
     border-radius: 0.5rem;
@@ -584,7 +622,7 @@
       padding-top: 2rem;
     }
 
-    form {
+    .query-row {
       display: grid;
     }
 
@@ -593,7 +631,7 @@
     }
 
     .controls {
-      flex-wrap: wrap;
+      grid-template-columns: 1fr;
     }
 
     .result-summary {
@@ -610,7 +648,7 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    form,
+    .query-row,
     button {
       transition: none;
     }

@@ -41,6 +41,20 @@ describe('search API boundary', () => {
     });
   });
 
+  it('serializes comma-separated location and duty codes', () => {
+    expect(
+      serializeSearch({
+        query: '工程師',
+        locationCodes: ' 100100, , 100200 ',
+        dutyCodes: '140200，140300'
+      })
+    ).toEqual({
+      query: '工程師',
+      location_code: ['100100', '100200'],
+      duty_code: ['140200', '140300']
+    });
+  });
+
   it('posts the committed request shape to the relative API path', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(JSON.stringify({ request_id: 'req_1', result: [] }), {
