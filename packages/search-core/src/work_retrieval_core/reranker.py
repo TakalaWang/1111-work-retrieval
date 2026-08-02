@@ -66,7 +66,7 @@ class SemanticReranker:
         runtime = boto3.client("sagemaker-runtime", region_name=region_name, config=config)
         return cls(endpoint_name, documents, runtime)
 
-    def rerank(self, query: str, job_ids: tuple[str, ...], limit: int) -> tuple[str, ...]:
+    def score(self, query: str, job_ids: tuple[str, ...]) -> Mapping[str, float]:
         normalized_query = query.strip() if isinstance(query, str) else ""
         if not normalized_query:
             raise ValueError("reranker query must be non-empty")
@@ -79,10 +79,8 @@ class SemanticReranker:
             raise ValueError("reranker job IDs must be unique")
         if len(job_ids) > MAX_DOCUMENTS:
             raise ValueError("reranker accepts at most 50 documents")
-        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
-            raise ValueError("reranker limit must be a positive integer")
         if not job_ids:
-            return ()
+            return {}
 
         values = self._documents.job_documents_for_job_ids(job_ids)
         if not isinstance(values, Mapping):
@@ -112,11 +110,7 @@ class SemanticReranker:
             CustomAttributes="route=/v1/rerank",
         )
         scores = _response_scores(response, len(job_ids))
-        ranked = sorted(
-            enumerate(job_ids),
-            key=lambda item: (-scores[item[0]], item[0], item[1]),
-        )
-        return tuple(job_id for _position, job_id in ranked[:limit])
+        return {job_id: scores[index] for index, job_id in enumerate(job_ids)}
 
     def close(self) -> None:
         pass

@@ -22,6 +22,11 @@ from work_retrieval_core.constraints import (
     work_shift_allows,
 )
 from work_retrieval_core.manifest import RuntimeManifest
+from work_retrieval_core.ranking import (
+    BusinessEvidence,
+    CandidateEvidenceGate,
+    evidence_preserving_rank,
+)
 from work_retrieval_core.serialization import canonical_code
 
 CANDIDATE_LIMIT = 200
@@ -122,7 +127,7 @@ class QueryCompiler(Protocol):
 
 @runtime_checkable
 class CandidateReranker(Protocol):
-    def rerank(self, query: str, job_ids: tuple[str, ...], limit: int) -> tuple[str, ...]: ...
+    def score(self, query: str, job_ids: tuple[str, ...]) -> Mapping[str, float]: ...
 
     def close(self) -> None: ...
 
@@ -472,36 +477,78 @@ class ProductionSearchEngine:
             if pool:
                 reranker_failed = False
                 try:
-                    reranked = self._ports.reranker.rerank(query.text, pool, len(pool))
+                    scores = self._ports.reranker.score(query.text, pool)
                 except Exception as error:
                     if self._reranker_mode == "active":
                         raise SearchUnavailableError("reranker failed") from error
                     reranker_trace = LaneTrace("reranker", "failed", "shadow_call_failed", 0)
                     reranker_failed = True
-                    reranked = ()
+                    scores = {}
                 invalid = (
-                    not isinstance(reranked, tuple)
-                    or len(reranked) != len(pool)
-                    or len(set(reranked)) != len(reranked)
-                    or set(reranked) != set(pool)
+                    not isinstance(scores, Mapping)
+                    or set(scores) != set(pool)
+                    or any(
+                        not isinstance(score, (int, float))
+                        or isinstance(score, bool)
+                        or not isfinite(score)
+                        or not 0.0 <= score <= 1.0
+                        for score in scores.values()
+                    )
                 )
                 if not reranker_failed and invalid:
                     if self._reranker_mode == "active":
                         raise SearchUnavailableError("reranker violated its serving contract")
                     reranker_trace = LaneTrace("reranker", "failed", "shadow_contract_violation", 0)
+                    scores = {}
+                if scores:
+                    prior_rank = {job_id: rank for rank, job_id in enumerate(pool)}
+                    reranked = tuple(
+                        sorted(
+                            pool,
+                            key=lambda job_id: (-scores[job_id], prior_rank[job_id], job_id),
+                        )
+                    )
+                else:
                     reranked = ()
             else:
                 reranked = ()
             if reranked:
                 if self._reranker_mode == "active":
                     pool_set = set(pool)
+                    gates = {
+                        job_id: _candidate_gate(
+                            job_id,
+                            ranked_candidates[job_id],
+                            request=request,
+                            suitability=float(scores[job_id]),
+                            hard_constraints_match=(
+                                constraint_filter
+                                != "relaxed_query_text_constraints_after_zero"
+                            ),
+                        )
+                        for job_id in pool
+                    }
+                    fused = evidence_preserving_rank(
+                        pool,
+                        reranked,
+                        gates,
+                        protected_prefix=1,
+                        suitability_threshold=0.9,
+                        reranker_weight=0.5,
+                        business_weight=0.0,
+                    )
                     ordered_ids = (
-                        *reranked,
+                        *fused,
                         *(item.job_id for item in scored if item.job_id not in pool_set),
                     )
                     by_id = {item.job_id: item for item in scored}
                     scored = [by_id[job_id] for job_id in ordered_ids]
-                    reranker_trace = LaneTrace("reranker", "enabled", "ranking_active", len(pool))
+                    reranker_trace = LaneTrace(
+                        "reranker",
+                        "enabled",
+                        "relevance_gated_rank_fusion_top1_protected",
+                        len(pool),
+                    )
                 else:
                     reranker_trace = LaneTrace("reranker", "enabled", "shadow_scored", len(pool))
             elif not pool:
@@ -803,6 +850,33 @@ def _filter_status(requested: tuple[str, ...], returned: int) -> str:
 
 def _remaining(deadline: float) -> float:
     return max(0.0, deadline - monotonic())
+
+
+def _candidate_gate(
+    job_id: str,
+    candidate: _RankedCandidate,
+    *,
+    request: CandidateRequest,
+    suitability: float,
+    hard_constraints_match: bool,
+) -> CandidateEvidenceGate:
+    lanes = {item.lane for item in candidate.evidence}
+    return CandidateEvidenceGate(
+        job_id=job_id,
+        llm_suitability=suitability,
+        hard_constraints_match=hard_constraints_match,
+        occupation_match=bool(
+            request.duty_codes
+            and set(request.duty_codes).intersection(candidate.metadata.duty_codes)
+        ),
+        bm25_supported="tantivy_bm25_full_jd" in lanes,
+        dense_supported=bool(
+            lanes.intersection(
+                {"qwen_dense_whole_jd", "qwen_dense_multiview_maxsim"}
+            )
+        ),
+        business=BusinessEvidence(popularity=0.0, completeness=0.0),
+    )
 
 
 def _reranker_pool_ids(candidates: Mapping[str, _RankedCandidate]) -> tuple[str, ...]:

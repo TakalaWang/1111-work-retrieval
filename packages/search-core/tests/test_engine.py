@@ -235,15 +235,18 @@ class StubQueryCompiler:
 
 class StubReranker:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, tuple[str, ...], int]] = []
+        self.calls: list[tuple[str, tuple[str, ...]]] = []
         self.error: Exception | None = None
         self.closed = False
 
-    def rerank(self, query: str, job_ids: tuple[str, ...], limit: int) -> tuple[str, ...]:
-        self.calls.append((query, job_ids, limit))
+    def score(self, query: str, job_ids: tuple[str, ...]) -> dict[str, float]:
+        self.calls.append((query, job_ids))
         if self.error is not None:
             raise self.error
-        return tuple(reversed(job_ids))[:limit]
+        return {
+            job_id: 0.95 + position / 1000
+            for position, job_id in enumerate(job_ids)
+        }
 
     def close(self) -> None:
         self.closed = True
@@ -627,19 +630,47 @@ def test_reranker_pool_is_bm25_top_ten_then_rrf60_whole_dense_union() -> None:
         (
             "工程師",
             (*tuple(str(index) for index in range(1, 11)), "11", "12", "13"),
-            13,
         )
     ]
-    assert result.job_ids == ("13", "12", "11")
-    dense_only = next(item for item in result.trace.results if item.job_id == "13")
-    assert dense_only.evidence[0].lane == "qwen_dense_whole_jd"
-    assert dense_only.evidence[0].ranking_contribution == 0.0
+    assert result.job_ids == ("1", "11", "2")
     reranker_lane = next(lane for lane in result.trace.lanes if lane.name == "reranker")
     assert (reranker_lane.status, reranker_lane.reason, reranker_lane.candidate_count) == (
         "enabled",
-        "ranking_active",
+        "relevance_gated_rank_fusion_top1_protected",
         13,
     )
+    engine.close()
+
+
+def test_reranker_can_only_promote_same_occupation_or_cross_modal_candidates() -> None:
+    lexical = StubRetriever(
+        tuple(_candidate(str(index), float(10 - index), index) for index in range(1, 5))
+    )
+    dense = StubRetriever(
+        (
+            _candidate("4", 0.9, 1),
+            _candidate("5", 0.8, 2),
+        )
+    )
+    reranker = StubReranker()
+    engine = ProductionSearchEngine(
+        RuntimeManifest.from_dict(_manifest()),
+        RetrievalPorts(
+            lexical,
+            dense,
+            StubMetadata(tuple(_metadata(str(index), 0) for index in range(1, 6))),
+            reranker=reranker,
+        ),
+        enable_dense_shadow=True,
+        reranker_mode="active",
+        clock=lambda: DEMO_AS_OF,
+    )
+
+    result = engine.search(SearchQuery("工程師"), limit=5)
+
+    assert result.job_ids[0] == "1"
+    assert result.job_ids.index("4") < 3
+    assert result.job_ids[-1] == "5"
     engine.close()
 
 
@@ -688,8 +719,8 @@ def test_reranker_preserves_non_pool_suffix_and_full_membership() -> None:
 
     result = engine.search(SearchQuery("工程師"), limit=3)
 
-    assert reranker.calls == [("工程師", ("1", "2"), 2)]
-    assert result.job_ids == ("2", "1", "3")
+    assert reranker.calls == [("工程師", ("1", "2"))]
+    assert result.job_ids == ("1", "2", "3")
     engine.close()
 
 
@@ -730,7 +761,7 @@ def test_shadow_reranker_scores_without_reordering_and_failure_keeps_incumbent()
     )
     result = engine.search(SearchQuery("工程師"), limit=3)
     assert result.job_ids == ("1", "2", "3")
-    assert reranker.calls == [("工程師", ("1", "2", "3"), 3)]
+    assert reranker.calls == [("工程師", ("1", "2", "3"))]
     trace = next(lane for lane in result.trace.lanes if lane.name == "reranker")
     assert (trace.status, trace.reason) == ("enabled", "shadow_scored")
     engine.close()

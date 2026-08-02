@@ -47,11 +47,11 @@ class StubMetadata:
 
 class StubReranker:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, tuple[str, ...], int]] = []
+        self.calls: list[tuple[str, tuple[str, ...]]] = []
 
-    def rerank(self, query: str, job_ids: tuple[str, ...], limit: int) -> tuple[str, ...]:
-        self.calls.append((query, job_ids, limit))
-        return tuple(reversed(job_ids))
+    def score(self, query: str, job_ids: tuple[str, ...]) -> dict[str, float]:
+        self.calls.append((query, job_ids))
+        return {job_id: 1.0 for job_id in job_ids}
 
     def close(self) -> None:
         pass

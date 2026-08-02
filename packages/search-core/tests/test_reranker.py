@@ -48,9 +48,9 @@ def test_reranker_sends_only_the_v7_contract_and_uses_full_jd_lookup() -> None:
     )
     reranker = reranker_module.SemanticReranker("reranker-v7", documents, runtime)
 
-    result = reranker.rerank("  Python backend engineer  ", ("b", "a", "c"), 2)
+    result = reranker.score("  Python backend engineer  ", ("b", "a", "c"))
 
-    assert result == ("b", "c")
+    assert result == {"b": 0.9, "a": 0.2, "c": 0.9}
     assert documents.calls == [("b", "a", "c")]
     assert len(runtime.calls) == 1
     call = runtime.calls[0]
@@ -66,20 +66,17 @@ def test_reranker_sends_only_the_v7_contract_and_uses_full_jd_lookup() -> None:
 
 
 @pytest.mark.parametrize(
-    ("query", "job_ids", "limit", "message"),
+    ("query", "job_ids", "message"),
     [
-        (" ", ("1",), 1, "query"),
-        ("engineer", ("",), 1, "job ID"),
-        ("engineer", (" 1",), 1, "job ID"),
-        ("engineer", ("1", "1"), 1, "unique"),
-        ("engineer", ("1",), 0, "limit"),
-        ("engineer", ("1",), True, "limit"),
+        (" ", ("1",), "query"),
+        ("engineer", ("",), "job ID"),
+        ("engineer", (" 1",), "job ID"),
+        ("engineer", ("1", "1"), "unique"),
     ],
 )
 def test_reranker_rejects_invalid_inputs(
     query: str,
     job_ids: tuple[str, ...],
-    limit: int,
     message: str,
 ) -> None:
     reranker = reranker_module.SemanticReranker(
@@ -89,7 +86,7 @@ def test_reranker_rejects_invalid_inputs(
     )
 
     with pytest.raises(ValueError, match=message):
-        reranker.rerank(query, job_ids, limit)
+        reranker.score(query, job_ids)
 
 
 def test_reranker_returns_empty_without_lookup_or_endpoint_call() -> None:
@@ -97,7 +94,7 @@ def test_reranker_returns_empty_without_lookup_or_endpoint_call() -> None:
     runtime = FakeRuntime({})
     reranker = reranker_module.SemanticReranker("reranker-v7", documents, runtime)
 
-    assert reranker.rerank("engineer", (), 10) == ()
+    assert reranker.score("engineer", ()) == {}
     assert documents.calls == []
     assert runtime.calls == []
 
@@ -114,7 +111,7 @@ def test_reranker_requires_every_full_job_document(values: dict[str, str], messa
     )
 
     with pytest.raises(RuntimeError, match=message):
-        reranker.rerank("engineer", ("1",), 1)
+        reranker.score("engineer", ("1",))
 
 
 def test_reranker_rejects_requests_over_sagemaker_body_limit(
@@ -129,7 +126,7 @@ def test_reranker_rejects_requests_over_sagemaker_body_limit(
     )
 
     with pytest.raises(ValueError, match="request body"):
-        reranker.rerank("engineer", ("1",), 1)
+        reranker.score("engineer", ("1",))
     assert runtime.calls == []
 
 
@@ -142,7 +139,7 @@ def test_reranker_rejects_more_than_the_bounded_top_50_pool() -> None:
     )
 
     with pytest.raises(ValueError, match="50"):
-        reranker.rerank("engineer", job_ids, 10)
+        reranker.score("engineer", job_ids)
 
 
 @pytest.mark.parametrize(
@@ -197,7 +194,7 @@ def test_reranker_rejects_malformed_result_indices_and_scores(
     )
 
     with pytest.raises(RuntimeError, match=message):
-        reranker.rerank("engineer", ("1", "2"), 2)
+        reranker.score("engineer", ("1", "2"))
 
 
 def test_from_aws_builds_runtime_with_explicit_botocore_timeouts(
@@ -220,7 +217,7 @@ def test_from_aws_builds_runtime_with_explicit_botocore_timeouts(
         read_timeout_seconds=30,
     )
 
-    assert reranker.rerank("engineer", ("1",), 1) == ("1",)
+    assert reranker.score("engineer", ("1",)) == {"1": 0.8}
     assert captured["service_name"] == "sagemaker-runtime"
     assert captured["region_name"] == "us-west-2"
     config = captured["config"]
