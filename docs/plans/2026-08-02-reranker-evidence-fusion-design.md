@@ -44,3 +44,23 @@ experiment-selected depth, the response must be a permutation of the request,
 and failure is fail-closed. Shadow mode records the challenger trace without
 changing results. Active mode uses only the experimentally promoted fusion
 policy and appends the untouched suffix.
+
+## Relevance and business-signal boundary
+
+Qwen judges only query-to-JD suitability. It does not infer popularity. A job may
+be promoted only when hard constraints agree, the pinned Qwen suitability score
+passes the promoted threshold, and either occupation/title evidence agrees or
+both BM25 and whole-Dense support the candidate. Skill-only Graph or multi-view
+evidence for a different occupation remains tail evidence and an explanation
+trace; it cannot enter the promotable set.
+
+Popularity is a train-period, position-adjusted job prior with time cutoff,
+Bayesian smoothing, and bounded contribution. Completeness is deterministic from
+immutable JD fields such as title, location, salary, schedule, requirements,
+skills, and description. Neither signal can create candidates, bypass the
+relevance gate, or independently place a job in Top 3.
+
+BM25 remains the required incumbent lane. Graph and multi-view are independent
+candidate/evidence lanes rather than replacements for BM25. Exact multi-view
+MaxSim is not a production adapter; active multi-view requires a separately
+verified ANN index and identical eligibility filtering.

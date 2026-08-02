@@ -40,9 +40,15 @@
 
 1. Write failing unit tests for the exact winning pool depth, weights, prefix protection, deterministic ties, suffix preservation, shadow behavior, and fail-closed active behavior.
 2. Run `uv run pytest packages/search-core/tests/test_engine.py -q` and verify failure.
-3. Add the smallest pure rank-fusion helper and wire it only into the existing reranker boundary.
-4. Keep active serving disabled unless the sealed report passes every promotion gate.
-5. Run the focused tests.
+3. Add the smallest pure rank-fusion helper. Keep Qwen suitability, train-only
+   position-adjusted popularity, and deterministic JD completeness as separate
+   typed signals.
+4. Require hard-constraint agreement and either occupation/title agreement or
+   BM25+Dense cross-modal support before a candidate may be promoted. Graph or
+   multi-view skill-only similarity may remain tail evidence but cannot promote a
+   different occupation.
+5. Keep active serving disabled unless the sealed report passes every promotion gate.
+6. Run the focused tests.
 
 ### Task 4: Verify and document
 
@@ -54,3 +60,16 @@
 2. Run `uv run pytest -q`, formatting, type checking, web tests, and infrastructure tests.
 3. Review the diff for experiment-only artifacts or secrets; none may enter production.
 4. Commit the production change only after spec and code-quality review.
+
+### Task 5: Audit competition repository completeness
+
+**Files:**
+- Modify only if required: `README.md`
+- Modify only if required: `docs/retrieval-pipelines.md`
+
+1. Verify source code, environment setup, runnable examples, one-command benchmark
+   reproduction, and data/model/index version lineage against real paths.
+2. Verify dependency lockfiles for every runtime.
+3. Verify architecture and data-flow documentation.
+4. Verify Graph-on versus Graph-off metrics and their reproduction command.
+5. Fix only evidenced P0/P1 gaps and rerun every documented command.
