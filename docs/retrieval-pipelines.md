@@ -328,6 +328,35 @@ manifest, `generated/graph-on.run`, the Graph-on manifest, `generated/graph-trac
 component/index/job order/taxonomy and retrieval policy. The expensive GenAI extraction remains a
 frozen SHA-pinned input; this offline run performs no LLM or embedding recomputation.
 
+A passing organizer result is still not a serving artifact. The organizer must provide a separate
+exact-key attestation pinned to the candidate Graph manifest, ablation report, run hashes,
+significance result, serving algorithm and canonical serving-policy SHA. Only then may the pending
+Graph be copied into a new immutable six-file production component:
+
+```bash
+uv run python scripts/skill_graph_pipeline.py approve \
+  --graph-output artifacts/challengers/skill-graph/<source-sha256> \
+  --split-manifest artifacts/evaluations/split.json \
+  --evidence artifacts/input/skill-extraction/<model-and-source-sha256>/evidence.jsonl \
+  --extraction-manifest artifacts/input/skill-extraction/<model-and-source-sha256>/manifest.json \
+  --ablation-report artifacts/evaluations/graph-ablation/<experiment-id>/graph-ablation.json \
+  --ablation-report-sha256 <sha256> \
+  --organizer-attestation artifacts/evaluations/graph-organizer-attestation.json \
+  --organizer-attestation-sha256 <sha256> \
+  --runtime-prefix graphs/skill-graph/<component-id> \
+  --candidate-manifest-runtime-path evidence/skill-graph/<component-id>-candidate.json \
+  --promotion-report-runtime-path evidence/skill-graph/<component-id>.json \
+  --organizer-attestation-runtime-path evidence/skill-graph/<component-id>-organizer.json \
+  --output artifacts/promoted/skill-graph/<component-id>
+```
+
+Approval never rewrites the research Graph. Negative, non-significant, proxy-evaluated, policy-
+drifted or hand-edited evidence fails closed. The original candidate manifest cryptographically
+binds the exact six evaluated files; serving-policy and implementation hashes bind the evaluated
+algorithm to production. The resulting component manifest, candidate manifest, promotion report,
+organizer attestation and six Graph files must all be selected into the next immutable runtime
+release before `SEARCH_ENABLE_GRAPH=true` can start.
+
 ## Qwen multi-view embeddings
 
 `scripts/multiview_embedding_pipeline.py` builds the optional occupation, skill, requirement and

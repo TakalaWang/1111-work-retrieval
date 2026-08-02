@@ -25,9 +25,9 @@ class FakeManifest:
         self.artifacts = artifacts
 
     def required_artifacts(
-        self, *, include_dense: bool, include_multiview: bool
+        self, *, include_dense: bool, include_multiview: bool, include_graph: bool
     ) -> tuple[tuple[str, Artifact], ...]:
-        assert include_dense and not include_multiview
+        assert include_dense and not include_multiview and include_graph
         return self.artifacts
 
 
@@ -63,6 +63,7 @@ def test_s3_bootstrap_verifies_root_and_each_required_object(tmp_path: Path) -> 
         ),
         include_dense=True,
         include_multiview=False,
+        include_graph=True,
     )
 
     assert (tmp_path / "manifest.json").read_bytes() == root

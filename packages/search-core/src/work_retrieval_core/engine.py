@@ -20,6 +20,7 @@ LANE_TIMEOUT_SECONDS = 5.0
 SHADOW_COLLECTION_SECONDS = 1.0
 METADATA_RESERVE_SECONDS = 1.0
 MAX_INFLIGHT_SEARCHES = 8
+INCUMBENT_LANES = {"tantivy_bm25_full_jd", "graph_conditioned_tantivy"}
 SEARCH_TIMEZONE = ZoneInfo("Asia/Taipei")
 
 
@@ -226,6 +227,7 @@ class ProductionSearchEngine:
         *,
         enable_dense_shadow: bool = False,
         enable_multiview_maxsim: bool = False,
+        enable_graph: bool = False,
         multiview_artifact_key: str | None = None,
         max_inflight_searches: int = MAX_INFLIGHT_SEARCHES,
         clock: Callable[[], datetime] | None = None,
@@ -238,6 +240,8 @@ class ProductionSearchEngine:
             raise TypeError("enabled dense shadow port does not satisfy CandidateRetriever")
         if not isinstance(ports.metadata, JobMetadataLookup):
             raise TypeError("metadata port does not satisfy JobMetadataLookup")
+        if enable_graph and manifest.skill_graph is None:
+            raise RuntimeError("enabled Graph requires its manifest artifact")
         artifact = manifest.artifact(multiview_artifact_key or "")
         if enable_multiview_maxsim and (
             artifact is None or artifact.kind not in {"embedding", "index"}
@@ -251,6 +255,7 @@ class ProductionSearchEngine:
         self._ports = ports
         self._enable_dense_shadow = enable_dense_shadow
         self._enable_multiview_maxsim = enable_multiview_maxsim
+        self._enable_graph = enable_graph
         self._clock = clock or (lambda: datetime.now(UTC))
         lane_count = 1 + int(enable_dense_shadow) + int(enable_multiview_maxsim)
         self._executor = ThreadPoolExecutor(
@@ -292,7 +297,10 @@ class ProductionSearchEngine:
             query_rewrites=compiled.rewrites,
         )
         lanes: list[tuple[str, CandidateRetriever]] = [
-            ("tantivy_bm25_full_jd", self._ports.lexical_full_jd),
+            (
+                "graph_conditioned_tantivy" if self._enable_graph else "tantivy_bm25_full_jd",
+                self._ports.lexical_full_jd,
+            ),
         ]
         if self._enable_dense_shadow:
             assert self._ports.dense_whole_jd is not None
@@ -375,7 +383,7 @@ class ProductionSearchEngine:
             if failure := lane_failures.get(lane_name):
                 lane_traces.append(LaneTrace(lane_name, "failed", failure, 0))
                 continue
-            incumbent = lane_name == "tantivy_bm25_full_jd"
+            incumbent = lane_name == lanes[0][0]
             lane_traces.append(
                 LaneTrace(
                     lane_name,
@@ -417,14 +425,11 @@ class ProductionSearchEngine:
                     0,
                 )
             )
+        if not self._enable_graph:
+            lane_traces.append(LaneTrace("graph", "disabled", "feature_flag_disabled", 0))
         lane_traces.extend(
-            LaneTrace(name, "disabled", reason, 0)
-            for name, reason in (
-                ("graph", "ablation_not_approved"),
-                ("reranker", "calibration_not_approved"),
-                ("ltr", "calibration_not_approved"),
-                ("guardrail", "calibration_not_approved"),
-            )
+            LaneTrace(name, "disabled", "calibration_not_approved", 0)
+            for name in ("reranker", "ltr", "guardrail")
         )
 
         scored = [
@@ -603,9 +608,7 @@ def _remaining(deadline: float) -> float:
 
 
 def _serving_order(item: ResultTrace) -> tuple[int, int, float, str]:
-    lexical = [
-        evidence.rank for evidence in item.evidence if evidence.lane == "tantivy_bm25_full_jd"
-    ]
+    lexical = [evidence.rank for evidence in item.evidence if evidence.lane in INCUMBENT_LANES]
     if lexical:
         return (0, min(lexical), -item.freshness_score, item.job_id)
     shadow = [evidence.rank for evidence in item.evidence]

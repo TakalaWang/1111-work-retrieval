@@ -20,7 +20,7 @@ class S3Downloader(Protocol):
 
 class RuntimeArtifactManifest(Protocol):
     def required_artifacts(
-        self, *, include_dense: bool, include_multiview: bool
+        self, *, include_dense: bool, include_multiview: bool, include_graph: bool
     ) -> tuple[tuple[str, Artifact], ...]: ...
 
 
@@ -78,10 +78,12 @@ class S3RuntimeArtifacts:
         *,
         include_dense: bool,
         include_multiview: bool,
+        include_graph: bool,
     ) -> tuple[Path, ...]:
         required = manifest.required_artifacts(
             include_dense=include_dense,
             include_multiview=include_multiview,
+            include_graph=include_graph,
         )
         missing = [
             (path, artifact)

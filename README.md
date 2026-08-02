@@ -111,9 +111,10 @@ scripts/bootstrap_competition_release.sh \
    全部成功才結束。
 
 `NEW_WORK_ROOT` 必須不存在；中途失敗時保留該目錄供稽核，不會偷偷沿用 partial output。這個 production
-bootstrap 只發布已核准的 temporal BM25 incumbent；Whole-Dense serving adapter 預設關閉，Graph、multi-view、
-LTR 與 reranker 目前沒有 production serving adapter。它們的建置與 Graph-on/off 實驗是下方獨立的 offline
-流程，不會由這個命令產生，也不能只靠 feature flag 開進 Top-10。
+bootstrap 只發布已核准的 temporal BM25 incumbent；Whole-Dense 與 Graph serving adapter 預設關閉，
+multi-view、LTR 與 reranker 目前沒有 production serving adapter。Graph 的建置與 Graph-on/off 實驗是下方
+獨立的 offline 流程，不會由這個命令產生；只有含正向 promotion evidence 的 Graph runtime bundle 才能配合
+`SEARCH_ENABLE_GRAPH=true` 開進 Top-10。
 
 ## 本機驗證
 
@@ -290,6 +291,10 @@ Tantivy 重建 `graph_off`，再由 train-only Graph 產生 bounded typed bridge
 或歷史 Graph Job 節點中的新職缺，但不能沿 train Job edge 直接回傳舊職缺。兩者最後交給外部 evaluator，
 runner 同時強制讀取 pinned extraction evidence 與 extraction manifest，重建並逐 bytes 驗證六張 Graph 表，
 不接受只在 Graph 內部自洽的預建 artifact。
+離線 runner 與 production adapter 共用同一份 Graph serving policy、implementation SHA 與固定輸入 golden
+ranking parity test。正向 organizer 結果仍須經 `skill_graph_pipeline.py approve` 驗證外部 attestation，並以
+原始 candidate manifest 綁定實際評測的六個檔案，才會產生 immutable production component；不能直接把研究
+manifest 改成 publishable。
 manifest 的 canonical qid universe 必須一致；off／on TREC 可省略各自 manifest 明確宣告的 zero-result
 qid，且 on 可救回 off 的 zero-result query，evaluator 仍須以完整 canonical query count 計分。Repository 不猜主辦方 query CSV
 schema；organizer-specific adapter 必須先把官方 CSV 轉成 canonical JSONL，完整命令與契約見
@@ -305,6 +310,7 @@ environment 執行。它同時要求：
 
 - repository variable `DEPLOY_ENABLED=true`
 - environment variable `AWS_DEPLOY_ROLE_ARN`
+- protected environment variable `SEARCH_ENABLE_GRAPH=true|false`；未設定時為 `false`
 - confirmation input 必須精確等於 `DEPLOY`
 - 64-character lowercase artifact manifest SHA-256
 - alarm email 可省略；若有填寫，收件者必須完成 AWS SNS subscription confirmation
@@ -316,7 +322,9 @@ environment 執行。它同時要求：
 流程依序執行 frozen installs、static web build、OIDC authentication、DataStack deploy、runtime manifest
 驗證、`linux/amd64` API image build／push、ECR scan、digest-pinned PlatformStack deploy、web sync、等待
 CloudFront invalidation，最後才執行 public health、web 與 search smoke；`cpu-incumbent` 是已 promotion 的
-temporal BM25 hot path，Dense、Graph、LTR 與 reranker 均維持關閉；public readiness 回傳的
+temporal BM25 hot path。Graph 可由 `SEARCH_ENABLE_GRAPH=true` 選用，但 immutable runtime manifest 必須同時
+包含通過正向 NDCG@10、organizer attestation、serving-policy SHA 驗證的 publishable Skill Graph；缺檔、未核准或驗證失敗會讓部署／服務
+啟動直接失敗，不會退回 BM25。現有 runtime bundle 的 Graph 仍為 `false`，Dense、LTR 與 reranker 也維持關閉；public readiness 回傳的
 `artifact_manifest_sha256` 必須精確等於本次 workflow input，舊 runtime 健康不能通過 deployment gate。
 
 Workflow 自行 build image，不接受 caller-supplied image URI；CDK 只接收 ECR digest URI。任何 push 或

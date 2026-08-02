@@ -13,8 +13,13 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from graph_candidate_runner import ALGORITHM as GRAPH_GENERATION_ALGORITHM
+from graph_candidate_runner import (
+    EVALUATION_IMPLEMENTATION_SHA256,
+    _manifest_qids,
+    generate_graph_on,
+    read_trec_run,
+)
 from graph_candidate_runner import PARAMETERS as GRAPH_GENERATION_PARAMETERS
-from graph_candidate_runner import _manifest_qids, generate_graph_on, read_trec_run
 from pipeline_contract import (
     atomic_json,
     exact_keys,
@@ -25,6 +30,10 @@ from pipeline_contract import (
 from skill_graph_pipeline import load_split_manifest, validate_graph
 from tantivy_graph_off_runner import read_canonical_queries
 from tantivy_index_pipeline import DEFAULT_ARTIFACT_PREFIX
+from work_retrieval_core.graph_policy import (
+    GRAPH_SERVING_IMPLEMENTATION_SHA256,
+    GRAPH_SERVING_POLICY_SHA256,
+)
 
 RUN_MANIFEST_KEYS = {
     "schema_version",
@@ -364,6 +373,10 @@ def run_ablation(
         "experiment": "fixed-input-graph-on-off-ablation",
         "attestation_kind": "fixed-input-graph-promotion",
         "candidate_manifest_sha256": graph_sha256,
+        "serving_algorithm": GRAPH_GENERATION_ALGORITHM,
+        "serving_policy_sha256": GRAPH_SERVING_POLICY_SHA256,
+        "serving_implementation_sha256": GRAPH_SERVING_IMPLEMENTATION_SHA256,
+        "evaluation_implementation_sha256": EVALUATION_IMPLEMENTATION_SHA256,
         "publication_allowed": False,
         "official_score_claimed": False,
         "evaluator": {"id": evaluator_id, "kind": evaluator_kind},

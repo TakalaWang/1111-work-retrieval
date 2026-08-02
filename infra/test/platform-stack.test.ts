@@ -42,6 +42,11 @@ describe('platform stack', () => {
       Default: 'cpu-incumbent',
       AllowedValues: ['cpu-incumbent', 'gpu-shadow']
     });
+    template.hasParameter('EnableGraph', {
+      Type: 'String',
+      Default: 'false',
+      AllowedValues: ['false', 'true']
+    });
     template.hasParameter('GpuInstanceType', { Type: 'String' });
     for (const id of [
       'CpuServiceDesiredCount',
@@ -183,6 +188,10 @@ describe('platform stack', () => {
           expect.objectContaining({
             Name: 'SEARCH_ENABLE_DENSE_SHADOW',
             Value: 'false'
+          }),
+          expect.objectContaining({
+            Name: 'SEARCH_ENABLE_GRAPH',
+            Value: { Ref: 'EnableGraph' }
           }),
           expect.objectContaining({
             Name: 'RERANKER_ENDPOINT_NAME',

@@ -12,7 +12,7 @@ import shutil
 import unicodedata
 from collections import Counter
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 import boto3  # type: ignore[import-untyped]
@@ -27,6 +27,16 @@ from pipeline_contract import (
     verify_local_inventory,
     verify_s3_inventory,
     verify_s3_object,
+)
+from work_retrieval_core.graph_policy import (
+    GRAPH_SERVING_ALGORITHM,
+    GRAPH_SERVING_IMPLEMENTATION_SHA256,
+    GRAPH_SERVING_POLICY_SHA256,
+)
+from work_retrieval_core.manifest import (
+    GRAPH_MAX_SOURCE_TIMESTAMP,
+    GRAPH_SOURCE_JD_SHA256,
+    GRAPH_TRAIN_CUTOFF,
 )
 
 RELATION_TYPES = {
@@ -90,6 +100,58 @@ GRAPH_FILES = {
     "duty_skills": "duty-skills.jsonl",
     "skill_relations": "skill-relations.jsonl",
     "relation_evidence": "relation-evidence.jsonl",
+}
+GRAPH_ABLATION_REPORT_KEYS = {
+    "schema_version",
+    "complete",
+    "experiment",
+    "attestation_kind",
+    "candidate_manifest_sha256",
+    "serving_algorithm",
+    "serving_policy_sha256",
+    "serving_implementation_sha256",
+    "evaluation_implementation_sha256",
+    "publication_allowed",
+    "official_score_claimed",
+    "evaluator",
+    "split_manifest_sha256",
+    "qrels_sha256",
+    "graph_manifest_sha256",
+    "graph_off_run_sha256",
+    "graph_on_run_sha256",
+    "non_graph_inputs",
+    "query_count",
+    "graph_off",
+    "graph_on",
+    "delta",
+    "minimum_ndcg_delta",
+    "organizer_significant",
+    "metric_gate_passed",
+    "promotion_allowed",
+    "promotion_gate",
+    "controls",
+}
+GRAPH_ATTESTATION_KEYS = {
+    "schema_version",
+    "complete",
+    "attestation_kind",
+    "candidate_manifest_sha256",
+    "ablation_report_sha256",
+    "publication_allowed",
+    "evaluator_id",
+    "evaluator_kind",
+    "significant",
+    "primary_metric",
+    "baseline_value",
+    "candidate_value",
+    "absolute_delta",
+    "evaluation_split_sha256",
+    "baseline_run_sha256",
+    "candidate_run_sha256",
+    "serving_algorithm",
+    "serving_policy_sha256",
+    "serving_implementation_sha256",
+    "evaluation_implementation_sha256",
 }
 CATEGORY_RESOLUTION_POLICY = "support_majority_then_lexical_v1"
 EXTRACTION_LINEAGE_FIELDS = (
@@ -939,6 +1001,209 @@ def validate_graph(
     }
 
 
+def approve_graph(
+    *,
+    graph_output: Path,
+    split_manifest_path: Path,
+    evidence_path: Path,
+    extraction_manifest_path: Path,
+    ablation_report_path: Path,
+    ablation_report_sha256: str,
+    organizer_attestation_path: Path,
+    organizer_attestation_sha256: str,
+    runtime_prefix: str,
+    candidate_manifest_runtime_path: str,
+    promotion_report_runtime_path: str,
+    organizer_attestation_runtime_path: str,
+    output: Path,
+) -> dict[str, object]:
+    if output.exists():
+        raise RuntimeError("promoted Graph output already exists; approvals never overwrite")
+    validate_graph(
+        graph_output,
+        split_manifest_path,
+        evidence_path=evidence_path,
+        extraction_manifest_path=extraction_manifest_path,
+    )
+    for digest, name in (
+        (ablation_report_sha256, "Graph ablation report"),
+        (organizer_attestation_sha256, "Graph organizer attestation"),
+    ):
+        require_sha256(digest, f"{name} SHA-256")
+    if sha256_file(ablation_report_path) != ablation_report_sha256:
+        raise RuntimeError("Graph ablation report bytes differ")
+    if sha256_file(organizer_attestation_path) != organizer_attestation_sha256:
+        raise RuntimeError("Graph organizer attestation bytes differ")
+    graph_manifest = read_json_object(graph_output / "manifest.json", "skill graph manifest")
+    candidate_manifest_sha256 = sha256_file(graph_output / "manifest.json")
+    if (
+        graph_manifest["train_cutoff_exclusive"] != GRAPH_TRAIN_CUTOFF
+        or graph_manifest["max_source_timestamp"] != GRAPH_MAX_SOURCE_TIMESTAMP
+        or graph_manifest["source_jd_sha256"] != GRAPH_SOURCE_JD_SHA256
+    ):
+        raise RuntimeError("Graph candidate differs from the approved production source snapshot")
+    report = read_json_object(ablation_report_path, "Graph ablation report")
+    exact_keys(report, GRAPH_ABLATION_REPORT_KEYS, "Graph ablation report")
+    evaluator = report["evaluator"]
+    graph_off = report["graph_off"]
+    graph_on = report["graph_on"]
+    delta = report["delta"]
+    if not all(isinstance(value, dict) for value in (evaluator, graph_off, graph_on, delta)):
+        raise RuntimeError("Graph ablation metrics are malformed")
+    baseline_value = cast(dict[str, object], graph_off).get("ndcg_at_10")
+    candidate_value = cast(dict[str, object], graph_on).get("ndcg_at_10")
+    absolute_delta = cast(dict[str, object], delta).get("ndcg_at_10")
+    if (
+        report["schema_version"] != 1
+        or report["complete"] is not True
+        or report["experiment"] != "fixed-input-graph-on-off-ablation"
+        or report["attestation_kind"] != "fixed-input-graph-promotion"
+        or report["candidate_manifest_sha256"] != candidate_manifest_sha256
+        or report["graph_manifest_sha256"] != candidate_manifest_sha256
+        or report["serving_algorithm"] != GRAPH_SERVING_ALGORITHM
+        or report["serving_policy_sha256"] != GRAPH_SERVING_POLICY_SHA256
+        or report["serving_implementation_sha256"] != GRAPH_SERVING_IMPLEMENTATION_SHA256
+        or report["publication_allowed"] is not False
+        or report["promotion_allowed"] is not False
+        or report["promotion_gate"] != "requires_external_organizer_attestation"
+        or report["metric_gate_passed"] is not True
+        or report["organizer_significant"] is not True
+        or cast(dict[str, object], evaluator).get("kind") != "organizer"
+        or type(baseline_value) not in {int, float}
+        or type(candidate_value) not in {int, float}
+        or type(absolute_delta) not in {int, float}
+        or not all(
+            math.isfinite(cast(float, value))
+            for value in (baseline_value, candidate_value, absolute_delta)
+        )
+        or cast(float, absolute_delta) <= 0
+        or not math.isclose(
+            cast(float, candidate_value) - cast(float, baseline_value),
+            cast(float, absolute_delta),
+            rel_tol=0,
+            abs_tol=1e-12,
+        )
+    ):
+        raise RuntimeError("Graph ablation evidence did not pass")
+    require_sha256(
+        report["evaluation_implementation_sha256"],
+        "Graph evaluation implementation SHA-256",
+    )
+
+    attestation = read_json_object(organizer_attestation_path, "Graph organizer attestation")
+    exact_keys(attestation, GRAPH_ATTESTATION_KEYS, "Graph organizer attestation")
+    expected_attestation = {
+        "schema_version": 1,
+        "complete": True,
+        "attestation_kind": "fixed-input-graph-promotion",
+        "candidate_manifest_sha256": candidate_manifest_sha256,
+        "ablation_report_sha256": ablation_report_sha256,
+        "publication_allowed": True,
+        "evaluator_id": cast(dict[str, object], evaluator).get("id"),
+        "evaluator_kind": "organizer",
+        "significant": True,
+        "primary_metric": "ndcg_at_10",
+        "baseline_value": baseline_value,
+        "candidate_value": candidate_value,
+        "absolute_delta": absolute_delta,
+        "evaluation_split_sha256": report["split_manifest_sha256"],
+        "baseline_run_sha256": report["graph_off_run_sha256"],
+        "candidate_run_sha256": report["graph_on_run_sha256"],
+        "serving_algorithm": GRAPH_SERVING_ALGORITHM,
+        "serving_policy_sha256": GRAPH_SERVING_POLICY_SHA256,
+        "serving_implementation_sha256": GRAPH_SERVING_IMPLEMENTATION_SHA256,
+        "evaluation_implementation_sha256": report["evaluation_implementation_sha256"],
+    }
+    if attestation != expected_attestation:
+        raise RuntimeError("Graph organizer attestation differs from the evaluated candidate")
+
+    prefix = _runtime_prefix(runtime_prefix, "graphs")
+    candidate_runtime_path = _runtime_json_path(candidate_manifest_runtime_path, "evidence")
+    report_runtime_path = _runtime_json_path(promotion_report_runtime_path, "evidence")
+    attestation_runtime_path = _runtime_json_path(organizer_attestation_runtime_path, "evidence")
+    temporary = output.with_name(f".{output.name}.{os.getpid()}.partial")
+    if temporary.exists():
+        raise RuntimeError("partial promoted Graph output already exists")
+    temporary.mkdir(parents=True)
+    try:
+        for filename in GRAPH_FILES.values():
+            shutil.copyfile(graph_output / filename, temporary / filename)
+        shutil.copyfile(graph_output / "manifest.json", temporary / "candidate-manifest.json")
+        shutil.copyfile(organizer_attestation_path, temporary / "organizer-attestation.json")
+        promotion_report = {
+            "schema_version": 1,
+            "complete": True,
+            "publication_allowed": True,
+            "evaluation_split_sha256": report["split_manifest_sha256"],
+            "baseline_run_sha256": report["graph_off_run_sha256"],
+            "candidate_run_sha256": report["graph_on_run_sha256"],
+            "primary_metric": "ndcg_at_10",
+            "baseline_value": baseline_value,
+            "candidate_value": candidate_value,
+            "absolute_delta": absolute_delta,
+        }
+        atomic_json(temporary / "promotion-report.json", promotion_report)
+        files = [
+            {
+                "path": f"{prefix}/{filename}",
+                "sha256": sha256_file(temporary / filename),
+                "size_bytes": (temporary / filename).stat().st_size,
+            }
+            for filename in sorted(GRAPH_FILES.values())
+        ]
+        component = {
+            "complete": True,
+            "publication_allowed": True,
+            "schema_version": 1,
+            "train_cutoff_exclusive": graph_manifest["train_cutoff_exclusive"],
+            "max_source_timestamp": graph_manifest["max_source_timestamp"],
+            "source_jd_sha256": graph_manifest["source_jd_sha256"],
+            "source_policy": "train_jd_only",
+            "test_jd_used": False,
+            "candidate_manifest_sha256": candidate_manifest_sha256,
+            "candidate_manifest_path": candidate_runtime_path,
+            "source_ablation_report_sha256": ablation_report_sha256,
+            "serving_algorithm": GRAPH_SERVING_ALGORITHM,
+            "serving_policy_sha256": GRAPH_SERVING_POLICY_SHA256,
+            "serving_implementation_sha256": GRAPH_SERVING_IMPLEMENTATION_SHA256,
+            "evaluation_implementation_sha256": report["evaluation_implementation_sha256"],
+            "promotion_report_path": report_runtime_path,
+            "promotion_report_sha256": sha256_file(temporary / "promotion-report.json"),
+            "organizer_attestation_path": attestation_runtime_path,
+            "organizer_attestation_sha256": organizer_attestation_sha256,
+            "files": files,
+        }
+        atomic_json(temporary / "manifest.json", component)
+        temporary.replace(output)
+    except BaseException:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+    return {
+        "passed": True,
+        "manifest_sha256": sha256_file(output / "manifest.json"),
+        "promotion_report_sha256": sha256_file(output / "promotion-report.json"),
+        "organizer_attestation_sha256": organizer_attestation_sha256,
+    }
+
+
+def _runtime_prefix(value: str, root: str) -> str:
+    normalized = PurePosixPath(value).as_posix()
+    if (
+        value != normalized
+        or not normalized.startswith(f"{root}/")
+        or ".." in normalized.split("/")
+    ):
+        raise RuntimeError(f"runtime prefix must be a canonical {root}/ path")
+    return normalized
+
+
+def _runtime_json_path(value: str, root: str) -> str:
+    normalized = _runtime_prefix(value, root)
+    if not normalized.endswith(".json"):
+        raise RuntimeError(f"runtime {root} path must end in .json")
+    return normalized
+
+
 def trace_skill(
     output: Path,
     split_manifest_path: Path,
@@ -1118,6 +1383,20 @@ def main() -> None:
     trace.add_argument("--extraction-manifest", type=Path, required=True)
     trace.add_argument("--skill", required=True)
     trace.add_argument("--limit", type=int, default=20)
+    approve = commands.add_parser("approve")
+    approve.add_argument("--graph-output", type=Path, required=True)
+    approve.add_argument("--split-manifest", type=Path, required=True)
+    approve.add_argument("--evidence", type=Path, required=True)
+    approve.add_argument("--extraction-manifest", type=Path, required=True)
+    approve.add_argument("--ablation-report", type=Path, required=True)
+    approve.add_argument("--ablation-report-sha256", required=True)
+    approve.add_argument("--organizer-attestation", type=Path, required=True)
+    approve.add_argument("--organizer-attestation-sha256", required=True)
+    approve.add_argument("--runtime-prefix", required=True)
+    approve.add_argument("--candidate-manifest-runtime-path", required=True)
+    approve.add_argument("--promotion-report-runtime-path", required=True)
+    approve.add_argument("--organizer-attestation-runtime-path", required=True)
+    approve.add_argument("--output", type=Path, required=True)
     for name in ("publish-s3", "verify-s3"):
         command = commands.add_parser(name)
         command.add_argument("--output", type=Path, required=True)
@@ -1153,6 +1432,22 @@ def main() -> None:
             args.extraction_manifest,
             args.skill,
             args.limit,
+        )
+    elif args.command == "approve":
+        result = approve_graph(
+            graph_output=args.graph_output,
+            split_manifest_path=args.split_manifest,
+            evidence_path=args.evidence,
+            extraction_manifest_path=args.extraction_manifest,
+            ablation_report_path=args.ablation_report,
+            ablation_report_sha256=args.ablation_report_sha256,
+            organizer_attestation_path=args.organizer_attestation,
+            organizer_attestation_sha256=args.organizer_attestation_sha256,
+            runtime_prefix=args.runtime_prefix,
+            candidate_manifest_runtime_path=args.candidate_manifest_runtime_path,
+            promotion_report_runtime_path=args.promotion_report_runtime_path,
+            organizer_attestation_runtime_path=args.organizer_attestation_runtime_path,
+            output=args.output,
         )
     else:
         result = _graph_s3(
