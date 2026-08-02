@@ -42,8 +42,9 @@ class StubRetriever:
     def close(self) -> None:
         self.closed = True
 
-    def preflight(self, request: CandidateRequest) -> None:
-        self.requests.append(request)
+    def preflight(self, request: CandidateRequest) -> bool:
+        del request
+        return True
 
 
 class StubMetadata:

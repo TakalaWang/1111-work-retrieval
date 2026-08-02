@@ -137,7 +137,7 @@ class CandidateReranker(Protocol):
 
 @runtime_checkable
 class DenseCapacityPreflight(Protocol):
-    def preflight(self, request: CandidateRequest) -> None: ...
+    def preflight(self, request: CandidateRequest) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,12 +354,6 @@ class ProductionSearchEngine:
         self._reranker_mode = reranker_mode
         self._enable_graph = enable_graph
         self._clock = clock or (lambda: datetime.now(UTC))
-        if reranker_mode == "active":
-            as_of = _aware(self._clock(), field="as_of")
-            assert isinstance(ports.dense_whole_jd, DenseCapacityPreflight)
-            ports.dense_whole_jd.preflight(
-                CandidateRequest("", (), (), as_of, as_of - timedelta(days=MAX_AGE_DAYS))
-            )
         lane_count = 1 + int(enable_dense_shadow) + int(enable_multiview_maxsim) + int(enable_graph)
         self._executor = ThreadPoolExecutor(
             max_workers=lane_count * max_inflight_searches,
@@ -433,7 +427,18 @@ class ProductionSearchEngine:
         lane_traces: list[LaneTrace] = []
         for lane_name, validated in validated_lane_results:
             if failure := lane_failures.get(lane_name):
-                lane_traces.append(LaneTrace(lane_name, "failed", failure, 0))
+                lane_traces.append(
+                    LaneTrace(
+                        lane_name,
+                        (
+                            "capacity_skipped"
+                            if failure == "eligible_universe_exceeds_exact_scan_limit"
+                            else "failed"
+                        ),
+                        failure,
+                        0,
+                    )
+                )
                 continue
             incumbent = lane_name in INCUMBENT_LANES
             dense_ranking_evidence = (
@@ -498,7 +503,11 @@ class ProductionSearchEngine:
         ]
         scored.sort(key=_serving_order)
         reranker_trace = LaneTrace("reranker", "disabled", "feature_flag_disabled", 0)
-        if self._reranker_mode != "off" and "qwen_dense_whole_jd" not in lane_failures:
+        dense_failure = lane_failures.get("qwen_dense_whole_jd")
+        if self._reranker_mode != "off" and dense_failure in {
+            None,
+            "eligible_universe_exceeds_exact_scan_limit",
+        }:
             assert self._ports.reranker is not None
             pool = _reranker_pool_ids(ranked_candidates)
             if pool:
@@ -675,7 +684,14 @@ class ProductionSearchEngine:
             lanes.append(("graph_conditioned_tantivy", self._ports.graph))
         if self._enable_dense_shadow:
             assert self._ports.dense_whole_jd is not None
-            lanes.append(("qwen_dense_whole_jd", self._ports.dense_whole_jd))
+            dense_supported = True
+            if isinstance(self._ports.dense_whole_jd, DenseCapacityPreflight):
+                try:
+                    dense_supported = self._ports.dense_whole_jd.preflight(request)
+                except Exception as error:
+                    raise SearchUnavailableError("dense capacity preflight failed") from error
+            if dense_supported:
+                lanes.append(("qwen_dense_whole_jd", self._ports.dense_whole_jd))
         if self._enable_multiview_maxsim:
             assert self._ports.dense_multiview_maxsim is not None
             lanes.append(("qwen_dense_multiview_maxsim", self._ports.dense_multiview_maxsim))
@@ -685,6 +701,8 @@ class ProductionSearchEngine:
         }
         lane_results: list[tuple[str, tuple[CandidateEvidence, ...]]] = []
         failures: dict[str, str] = {}
+        if self._enable_dense_shadow and not dense_supported:
+            failures["qwen_dense_whole_jd"] = "eligible_universe_exceeds_exact_scan_limit"
         deadline = monotonic() + LANE_TIMEOUT_SECONDS
         try:
             lane_results.append(
@@ -723,6 +741,11 @@ class ProductionSearchEngine:
                     raise SearchUnavailableError("a required ranking lane failed") from error
                 failures[name] = "shadow_lane_failed"
                 validated.append((name, ()))
+        if self._enable_dense_shadow and not dense_supported:
+            validated.insert(
+                1 + int(self._enable_graph),
+                ("qwen_dense_whole_jd", ()),
+            )
         return validated, failures, deadline
 
     def _validate_lane(

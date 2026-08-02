@@ -204,8 +204,9 @@ class StubRetriever:
     def close(self) -> None:
         self.closed = True
 
-    def preflight(self, request: CandidateRequest) -> None:
-        self.requests.append((request, 0))
+    def preflight(self, request: CandidateRequest) -> bool:
+        del request
+        return True
 
 
 class SequencedRetriever(StubRetriever):
@@ -216,6 +217,16 @@ class SequencedRetriever(StubRetriever):
     def retrieve(self, request: CandidateRequest, *, limit: int) -> tuple[CandidateEvidence, ...]:
         super().retrieve(request, limit=limit)
         return next(self._responses)
+
+
+class CapacitySkippedRetriever(StubRetriever):
+    def __init__(self) -> None:
+        super().__init__()
+        self.preflight_requests: list[CandidateRequest] = []
+
+    def preflight(self, request: CandidateRequest) -> bool:
+        self.preflight_requests.append(request)
+        return False
 
 
 class StubMetadata:
@@ -667,6 +678,38 @@ def test_active_reranker_never_admits_a_dense_only_candidate() -> None:
 
     assert "5" not in result.job_ids
     assert reranker.calls == [("工程師", ("4", "1", "2", "3"))]
+    engine.close()
+
+
+def test_active_reranker_runs_on_bm25_when_exact_dense_capacity_is_skipped() -> None:
+    lexical = StubRetriever((_candidate("1", 1.0, 1),))
+    dense = CapacitySkippedRetriever()
+    reranker = StubReranker()
+    engine = ProductionSearchEngine(
+        RuntimeManifest.from_dict(_manifest()),
+        RetrievalPorts(
+            lexical,
+            dense,
+            StubMetadata((_metadata("1", 0),)),
+            reranker=reranker,
+        ),
+        enable_dense_shadow=True,
+        reranker_mode="active",
+        clock=lambda: DEMO_AS_OF,
+    )
+
+    assert dense.preflight_requests == []
+    result = engine.search(SearchQuery("工程師"), limit=1)
+
+    assert len(dense.preflight_requests) == 1
+    assert dense.requests == []
+    assert reranker.calls == [("工程師", ("1",))]
+    dense_lane = next(lane for lane in result.trace.lanes if lane.name == "qwen_dense_whole_jd")
+    assert (dense_lane.status, dense_lane.reason, dense_lane.candidate_count) == (
+        "capacity_skipped",
+        "eligible_universe_exceeds_exact_scan_limit",
+        0,
+    )
     engine.close()
 
 

@@ -1258,8 +1258,14 @@ class WholeQwenExactRetriever:
         )
         self._closed = False
 
-    def preflight(self, request: CandidateRequest) -> None:
-        self._eligible_rows.eligible_indices(request, max_rows=self._max_eligible_rows)
+    def preflight(self, request: CandidateRequest) -> bool:
+        try:
+            self._eligible_rows.eligible_indices(request, max_rows=self._max_eligible_rows)
+        except RuntimeError as error:
+            if str(error) == "eligible universe exceeds its bounded materialization limit":
+                return False
+            raise
+        return True
 
     def retrieve(self, request: CandidateRequest, *, limit: int) -> tuple[CandidateEvidence, ...]:
         if self._closed:
