@@ -8,7 +8,7 @@
 - `WorkRetrievalData` 與 `WorkRetrievalPlatform` 均已在 AWS competition account
   `378849533305`、`us-west-2` 完成部署；本次 `WorkRetrievalPlatform` readback 為
   CloudFormation `UPDATE_COMPLETE`。
-- Web 與 API 目前可由 [https://dukvebbbaov1r.cloudfront.net](https://dukvebbbaov1r.cloudfront.net)
+- Web 與 API 目前可由 [https://1111.takalawang.dev](https://1111.takalawang.dev)
   同源存取。
 - Qwen3 Embedding endpoint `qwen3-embedding-8b-20260801-031826` 與 reranker endpoint
   `work-retrieval-qwen3-reranker-8b` 均為 `InService`。

@@ -11,6 +11,7 @@ import {
   Token,
   type StackProps
 } from 'aws-cdk-lib';
+import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as autoscaling from 'aws-cdk-lib/aws-autoscaling';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
@@ -34,6 +35,9 @@ const EMBEDDING_ENDPOINT_NAME = 'qwen3-embedding-8b-20260801-031826';
 const EMBEDDING_ENDPOINT_CONFIG_NAME = EMBEDDING_ENDPOINT_NAME;
 const EMBEDDING_MODEL_NAME = EMBEDDING_ENDPOINT_NAME;
 const RERANKER_ENDPOINT_NAME = 'work-retrieval-qwen3-reranker-8b';
+const PRODUCTION_DOMAIN_NAME = '1111.takalawang.dev';
+const PRODUCTION_CERTIFICATE_ARN =
+  'arn:aws:acm:us-east-1:378849533305:certificate/c76499fc-2946-41f4-bc40-3cec2859fffe';
 const GITHUB_PRODUCTION_SUBJECT =
   'repo:TakalaWang@50894789/1111-work-retrieval@1318865130:environment:production';
 
@@ -473,7 +477,13 @@ export class PlatformStack extends Stack {
         cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
       viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY
     };
+    const viewerCertificate = acm.Certificate.fromCertificateArn(
+      this,
+      'ViewerCertificate',
+      PRODUCTION_CERTIFICATE_ARN
+    );
     const distribution = new cloudfront.Distribution(this, 'Distribution', {
+      certificate: viewerCertificate,
       defaultRootObject: 'index.html',
       defaultBehavior: {
         origin: origins.S3BucketOrigin.withOriginAccessControl(webBucket),
@@ -483,7 +493,9 @@ export class PlatformStack extends Stack {
         '/api/*': apiBehavior,
         '/healthz': apiBehavior,
         '/readyz': apiBehavior
-      }
+      },
+      domainNames: [PRODUCTION_DOMAIN_NAME],
+      minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021
     });
 
     const githubProvider = new iam.OpenIdConnectProvider(
@@ -575,10 +587,10 @@ export class PlatformStack extends Stack {
       value: apiRepository.repositoryUri
     });
     new CfnOutput(this, 'ApiBaseUrl', {
-      value: `https://${distribution.domainName}/api/v1`
+      value: `https://${PRODUCTION_DOMAIN_NAME}/api/v1`
     });
     new CfnOutput(this, 'WebUrl', {
-      value: `https://${distribution.domainName}`
+      value: `https://${PRODUCTION_DOMAIN_NAME}`
     });
     new CfnOutput(this, 'DistributionDomainName', {
       value: distribution.domainName
