@@ -124,19 +124,6 @@
             "minLength": 1,
             "title": "Query",
             "type": "string"
-          },
-          "search_date": {
-            "anyOf": [
-              {
-                "description": "ISO date from 0001-07-01 through 9999-12-30 inclusive.",
-                "format": "date",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Search Date"
           }
         },
         "required": [

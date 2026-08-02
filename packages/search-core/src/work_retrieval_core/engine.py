@@ -471,8 +471,7 @@ class ProductionSearchEngine:
         ranked_candidates = {
             job_id: candidate
             for job_id, candidate in ranked_candidates.items()
-            if {item.lane for item in candidate.evidence}
-            & {"tantivy_bm25_full_jd", "qwen_dense_whole_jd"}
+            if any(item.lane == "tantivy_bm25_full_jd" for item in candidate.evidence)
         }
 
         if not self._enable_dense_shadow:
@@ -498,12 +497,6 @@ class ProductionSearchEngine:
             for job_id, candidate in ranked_candidates.items()
         ]
         scored.sort(key=_serving_order)
-        if self._reranker_mode != "active":
-            scored = [
-                item
-                for item in scored
-                if any(evidence.lane == "tantivy_bm25_full_jd" for evidence in item.evidence)
-            ]
         reranker_trace = LaneTrace("reranker", "disabled", "feature_flag_disabled", 0)
         if self._reranker_mode != "off" and "qwen_dense_whole_jd" not in lane_failures:
             assert self._ports.reranker is not None

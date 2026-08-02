@@ -626,7 +626,7 @@ def test_reranker_pool_matches_sealed_four_to_one_weighted_rrf() -> None:
     assert reranker.calls == [
         (
             "工程師",
-            ("11", *tuple(str(index) for index in range(1, 11)), "12", "13"),
+            ("11", *tuple(str(index) for index in range(1, 11))),
         )
     ]
     assert result.job_ids == ("1", "11", "2")
@@ -634,12 +634,12 @@ def test_reranker_pool_matches_sealed_four_to_one_weighted_rrf() -> None:
     assert (reranker_lane.status, reranker_lane.reason, reranker_lane.candidate_count) == (
         "enabled",
         "relevance_gated_rank_fusion_top1_protected",
-        13,
+        11,
     )
     engine.close()
 
 
-def test_reranker_can_only_promote_same_occupation_or_cross_modal_candidates() -> None:
+def test_active_reranker_never_admits_a_dense_only_candidate() -> None:
     lexical = StubRetriever(
         tuple(_candidate(str(index), float(10 - index), index) for index in range(1, 5))
     )
@@ -665,9 +665,8 @@ def test_reranker_can_only_promote_same_occupation_or_cross_modal_candidates() -
 
     result = engine.search(SearchQuery("工程師"), limit=5)
 
-    assert result.job_ids[0] == "1"
-    assert result.job_ids.index("4") < 3
-    assert result.job_ids[-1] == "5"
+    assert "5" not in result.job_ids
+    assert reranker.calls == [("工程師", ("4", "1", "2", "3"))]
     engine.close()
 
 
@@ -696,7 +695,7 @@ def test_dense_only_candidate_cannot_change_top_ten_when_reranker_is_disabled() 
     engine.close()
 
 
-def test_reranker_preserves_non_pool_suffix_and_full_membership() -> None:
+def test_active_reranker_excludes_dense_and_multiview_only_candidates() -> None:
     reranker = StubReranker()
     engine = ProductionSearchEngine(
         RuntimeManifest.from_dict(_manifest(multiview=True)),
@@ -716,8 +715,8 @@ def test_reranker_preserves_non_pool_suffix_and_full_membership() -> None:
 
     result = engine.search(SearchQuery("工程師"), limit=3)
 
-    assert reranker.calls == [("工程師", ("1", "2"))]
-    assert result.job_ids == ("1", "2")
+    assert reranker.calls == [("工程師", ("1",))]
+    assert result.job_ids == ("1",)
     engine.close()
 
 
@@ -758,7 +757,7 @@ def test_shadow_reranker_scores_without_reordering_and_failure_keeps_incumbent()
     )
     result = engine.search(SearchQuery("工程師"), limit=3)
     assert result.job_ids == ("1", "2")
-    assert reranker.calls == [("工程師", ("1", "2", "3"))]
+    assert reranker.calls == [("工程師", ("1", "2"))]
     trace = next(lane for lane in result.trace.lanes if lane.name == "reranker")
     assert (trace.status, trace.reason) == ("enabled", "shadow_scored")
     engine.close()
