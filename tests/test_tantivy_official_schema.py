@@ -75,52 +75,19 @@ def test_official_csv_builds_with_taxonomies_and_numeric_filters(tmp_path: Path)
 
     location_taxonomy = tmp_path / "城市對照表.csv"
     duty_taxonomy = tmp_path / "職務對照表.csv"
-    for path, rows in (
+    for path, row in (
         (
             location_taxonomy,
-            (
-                {
-                    "CodeNo": "100000",
-                    "CodeNameA": "台灣",
-                    "CodeNameB": "台灣",
-                    "CodeNameC": "台灣",
-                },
-                {
-                    "CodeNo": "100100",
-                    "CodeNameA": "台北市",
-                    "CodeNameB": "台北市",
-                    "CodeNameC": "台灣",
-                },
-                {
-                    "CodeNo": "100101",
-                    "CodeNameA": "中正區",
-                    "CodeNameB": "台北市",
-                    "CodeNameC": "台灣",
-                },
-            ),
+            {"CodeNo": "100100", "CodeNameA": "台北市", "CodeNameB": "台北市", "CodeNameC": "台灣"},
         ),
         (
             duty_taxonomy,
-            (
-                {
-                    "CodeNo": "140000",
-                    "CodeNameA": "資訊科技",
-                    "CodeNameB": "資訊科技",
-                    "CodeNameC": "資訊科技",
-                },
-                {
-                    "CodeNo": "140200",
-                    "CodeNameA": "軟體工程",
-                    "CodeNameB": "軟體工程",
-                    "CodeNameC": "資訊科技",
-                },
-                {
-                    "CodeNo": "140201",
-                    "CodeNameA": "後端工程師",
-                    "CodeNameB": "軟體工程",
-                    "CodeNameC": "資訊科技",
-                },
-            ),
+            {
+                "CodeNo": "140201",
+                "CodeNameA": "後端工程師",
+                "CodeNameB": "軟體工程",
+                "CodeNameC": "資訊科技",
+            },
         ),
     ):
         with path.open("w", encoding="utf-8", newline="") as target:
@@ -128,7 +95,7 @@ def test_official_csv_builds_with_taxonomies_and_numeric_filters(tmp_path: Path)
                 target, fieldnames=("CodeNo", "CodeNameA", "CodeNameB", "CodeNameC")
             )
             writer.writeheader()
-            writer.writerows(rows)
+            writer.writerow(row)
 
     output = tmp_path / "tantivy"
     pipeline.build_tantivy(
@@ -173,43 +140,5 @@ def test_official_csv_builds_with_taxonomies_and_numeric_filters(tmp_path: Path)
 
     assert [candidate.job_id for candidate in candidates] == ["101"]
     assert load_job_ids(output / "job-ids.json") == ("101", "102")
-    assert taxonomy.location_code_to_terms["100000"] == ("中正區", "台北市", "台灣")
-    assert taxonomy.location_code_to_terms["100101"] == ("中正區", "台北市", "台灣")
-    assert taxonomy.location_codes_for_term("台北市") == ("100000", "100100", "100101")
-    assert taxonomy.duty_code_to_terms["140000"] == (
-        "後端工程師",
-        "資訊科技",
-        "軟體工程",
-    )
+    assert taxonomy.location_code_to_terms["100100"] == ("台北市", "台灣")
     assert taxonomy.duty_code_to_terms["140201"] == ("後端工程師", "資訊科技", "軟體工程")
-    assert taxonomy.duty_codes_for_terms(("後端工程師",)) == (
-        "140000",
-        "140200",
-        "140201",
-    )
-
-    parent_candidates = retriever.retrieve(
-        CandidateRequest(
-            text="工程師",
-            location_codes=("100000",),
-            duty_codes=("140000",),
-            as_of=datetime(2026, 6, 8, tzinfo=UTC),
-            minimum_updated_at=datetime(2025, 12, 10, tzinfo=UTC),
-            lexical_texts=("工程師",),
-        ),
-        limit=10,
-    )
-    district_candidates = retriever.retrieve(
-        CandidateRequest(
-            text="Python",
-            location_codes=("100101",),
-            duty_codes=("140201",),
-            as_of=datetime(2026, 6, 8, tzinfo=UTC),
-            minimum_updated_at=datetime(2025, 12, 10, tzinfo=UTC),
-            lexical_texts=("Python",),
-        ),
-        limit=10,
-    )
-
-    assert [candidate.job_id for candidate in parent_candidates] == ["101"]
-    assert [candidate.job_id for candidate in district_candidates] == ["101"]

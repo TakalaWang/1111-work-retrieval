@@ -167,8 +167,7 @@ def _taxonomy_add(mapping: dict[str, set[str]], code: str, term: str, name: str)
 
 
 def _taxonomy_csv(path: Path, name: str) -> tuple[dict[str, set[str]], set[str]]:
-    parsed: list[tuple[str, frozenset[str], tuple[str, ...]]] = []
-    seen: set[str] = set()
+    mapping: dict[str, set[str]] = {}
     primary_terms: set[str] = set()
     with path.open(encoding="utf-8-sig", newline="") as source:
         reader = csv.DictReader(source)
@@ -178,33 +177,17 @@ def _taxonomy_csv(path: Path, name: str) -> tuple[dict[str, set[str]], set[str]]
         for row in reader:
             code = canonical_text(row["CodeNo"])
             primary = canonical_code(row["CodeNameA"])
-            if not code.isascii() or not code.isdecimal():
-                raise RuntimeError(f"{name} taxonomy contains an invalid code")
-            if code in seen:
-                raise RuntimeError(f"{name} taxonomy contains a duplicate code")
-            if not primary:
-                raise RuntimeError(f"{name} taxonomy contains an empty primary term")
-            seen.add(code)
-            terms = tuple(
-                dict.fromkeys(
-                    term
-                    for field in ("CodeNameA", "CodeNameB", "CodeNameC")
-                    if (term := canonical_code(row[field]))
+            if code in mapping or not primary:
+                raise RuntimeError(
+                    f"{name} taxonomy contains a duplicate code or empty primary term"
                 )
-            )
-            parsed.append((code, frozenset(terms), terms))
+            for field in ("CodeNameA", "CodeNameB", "CodeNameC"):
+                term = canonical_code(row[field])
+                if term:
+                    _taxonomy_add(mapping, code, term, name)
             primary_terms.add(primary)
-    if not parsed:
+    if not mapping:
         raise RuntimeError(f"{name} taxonomy CSV contains no rows")
-    mapping = {
-        code: {
-            term
-            for _candidate_code, candidate_hierarchy, candidate_terms in parsed
-            if ancestors.issubset(candidate_hierarchy)
-            for term in candidate_terms
-        }
-        for code, ancestors, _terms in parsed
-    }
     return mapping, primary_terms
 
 
