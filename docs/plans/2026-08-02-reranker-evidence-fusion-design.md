@@ -21,12 +21,13 @@ varying only candidate depth, fusion policy, and BM25 prefix protection.
 1. `direct`: reranker rank replaces the candidate-pool order.
 2. `rank_fusion`: prior weighted-RRF rank and reranker rank are combined using
    RRF; raw scores are not mixed across queries.
-3. `protected_rank_fusion`: the same fusion with BM25 prefix depths 3 or 10 kept
-   at their original positions. Protection depth 0 is the requested unprotected
-   variant.
+3. `protected_rank_fusion`: the same fusion with BM25 prefix depths 1, 3, or 10
+   kept at their original positions. Protection depth 0 is the requested
+   unprotected variant. Depth 1 is required because the sealed Top-10 diagnostic
+   improved NDCG and MRR while preserving Top-1.
 
 The sweep changes one variable at a time: pool depth 20/30/50, BM25 protection
-0/3/10, and reranker rank weight. The first-stage weight and endpoint output stay
+0/1/3/10, and reranker rank weight. The first-stage weight and endpoint output stay
 fixed.
 
 ## Promotion rule

@@ -16,7 +16,7 @@
 - Create: `/Users/takala/code/1111 work retrieval/src/temporal_reranker_fusion_ablation.py`
 - Create: `/Users/takala/code/1111 work retrieval/tests/test_temporal_reranker_fusion_ablation.py`
 
-1. Write failing tests for weighted-RRF pool membership, deterministic rank fusion, prefix depths 0/3/10, fixed suffix membership, and invalid score masks.
+1. Write failing tests for weighted-RRF pool membership, deterministic rank fusion, prefix depths 0/1/3/10, fixed suffix membership, and invalid score masks.
 2. Run `uv run pytest tests/test_temporal_reranker_fusion_ablation.py -q` and verify failure.
 3. Implement the minimum pure ranking functions and a resumable v7 Top-50 scoring cache with frozen input and endpoint lineage hashes.
 4. Run the focused test and `uv run python src/temporal_reranker_fusion_ablation.py self-check`.
@@ -28,7 +28,7 @@
 - Modify: `/Users/takala/code/1111 work retrieval/docs/experiments/2026-08-01-ppt-evidence-ledger.md`
 
 1. Run Top-50 scoring against `work-retrieval-qwen3-reranker-8b-v7`; resume safely after interruption.
-2. Evaluate pool depths 20/30/50, BM25 protection 0/3/10, direct replacement, and rank-fusion weights over identical cached scores.
+2. Evaluate pool depths 20/30/50, BM25 protection 0/1/3/10, direct replacement, and rank-fusion weights over identical cached scores.
 3. Write one immutable JSON report containing all metrics, paired confidence intervals, latency, input hashes, output hashes, and the selected/promotion decision.
 4. Record the result and negative findings in the evidence ledger.
 
