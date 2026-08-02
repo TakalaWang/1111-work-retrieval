@@ -97,7 +97,7 @@ export class PlatformStack extends Stack {
       )
     });
     const cpuServiceDesiredCount = Token.asNumber(
-      Fn.conditionIf(cpuIncumbentProfile.logicalId, 1, 0)
+      Fn.conditionIf(cpuIncumbentProfile.logicalId, 2, 0)
     );
     const gpuMinCapacity = Token.asNumber(
       Fn.conditionIf(cpuIncumbentProfile.logicalId, '0', '1')

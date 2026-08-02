@@ -98,7 +98,7 @@ describe('platform stack', () => {
       ])
     );
     template.hasResourceProperties('AWS::ECS::Service', {
-      DesiredCount: { 'Fn::If': ['CpuIncumbentProfile', 1, 0] },
+      DesiredCount: { 'Fn::If': ['CpuIncumbentProfile', 2, 0] },
       HealthCheckGracePeriodSeconds: 600,
       LaunchType: 'FARGATE',
       LoadBalancers: [
