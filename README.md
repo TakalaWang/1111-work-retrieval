@@ -303,18 +303,21 @@ schema；organizer-specific adapter 必須先把官方 CSV 轉成 canonical JSON
 可重現的 acceptance commands 與未來 benchmark 所需的 artifact、provenance、metrics 見
 [`docs/benchmark.md`](docs/benchmark.md)。
 
-## 手動 production deployment
+## Production deployment
 
-`.github/workflows/deploy.yml` 僅支援 `workflow_dispatch`，且只允許由 `main` 經 GitHub `production`
-environment 執行。它同時要求：
+`.github/workflows/deploy.yml` 會在 `main` 收到 merge commit 後自動執行，也保留 `workflow_dispatch`
+供同一個 commit 手動重部署；兩條路徑都只允許由 `main` 經 GitHub `production` environment 執行。它同時要求：
 
-- repository variable `DEPLOY_ENABLED=true`
+- protected environment variable `DEPLOY_ENABLED=true`
 - environment variable `AWS_DEPLOY_ROLE_ARN`
+- protected environment variable `ARTIFACT_MANIFEST_SHA`，供自動部署指定已核准的 immutable runtime
 - protected environment variable `SEARCH_ENABLE_GRAPH=true|false`；未設定時為 `false`
-- confirmation input 必須精確等於 `DEPLOY`
-- 64-character lowercase artifact manifest SHA-256
-- alarm email 可省略；若有填寫，收件者必須完成 AWS SNS subscription confirmation
-- `compute_profile` 必須精確為 `cpu-incumbent` 或 `gpu-shadow`；預設 `cpu-incumbent`
+- 手動重部署的 confirmation input 必須精確等於 `DEPLOY`
+- resolved artifact manifest 必須是 64-character lowercase SHA-256
+- 自動部署可由 `ALARM_EMAIL` environment variable 設定 alarm email；手動重部署則使用 input。若有填寫，
+  收件者必須完成 AWS SNS subscription confirmation
+- 自動部署可由 `COMPUTE_PROFILE` environment variable 選擇 `cpu-incumbent` 或 `gpu-shadow`，未設定時為
+  `cpu-incumbent`；手動重部署使用同名 input
 - `cpu-incumbent` 固定啟動一個 2 vCPU／16 GiB Fargate task，GPU ASG/service 固定為 `0/0/0`
 - `gpu-shadow` 固定 CPU desired `0`、GPU ASG min/max `1/2`、GPU service desired `1`；不允許 caller
   自行拼出混合 profile
@@ -325,16 +328,16 @@ CloudFront invalidation，最後才執行 public health、web 與 search smoke�
 temporal BM25 hot path。Graph 可由 `SEARCH_ENABLE_GRAPH=true` 選用，但 immutable runtime manifest 必須同時
 包含通過正向 NDCG@10、organizer attestation、serving-policy SHA 驗證的 publishable Skill Graph；缺檔、未核准或驗證失敗會讓部署／服務
 啟動直接失敗，不會退回 BM25。現有 runtime bundle 的 Graph 仍為 `false`，Dense、LTR 與 reranker 也維持關閉；public readiness 回傳的
-`artifact_manifest_sha256` 必須精確等於本次 workflow input，舊 runtime 健康不能通過 deployment gate。
+`artifact_manifest_sha256` 必須精確等於本次 workflow resolved manifest，舊 runtime 健康不能通過 deployment gate。
 
-Workflow 自行 build image，不接受 caller-supplied image URI；CDK 只接收 ECR digest URI。任何 push 或
-merge 都不會自動部署。ECR scan、stack deployment、CloudFront publication 與 public smoke 是彼此獨立的
-gate，不可用前一項成功代表後一項已完成。
+Workflow 自行 build image，不接受 caller-supplied image URI；CDK 只接收 ECR digest URI。`main` 的每次
+push（包含 PR merge）都會自動部署；其他 branch 不會部署。ECR scan、stack deployment、CloudFront
+publication 與 public smoke 是彼此獨立的 gate，不可用前一項成功代表後一項已完成。
 
 GitHub OIDC 使用 repository-ID-bound immutable subject；不要改回可變動的 owner／repository-name
 subject。`production` environment 已限制為 `main`。目前 private-repository billing plan 不支援 required
-reviewers，因此現有 gate 是 main-only environment、`DEPLOY_ENABLED=true` 與精確的 `DEPLOY` confirmation；
-若方案之後支援，再啟用 required reviewers。
+reviewers，因此自動路徑的 gate 是 main-only environment、`DEPLOY_ENABLED=true` 與已核准的 immutable
+manifest；手動路徑另要求精確的 `DEPLOY` confirmation。若方案之後支援，再啟用 required reviewers。
 
 系統元件、request flow、資料匯入與 infrastructure ownership 詳見
 [`docs/architecture.md`](docs/architecture.md)，貢獻規則見 [CONTRIBUTING.md](CONTRIBUTING.md)。

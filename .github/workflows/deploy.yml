@@ -1,7 +1,9 @@
 name: Deploy production
-run-name: Deploy ${{ inputs.artifact_manifest_sha }} ${{ inputs.deployment_id }}
+run-name: Deploy ${{ github.event_name == 'push' && github.sha || format('{0} {1}', inputs.artifact_manifest_sha, inputs.deployment_id) }}
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       confirm:
@@ -45,7 +47,7 @@ env:
 
 jobs:
   deploy:
-    if: ${{ github.ref == 'refs/heads/main' && inputs.confirm == 'DEPLOY' }}
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || inputs.confirm == 'DEPLOY') }}
     runs-on: ubuntu-latest
     environment: production
     concurrency:
@@ -56,24 +58,35 @@ jobs:
 
       - name: Validate deployment inputs
         env:
-          ARTIFACT_MANIFEST_SHA: ${{ inputs.artifact_manifest_sha }}
-          ALARM_EMAIL: ${{ inputs.alarm_email }}
+          ARTIFACT_MANIFEST_SHA: ${{ inputs.artifact_manifest_sha || vars.ARTIFACT_MANIFEST_SHA }}
+          ALARM_EMAIL: ${{ inputs.alarm_email || vars.ALARM_EMAIL || '' }}
           AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-          COMPUTE_PROFILE: ${{ inputs.compute_profile }}
+          COMPUTE_PROFILE: ${{ inputs.compute_profile || vars.COMPUTE_PROFILE || 'cpu-incumbent' }}
           DEPLOY_ENABLED: ${{ vars.DEPLOY_ENABLED }}
-          DEPLOYMENT_ID: ${{ inputs.deployment_id }}
-          GPU_INSTANCE_TYPE: ${{ inputs.gpu_instance_type }}
+          DEPLOYMENT_ID: ${{ inputs.deployment_id || github.sha }}
+          GPU_INSTANCE_TYPE: ${{ inputs.gpu_instance_type || vars.GPU_INSTANCE_TYPE || 'g5.xlarge' }}
           SEARCH_ENABLE_GRAPH: ${{ vars.SEARCH_ENABLE_GRAPH || 'false' }}
         run: |
           set -euo pipefail
           [[ "$AWS_DEPLOY_ROLE_ARN" =~ ^arn:aws:iam::378849533305:role/[A-Za-z0-9+=,.@_/-]+$ ]]
           [[ "$DEPLOY_ENABLED" == "true" ]]
           [[ "$ARTIFACT_MANIFEST_SHA" =~ ^[0-9a-f]{64}$ ]]
-          [[ "$DEPLOYMENT_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            [[ "$DEPLOYMENT_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]
+          else
+            [[ "$DEPLOYMENT_ID" == "$GITHUB_SHA" ]]
+          fi
           [[ -z "$ALARM_EMAIL" || "$ALARM_EMAIL" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]
           [[ "$COMPUTE_PROFILE" == "cpu-incumbent" || "$COMPUTE_PROFILE" == "gpu-shadow" ]]
           [[ "$GPU_INSTANCE_TYPE" =~ ^[a-z0-9][a-z0-9.-]*$ ]]
           [[ "$SEARCH_ENABLE_GRAPH" == "true" || "$SEARCH_ENABLE_GRAPH" == "false" ]]
+          {
+            printf 'ALARM_EMAIL=%s\n' "$ALARM_EMAIL"
+            printf 'ARTIFACT_MANIFEST_SHA=%s\n' "$ARTIFACT_MANIFEST_SHA"
+            printf 'COMPUTE_PROFILE=%s\n' "$COMPUTE_PROFILE"
+            printf 'GPU_INSTANCE_TYPE=%s\n' "$GPU_INSTANCE_TYPE"
+            printf 'SEARCH_ENABLE_GRAPH=%s\n' "$SEARCH_ENABLE_GRAPH"
+          } >>"$GITHUB_ENV"
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
@@ -125,9 +138,6 @@ jobs:
             --parameters "WorkRetrievalData:S3PrefixListId=$S3_PREFIX_LIST_ID"
 
       - name: Download and validate the runtime manifest body
-        env:
-          ARTIFACT_MANIFEST_SHA: ${{ inputs.artifact_manifest_sha }}
-          SEARCH_ENABLE_GRAPH: ${{ vars.SEARCH_ENABLE_GRAPH || 'false' }}
         run: |
           set -euo pipefail
           RUNTIME_BUCKET="$(jq -er '.WorkRetrievalData.RuntimeBucketName' data-outputs.json)"
@@ -199,12 +209,6 @@ jobs:
           printf 'API_IMAGE_URI=%s@%s\n' "$ECR_URI" "$IMAGE_DIGEST" >>"$GITHUB_ENV"
 
       - name: Deploy the application stack
-        env:
-          ALARM_EMAIL: ${{ inputs.alarm_email }}
-          ARTIFACT_MANIFEST_SHA: ${{ inputs.artifact_manifest_sha }}
-          COMPUTE_PROFILE: ${{ inputs.compute_profile }}
-          GPU_INSTANCE_TYPE: ${{ inputs.gpu_instance_type }}
-          SEARCH_ENABLE_GRAPH: ${{ vars.SEARCH_ENABLE_GRAPH || 'false' }}
         run: |
           set -euo pipefail
           [[ "$API_IMAGE_URI" =~ ^378849533305\.dkr\.ecr\.us-west-2\.amazonaws\.com/.+@sha256:[0-9a-f]{64}$ ]]
@@ -235,8 +239,6 @@ jobs:
             --id "$INVALIDATION_ID"
 
       - name: Smoke test the public application
-        env:
-          ARTIFACT_MANIFEST_SHA: ${{ inputs.artifact_manifest_sha }}
         run: |
           set -euo pipefail
           WEB_URL="$(jq -er '.WorkRetrievalPlatform.WebUrl' platform-outputs.json)"

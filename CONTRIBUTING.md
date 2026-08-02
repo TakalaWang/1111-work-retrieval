@@ -91,9 +91,11 @@ behavior data, rerankers, SQLite, or unrelated experiments.
 
 ## Deployment changes
 
-- Keep production deployment under `workflow_dispatch`; never add a push-triggered deploy.
-- Preserve the `main` ref check, `production` environment, `DEPLOY_ENABLED=true`, exact `DEPLOY`
-  confirmation, fixed account `378849533305`, and region `us-west-2`.
+- Keep production deployment automatic for pushes to `main`; retain `workflow_dispatch` for an
+  intentional redeploy of the same commit.
+- Preserve the `main` ref check, `production` environment, `DEPLOY_ENABLED=true`, approved
+  `ARTIFACT_MANIFEST_SHA`, fixed account `378849533305`, and region `us-west-2`. Manual redeploys
+  additionally require exact `DEPLOY` confirmation.
 - Preserve GitHub's immutable OIDC subject customization and repository-ID-bound production
   environment subject; do not replace it with a mutable owner/repository-name subject.
 - The workflow owns the `linux/amd64` image build and push. CDK must receive an ECR digest URI,

@@ -1559,6 +1559,10 @@ def test_aws_cli_retries_only_transient_network_errors(monkeypatch: pytest.Monke
 def test_deploy_downloads_and_validates_v2_manifest_body() -> None:
     workflow = (ROOT / ".github/workflows/deploy.yml").read_text(encoding="utf-8")
 
+    assert "push:\n    branches: [main]" in workflow
+    assert "github.event_name == 'push'" in workflow
+    assert "inputs.artifact_manifest_sha || vars.ARTIFACT_MANIFEST_SHA" in workflow
+    assert "inputs.compute_profile || vars.COMPUTE_PROFILE || 'cpu-incumbent'" in workflow
     assert "compute_profile:" in workflow
     assert "default: cpu-incumbent" in workflow
     assert "options:" in workflow
@@ -1584,7 +1588,8 @@ def test_deploy_downloads_and_validates_v2_manifest_body() -> None:
     platform_step = workflow.split("- name: Deploy the application stack", 1)[1].split(
         "- name: Publish the static web application", 1
     )[0]
-    assert "ALARM_EMAIL: ${{ inputs.alarm_email }}" in platform_step
+    assert '--parameters "WorkRetrievalPlatform:AlarmEmail=$ALARM_EMAIL"' in platform_step
+    assert "printf 'ARTIFACT_MANIFEST_SHA=%s\\n'" in workflow
 
 
 def test_bootstrap_stages_source_and_deploys_promoted_runtime_sha() -> None:
@@ -1599,8 +1604,8 @@ def test_bootstrap_stages_source_and_deploys_promoted_runtime_sha() -> None:
 
     workflow = (ROOT / ".github/workflows/deploy.yml").read_text(encoding="utf-8")
     assert (
-        "run-name: Deploy ${{ inputs.artifact_manifest_sha }} ${{ inputs.deployment_id }}"
-        in workflow
+        "github.event_name == 'push' && github.sha || "
+        "format('{0} {1}', inputs.artifact_manifest_sha, inputs.deployment_id)" in workflow
     )
     assert "deployment_id=$(uv run python -c 'import uuid; print(uuid.uuid4())')" in bootstrap
     assert "-f compute_profile=cpu-incumbent" in bootstrap
