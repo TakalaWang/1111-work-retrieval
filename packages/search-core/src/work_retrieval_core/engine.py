@@ -26,6 +26,7 @@ from work_retrieval_core.ranking import (
     BusinessEvidence,
     CandidateEvidenceGate,
     evidence_preserving_rank,
+    weighted_rrf_pool,
 )
 from work_retrieval_core.serialization import canonical_code
 
@@ -36,8 +37,8 @@ SHADOW_COLLECTION_SECONDS = 1.0
 METADATA_RESERVE_SECONDS = 1.0
 MAX_INFLIGHT_SEARCHES = 8
 RERANK_POOL_LIMIT = 50
-RRF_K = 60
-INCUMBENT_LANES = {"tantivy_bm25_full_jd", "graph_conditioned_tantivy"}
+RERANKER_TIMEOUT_SECONDS = 8.0
+INCUMBENT_LANES = {"tantivy_bm25_full_jd"}
 SEARCH_TIMEZONE = ZoneInfo("Asia/Taipei")
 
 
@@ -140,6 +141,7 @@ class RetrievalPorts:
     dense_multiview_maxsim: CandidateRetriever | None = None
     query_compiler: QueryCompiler | None = None
     reranker: CandidateReranker | None = None
+    graph: CandidateRetriever | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -313,6 +315,8 @@ class ProductionSearchEngine:
             raise TypeError("metadata port does not satisfy JobMetadataLookup")
         if enable_graph and manifest.skill_graph is None:
             raise RuntimeError("enabled Graph requires its manifest artifact")
+        if enable_graph and not isinstance(ports.graph, CandidateRetriever):
+            raise TypeError("enabled Graph port does not satisfy CandidateRetriever")
         artifact = manifest.artifact(multiview_artifact_key or "")
         if enable_multiview_maxsim and (
             artifact is None or artifact.kind not in {"embedding", "index"}
@@ -335,7 +339,7 @@ class ProductionSearchEngine:
         self._reranker_mode = reranker_mode
         self._enable_graph = enable_graph
         self._clock = clock or (lambda: datetime.now(UTC))
-        lane_count = 1 + int(enable_dense_shadow) + int(enable_multiview_maxsim)
+        lane_count = 1 + int(enable_dense_shadow) + int(enable_multiview_maxsim) + int(enable_graph)
         self._executor = ThreadPoolExecutor(
             max_workers=lane_count * max_inflight_searches,
             thread_name_prefix="retrieval-lane",
@@ -476,9 +480,13 @@ class ProductionSearchEngine:
             pool = _reranker_pool_ids(ranked_candidates)
             if pool:
                 reranker_failed = False
+                future = None
                 try:
-                    scores = self._ports.reranker.score(query.text, pool)
+                    future = self._executor.submit(self._ports.reranker.score, query.text, pool)
+                    scores = future.result(timeout=RERANKER_TIMEOUT_SECONDS)
                 except Exception as error:
+                    if future is not None:
+                        future.cancel()
                     if self._reranker_mode == "active":
                         raise SearchUnavailableError("reranker failed") from error
                     reranker_trace = LaneTrace("reranker", "failed", "shadow_call_failed", 0)
@@ -531,9 +539,10 @@ class ProductionSearchEngine:
                         pool,
                         reranked,
                         gates,
-                        protected_prefix=1,
+                        protected_prefix=0,
+                        protected_job_ids=_lane_ids(ranked_candidates, "tantivy_bm25_full_jd")[:1],
                         suitability_threshold=0.9,
-                        reranker_weight=0.5,
+                        reranker_weight=0.25,
                         business_weight=0.0,
                     )
                     ordered_ids = (
@@ -599,6 +608,7 @@ class ProductionSearchEngine:
             self._ports.metadata,
             self._ports.dense_multiview_maxsim,
             self._ports.reranker,
+            self._ports.graph,
         ):
             if retriever is not None and id(retriever) not in seen:
                 seen.add(id(retriever))
@@ -612,11 +622,11 @@ class ProductionSearchEngine:
         float,
     ]:
         lanes: list[tuple[str, CandidateRetriever]] = [
-            (
-                "graph_conditioned_tantivy" if self._enable_graph else "tantivy_bm25_full_jd",
-                self._ports.lexical_full_jd,
-            ),
+            ("tantivy_bm25_full_jd", self._ports.lexical_full_jd),
         ]
+        if self._enable_graph:
+            assert self._ports.graph is not None
+            lanes.append(("graph_conditioned_tantivy", self._ports.graph))
         if self._enable_dense_shadow:
             assert self._ports.dense_whole_jd is not None
             lanes.append(("qwen_dense_whole_jd", self._ports.dense_whole_jd))
@@ -869,41 +879,33 @@ def _candidate_gate(
             and set(request.duty_codes).intersection(candidate.metadata.duty_codes)
         ),
         bm25_supported="tantivy_bm25_full_jd" in lanes,
-        dense_supported=bool(
-            lanes.intersection({"qwen_dense_whole_jd", "qwen_dense_multiview_maxsim"})
-        ),
+        dense_supported="qwen_dense_whole_jd" in lanes,
         business=BusinessEvidence(popularity=0.0, completeness=0.0),
     )
 
 
 def _reranker_pool_ids(candidates: Mapping[str, _RankedCandidate]) -> tuple[str, ...]:
-    indexed = tuple(candidates.items())
-    lexical = sorted(
+    return weighted_rrf_pool(
+        {
+            "bm25": _lane_ids(candidates, "tantivy_bm25_full_jd"),
+            "whole_dense": _lane_ids(candidates, "qwen_dense_whole_jd"),
+        },
+        {"bm25": 4.0, "whole_dense": 1.0},
+        limit=RERANK_POOL_LIMIT,
+    )
+
+
+def _lane_ids(candidates: Mapping[str, _RankedCandidate], name: str) -> tuple[str, ...]:
+    ranked = sorted(
         (
             (evidence.rank, job_id)
-            for job_id, candidate in indexed
+            for job_id, candidate in candidates.items()
             for evidence in candidate.evidence
-            if evidence.lane in INCUMBENT_LANES
+            if evidence.lane == name
         ),
         key=lambda item: (item[0], item[1]),
     )
-    protected = tuple(job_id for _rank, job_id in lexical[:10])
-    protected_set = set(protected)
-    remaining: list[tuple[float, int, str]] = []
-    for original_position, (job_id, candidate) in enumerate(indexed):
-        if job_id in protected_set:
-            continue
-        evidence = tuple(
-            item
-            for item in candidate.evidence
-            if item.lane in {*INCUMBENT_LANES, "qwen_dense_whole_jd"}
-        )
-        if evidence:
-            remaining.append(
-                (sum(1.0 / (RRF_K + item.rank) for item in evidence), original_position, job_id)
-            )
-    remaining.sort(key=lambda item: (-item[0], item[1], item[2]))
-    return (*protected, *(job_id for _score, _position, job_id in remaining))[:RERANK_POOL_LIMIT]
+    return tuple(job_id for _rank, job_id in ranked)
 
 
 def _serving_order(item: ResultTrace) -> tuple[int, int, float, str]:

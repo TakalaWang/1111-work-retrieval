@@ -108,6 +108,7 @@ def create_production_ports(
         taxonomy,
     )
     lexical: CandidateRetriever = baseline
+    graph: CandidateRetriever | None = None
     eligible_rows: EligibleRows = baseline
     if enable_graph:
         if manifest.skill_graph is None:
@@ -125,8 +126,7 @@ def create_production_ports(
                 baseline=baseline,
                 taxonomy=taxonomy,
             )
-            lexical = graph_retriever
-            eligible_rows = graph_retriever
+            graph = graph_retriever
         except Exception:
             baseline.close()
             raise
@@ -186,6 +186,7 @@ def create_production_ports(
         metadata,
         query_compiler=compiler,
         reranker=reranker,
+        graph=graph,
     )
 
 

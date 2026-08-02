@@ -191,7 +191,7 @@ describe('platform stack', () => {
           }),
           expect.objectContaining({
             Name: 'SEARCH_ENABLE_RERANKER',
-            Value: 'shadow'
+            Value: 'off'
           }),
           expect.objectContaining({
             Name: 'SEARCH_ENABLE_GRAPH',

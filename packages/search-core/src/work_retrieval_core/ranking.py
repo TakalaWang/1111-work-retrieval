@@ -77,6 +77,7 @@ def evidence_preserving_rank(
     evidence: Mapping[str, CandidateEvidenceGate],
     *,
     protected_prefix: int = 1,
+    protected_job_ids: Sequence[str] = (),
     suitability_threshold: float = 0.9,
     reranker_weight: float = 0.5,
     business_weight: float = 0.1,
@@ -92,6 +93,9 @@ def evidence_preserving_rank(
         or set(prior) != set(reranker_order)
         or set(prior) != set(evidence)
         or not 0 <= protected_prefix <= len(prior)
+        or len(set(protected_job_ids)) != len(protected_job_ids)
+        or not set(protected_job_ids).issubset(prior)
+        or (protected_job_ids and protected_prefix)
         or not isfinite(suitability_threshold)
         or not 0.0 <= suitability_threshold <= 1.0
         or not isfinite(reranker_weight)
@@ -107,8 +111,9 @@ def evidence_preserving_rank(
 
     prior_rank = {job_id: rank for rank, job_id in enumerate(prior, 1)}
     reranker_rank = {job_id: rank for rank, job_id in enumerate(reranker_order, 1)}
-    protected = prior[:protected_prefix]
-    movable = prior[protected_prefix:]
+    protected = tuple(protected_job_ids) if protected_job_ids else prior[:protected_prefix]
+    protected_set = set(protected)
+    movable = tuple(job_id for job_id in prior if job_id not in protected_set)
     relevance_order = tuple(
         sorted(
             movable,
@@ -126,6 +131,7 @@ def evidence_preserving_rank(
             ),
         )
     )
+    protected_count = len(protected)
     ranked = [*protected, *relevance_order]
     if business_weight == 0.0 or max_business_displacement == 0:
         return tuple(ranked)
@@ -145,9 +151,9 @@ def evidence_preserving_rank(
         )
 
     top_three_end = min(3, len(ranked))
-    if protected_prefix < top_three_end:
-        reorder(protected_prefix, top_three_end)
+    if protected_count < top_three_end:
+        reorder(protected_count, top_three_end)
     band_size = max_business_displacement + 1
-    for start in range(max(top_three_end, protected_prefix), len(ranked), band_size):
+    for start in range(max(top_three_end, protected_count), len(ranked), band_size):
         reorder(start, min(start + band_size, len(ranked)))
     return tuple(ranked)

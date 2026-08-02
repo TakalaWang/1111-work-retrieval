@@ -354,7 +354,12 @@ def test_graph_feature_flag_reaches_production_factory(tmp_path: Path) -> None:
     ) -> RetrievalPorts:
         del manifest, multiview, environment
         received.append(graph)
-        return RetrievalPorts(StubRetriever(), StubRetriever(), StubMetadata())
+        return RetrievalPorts(
+            StubRetriever(),
+            StubRetriever(),
+            StubMetadata(),
+            graph=StubRetriever(),
+        )
 
     engine = runtime_from_environment(
         {
@@ -365,9 +370,11 @@ def test_graph_feature_flag_reaches_production_factory(tmp_path: Path) -> None:
     )
 
     assert received == [True]
-    assert engine.search(SearchQuery("工程師"), limit=10).trace.lanes[0].name == (
-        "graph_conditioned_tantivy"
-    )
+    lanes = engine.search(SearchQuery("工程師"), limit=10).trace.lanes
+    assert [lane.name for lane in lanes[:2]] == [
+        "tantivy_bm25_full_jd",
+        "graph_conditioned_tantivy",
+    ]
     engine.close()
 
 

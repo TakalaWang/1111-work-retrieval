@@ -227,7 +227,7 @@ export class PlatformStack extends Stack {
       SEARCH_ENABLE_DENSE_SHADOW: 'true',
       SEARCH_ENABLE_GRAPH: enableGraph.valueAsString,
       SEARCH_ENABLE_MULTIVIEW_MAXSIM: 'false',
-      SEARCH_ENABLE_RERANKER: 'shadow',
+      SEARCH_ENABLE_RERANKER: 'off',
       SEARCH_PORT_FACTORY:
         'work_retrieval_api.production:create_production_ports',
       SEARCH_RUNTIME_MANIFEST_PATH: '/tmp/work-retrieval-runtime/manifest.json',

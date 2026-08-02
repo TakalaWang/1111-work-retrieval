@@ -95,6 +95,23 @@ def test_cross_modal_support_can_replace_literal_occupation_match() -> None:
     assert ranked.index("d") < prior.index("d")
 
 
+def test_named_bm25_protection_preserves_original_prior_for_fusion() -> None:
+    prior = ("dense-both", "bm25-top", "other")
+    evidence = {job_id: _gate(job_id) for job_id in prior}
+
+    ranked = evidence_preserving_rank(
+        prior,
+        ("other", "dense-both", "bm25-top"),
+        evidence,
+        protected_prefix=0,
+        protected_job_ids=("bm25-top",),
+        reranker_weight=0.5,
+    )
+
+    assert ranked[0] == "bm25-top"
+    assert set(ranked) == set(prior)
+
+
 def test_business_evidence_is_bounded_below_relevance_top_three() -> None:
     prior = ("a", "b", "c", "d", "e", "f", "g")
     evidence = {

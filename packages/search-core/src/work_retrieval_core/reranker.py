@@ -12,7 +12,7 @@ MODEL_ID = "Qwen/Qwen3-Reranker-8B"
 MAX_DOCUMENTS = 50
 MAX_REQUEST_BYTES = 6_291_456
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 1
-DEFAULT_READ_TIMEOUT_SECONDS = 30
+DEFAULT_READ_TIMEOUT_SECONDS = 8
 
 
 class JobDocumentLookup(Protocol):
@@ -61,7 +61,7 @@ class SemanticReranker:
         config = Config(
             connect_timeout=connect_timeout_seconds,
             read_timeout=read_timeout_seconds,
-            retries={"max_attempts": 2, "mode": "standard"},
+            retries={"total_max_attempts": 1, "mode": "standard"},
         )
         runtime = boto3.client("sagemaker-runtime", region_name=region_name, config=config)
         return cls(endpoint_name, documents, runtime)

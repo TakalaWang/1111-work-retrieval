@@ -14,8 +14,8 @@ SHA-pinned artifact 為準，不使用人工補標或 test-period JD 建圖。
 - **Skill Graph**：train-only LLM ontology、job entity links、bounded typed traversal 與 trace 均保留。現有 Graph
   實驗沒有救回 zero-result query，另一個 ontology broadcast 會降低 Top-10，因此不得藉由架構偏好強行加權。
 - **Qwen3 reranker v7**：獨立 endpoint 已部署，固定 job-search template 且 request 只能傳
-  `model/query/documents`。固定 Top-10 ablation 為負向，因此 endpoint 保留作可重現 challenger，正式排序
-  維持 disabled。
+  `model/query/documents`。Top-20、BM25 Top-1 保護、4:1 weighted-RRF 與 reranker rank weight 0.25 的
+  diagnostic 為正，但第三條 rail 的信賴區間跨 0，Top-50 平均延遲 4.65 秒，因此正式排序維持 disabled。
 - **LTR／behavior**：保留接口與 IPS／Doubly-Robust 訓練設計；目前沒有足夠可信的 chronological artifact，
   不使用 query history 直接回傳答案，也不讓歷史訊號新增候選。
 
@@ -132,6 +132,7 @@ request 的 prompt tokens 均為 297、排序相同，最大 score jitter 為 0.
 | Graph-conditioned cascade | 0.105671 | 0.085170 | 0.133902 | 0.187320 | 無增益，保持 gated                         |
 | v6 reranker Top-10        | 0.099904 | 0.085170 | 0.112626 | 0.178590 | request prompt contract 無效，不 promotion |
 | v7 fixed-template Top-10  | 0.099371 | 0.085170 | 0.112244 | 0.177334 | 契約有效但四項未改善，不 promotion         |
+| v7 Top-20 p1 rank fusion  | 0.112146 | 0.091107 | 0.131737 | 0.193870 | diagnostic 正向，延遲／holdout gate 未過   |
 
 Dense protected RRF60 保持所有 Top-10 指標不變，Recall@100 從 `0.262792` 提高到 `0.268880`，
 Recall@1000 從 `0.431478` 提高到 `0.462621`。Graph-conditioned cascade 的 42 個 baseline zero-result contexts
@@ -142,6 +143,15 @@ v7 的候選集合、339 qid 順序、42 個 zero-result qids、full-JD template
 manifest SHA-256 是 `c8d8cb1a78c7f7a5ce10f9f51b53c0820e3b285a94b94508c595ba360ac2cef5`。相對 baseline 的
 NDCG@10 delta `-0.006300`、P@10 delta `0`、Top-1 delta `-0.021659`、MRR delta `-0.009986`，因此不能因為
 prompt 契約已修正就跳過 quality gate。
+
+新 Top-50 sweep 只呼叫 endpoint 一次後離線比較 74 個 variant。勝出者為
+`rank_fusion_d20_p1_w0.25`：相對 BM25 的 GT1 NDCG@10 `+0.002525`（95% CI
+`[0.001642, 0.003431]`），P@10 `+0.002382`、Top-1 不變、MRR `+0.003767`；GT2 亦為正，GT3
+NDCG@10 `+0.007036` 但 CI `[-0.000118, 0.015915]`。Top-50 endpoint latency mean/p50/p95/max 為
+`4650/4333/7502/10620 ms`，所以不開 active。加入 score ≥ 0.9 且 BM25/Dense 同 job gate 後，GT1
+NDCG@10 只剩 `+0.000776` 且 P@10 `-0.002217`，同樣不 promotion。完整 report SHA-256 分別為
+`6ed64711ce88b2869337d0b9a343dd726384718a1c2a131319531c2726a3e2ce` 與
+`e9f6196e2cfb6ad11e8e6984773a6bf7293888c620aeb8ed56256f217c726fc1`。
 
 ### Learning-to-Rank
 

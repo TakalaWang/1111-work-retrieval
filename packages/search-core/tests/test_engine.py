@@ -403,11 +403,17 @@ def test_dynamic_as_of_filters_stale_rows_and_retains_future_snapshots() -> None
     engine.close()
 
 
-def test_enabled_graph_is_the_incumbent_lane() -> None:
-    graph = StubRetriever((_candidate("1", 10.0, 1),))
+def test_enabled_graph_is_an_independent_shadow_evidence_lane() -> None:
+    lexical = StubRetriever((_candidate("1", 10.0, 1),))
+    graph = StubRetriever((_candidate("2", 9.0, 1),))
     engine = ProductionSearchEngine(
         RuntimeManifest.from_dict(_manifest(graph=True)),
-        RetrievalPorts(graph, None, StubMetadata((_metadata("1", 0),))),
+        RetrievalPorts(
+            lexical,
+            None,
+            StubMetadata((_metadata("1", 0), _metadata("2", 0))),
+            graph=graph,
+        ),
         enable_graph=True,
         clock=lambda: DEMO_AS_OF,
     )
@@ -415,9 +421,15 @@ def test_enabled_graph_is_the_incumbent_lane() -> None:
     result = engine.search(SearchQuery("Python"), limit=10)
 
     assert result.trace.lanes[0].as_dict() == {
-        "name": "graph_conditioned_tantivy",
+        "name": "tantivy_bm25_full_jd",
         "status": "enabled",
         "reason": "top10_incumbent",
+        "candidate_count": 1,
+    }
+    assert result.trace.lanes[1].as_dict() == {
+        "name": "graph_conditioned_tantivy",
+        "status": "enabled",
+        "reason": "shadow_tail_only",
         "candidate_count": 1,
     }
     assert result.trace.results[0].evidence[0].ranking_contribution == 10.0
@@ -584,6 +596,7 @@ def test_dense_shadow_cannot_reorder_incumbent_top_ten(graph_enabled: bool) -> N
             StubRetriever(lexical_candidates),
             StubRetriever(dense_candidates),
             metadata,
+            graph=StubRetriever() if graph_enabled else None,
         ),
         enable_dense_shadow=True,
         enable_graph=graph_enabled,
@@ -596,7 +609,7 @@ def test_dense_shadow_cannot_reorder_incumbent_top_ten(graph_enabled: bool) -> N
     engine.close()
 
 
-def test_reranker_pool_is_bm25_top_ten_then_rrf60_whole_dense_union() -> None:
+def test_reranker_pool_matches_sealed_four_to_one_weighted_rrf() -> None:
     lexical = StubRetriever(
         tuple(_candidate(str(index), float(20 - index), index) for index in range(1, 12))
     )
@@ -626,7 +639,7 @@ def test_reranker_pool_is_bm25_top_ten_then_rrf60_whole_dense_union() -> None:
     assert reranker.calls == [
         (
             "工程師",
-            (*tuple(str(index) for index in range(1, 11)), "11", "12", "13"),
+            ("11", *tuple(str(index) for index in range(1, 11)), "12", "13"),
         )
     ]
     assert result.job_ids == ("1", "11", "2")
