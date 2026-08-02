@@ -13,6 +13,7 @@
 ### Task 1: Build the sealed fusion ablation
 
 **Files:**
+
 - Create: `/Users/takala/code/1111 work retrieval/src/temporal_reranker_fusion_ablation.py`
 - Create: `/Users/takala/code/1111 work retrieval/tests/test_temporal_reranker_fusion_ablation.py`
 
@@ -24,6 +25,7 @@
 ### Task 2: Score once and evaluate the grid
 
 **Files:**
+
 - Create: `/Users/takala/code/1111 work retrieval/artifacts/experiments/temporal-reranker-fusion-v7/*`
 - Modify: `/Users/takala/code/1111 work retrieval/docs/experiments/2026-08-01-ppt-evidence-ledger.md`
 
@@ -35,6 +37,7 @@
 ### Task 3: Implement the selected production policy
 
 **Files:**
+
 - Modify: `packages/search-core/src/work_retrieval_core/engine.py`
 - Modify: `packages/search-core/tests/test_engine.py`
 
@@ -53,6 +56,7 @@
 ### Task 4: Verify and document
 
 **Files:**
+
 - Modify: `docs/retrieval-pipelines.md`
 - Modify: `README.md`
 
@@ -64,6 +68,7 @@
 ### Task 5: Audit competition repository completeness
 
 **Files:**
+
 - Modify only if required: `README.md`
 - Modify only if required: `docs/retrieval-pipelines.md`
 
