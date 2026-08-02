@@ -23,4 +23,26 @@ describe('Big Fruit Tree page identity', () => {
     expect(hero).not.toContain('雲湧智生');
     expect(hero).not.toContain('1111 智慧求職');
   });
+
+  it('orders the integrated controls by duty, location, date, query, and action', () => {
+    const searchShellStart = page.indexOf('<div class="search-shell">');
+    const searchButtonStart = page.indexOf(
+      'class="search-button"',
+      searchShellStart
+    );
+    const searchShell = page.slice(
+      searchShellStart,
+      page.indexOf('</div>', searchButtonStart)
+    );
+    const positions = [
+      'id="duty-codes"',
+      'id="location-codes"',
+      'id="search-date"',
+      'id="job-query"',
+      'class="search-button"'
+    ].map((token) => searchShell.indexOf(token));
+
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+  });
 });

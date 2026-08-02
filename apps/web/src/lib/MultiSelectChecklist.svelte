@@ -170,11 +170,17 @@
     position: relative;
     display: grid;
     min-width: 0;
-    gap: 0.4rem;
+    align-content: center;
+    gap: 0.15rem;
+    padding: 0.7rem 0.9rem;
+    border-right: 1px solid #d7dfd8;
   }
 
   .field-label {
-    font-weight: 700;
+    color: #748078;
+    font-size: 0.68rem;
+    font-weight: 850;
+    letter-spacing: 0.06em;
   }
 
   button,
@@ -186,38 +192,38 @@
     display: flex;
     width: 100%;
     min-width: 0;
-    min-height: 2.75rem;
+    min-height: 1.5rem;
     align-items: center;
     justify-content: space-between;
     gap: 0.5rem;
-    border: 1px solid #cfd1d5;
-    border-radius: 0.5rem;
-    padding: 0.35rem 0.7rem;
-    background: #fff;
-    color: #4b4e54;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    color: #263b2c;
+    font-weight: 800;
     cursor: pointer;
     text-align: left;
   }
 
   .trigger:hover:not(:disabled) {
-    border-color: #aeb1b7;
+    color: #3f754d;
   }
 
   .trigger:focus-visible,
   .panel input:focus-visible,
   .actions button:focus-visible {
-    outline: 3px solid rgb(215 25 95 / 18%);
-    outline-offset: 1px;
+    outline: 3px solid rgb(36 74 48 / 22%);
+    outline-offset: 4px;
+    border-radius: 0.25rem;
   }
 
   .trigger:disabled {
-    background: #f1f1f2;
-    color: #777a80;
+    color: #89938c;
     cursor: not-allowed;
   }
 
   .chevron {
-    color: #767980;
+    color: #617267;
     font-size: 1.1rem;
   }
 
@@ -227,11 +233,11 @@
     top: calc(100% + 0.4rem);
     left: 0;
     width: min(22rem, calc(100vw - 2rem));
-    border: 1px solid #d6d7da;
-    border-radius: 0.65rem;
+    border: 2px solid #244a30;
+    border-radius: 0.85rem;
     padding: 0.65rem;
     background: #fff;
-    box-shadow: 0 12px 32px rgb(32 33 36 / 16%);
+    box-shadow: 6px 7px 0 #b9d7b4;
   }
 
   .align-end .panel {
@@ -242,10 +248,10 @@
   .search-label input {
     width: 100%;
     min-height: 2.75rem;
-    border: 1px solid #cfd1d5;
+    border: 1px solid #aebcaf;
     border-radius: 0.45rem;
     padding: 0.5rem 0.65rem;
-    color: #202124;
+    color: #203b29;
   }
 
   fieldset {
@@ -263,7 +269,7 @@
 
   .match-count {
     margin: 0.45rem 0 0;
-    color: #767980;
+    color: #6d796f;
     font-size: 0.75rem;
   }
 
@@ -275,18 +281,18 @@
     gap: 0.65rem;
     border-radius: 0.4rem;
     padding: 0.45rem 0.5rem;
-    color: #34363b;
+    color: #263b2c;
     cursor: pointer;
   }
 
   .option:hover {
-    background: #f7f1f4;
+    background: #edf5e8;
   }
 
   .option input {
     width: 1.1rem;
     height: 1.1rem;
-    accent-color: #d7195f;
+    accent-color: #f1a52a;
   }
 
   .option-path {
@@ -297,14 +303,14 @@
   code {
     display: block;
     margin-top: 0.15rem;
-    color: #767980;
+    color: #6d796f;
     font-size: 0.72rem;
   }
 
   .empty {
     margin: 0;
     padding: 1rem 0.5rem;
-    color: #767980;
+    color: #6d796f;
     text-align: center;
   }
 
@@ -328,7 +334,7 @@
 
   .clear {
     background: transparent;
-    color: #686b72;
+    color: #4f6255;
   }
 
   .clear:disabled {
@@ -337,8 +343,9 @@
   }
 
   .done {
-    background: #d7195f;
-    color: #fff;
+    border: 2px solid #244a30 !important;
+    background: #f1a52a;
+    color: #203b29;
   }
 
   .sr-only {
@@ -352,6 +359,11 @@
   }
 
   @media (max-width: 36rem) {
+    .field {
+      border-right: 0;
+      border-bottom: 1px solid #d7dfd8;
+    }
+
     .panel,
     .align-end .panel {
       position: static;

@@ -58,7 +58,11 @@
 </svelte:head>
 
 <main>
-  <section class="search" aria-labelledby="search-title">
+  <section
+    class="search"
+    class:has-results={loading || searched || error}
+    aria-labelledby="search-title"
+  >
     <header class="intro">
       <div class="brand" aria-label="大果樹">
         <span class="brand-mark" aria-hidden="true">果</span>
@@ -75,25 +79,25 @@
         void submit();
       }}
     >
-      <div class="query-row">
-        <label class="sr-only" for="job-query">搜尋職缺</label>
-        <input
-          id="job-query"
-          bind:value={query}
-          type="search"
-          name="query"
-          required
-          maxlength="512"
-          autocomplete="off"
-          placeholder="輸入職務、技能或工作地點"
+      <div class="search-shell">
+        <MultiSelectChecklist
+          id="duty-codes"
+          label="工作"
+          searchPlaceholder="搜尋工作名稱或代碼"
+          options={filterOptions.duties}
+          bind:selected={dutyCodes}
+          disabled={loading}
         />
-        <button type="submit" disabled={loading || !query.trim()}>
-          {loading ? '搜尋中…' : '搜尋'}
-        </button>
-      </div>
-      <div class="controls">
-        <label for="search-date">
-          <span>搜尋日期（競賽 Demo）</span>
+        <MultiSelectChecklist
+          id="location-codes"
+          label="區域"
+          searchPlaceholder="搜尋區域名稱或代碼"
+          options={filterOptions.locations}
+          bind:selected={locationCodes}
+          disabled={loading}
+        />
+        <label class="date-field" for="search-date">
+          <span>搜尋日期</span>
           <input
             id="search-date"
             bind:value={searchDate}
@@ -102,23 +106,27 @@
             disabled={loading}
           />
         </label>
-        <MultiSelectChecklist
-          id="location-codes"
-          label="區域（選填）"
-          searchPlaceholder="搜尋區域名稱或代碼"
-          options={filterOptions.locations}
-          bind:selected={locationCodes}
-          disabled={loading}
-        />
-        <MultiSelectChecklist
-          id="duty-codes"
-          label="工作（選填）"
-          searchPlaceholder="搜尋工作名稱或代碼"
-          options={filterOptions.duties}
-          bind:selected={dutyCodes}
-          disabled={loading}
-          align="end"
-        />
+        <label class="query-field" for="job-query">
+          <span class="sr-only">搜尋職缺</span>
+          <span class="search-icon" aria-hidden="true">⌕</span>
+          <input
+            id="job-query"
+            bind:value={query}
+            type="search"
+            name="query"
+            required
+            maxlength="512"
+            autocomplete="off"
+            placeholder="職務、技能或工作地點"
+          />
+        </label>
+        <button
+          class="search-button"
+          type="submit"
+          disabled={loading || !query.trim()}
+        >
+          {loading ? '搜尋中…' : '搜尋職缺'}
+        </button>
       </div>
     </form>
   </section>
@@ -258,41 +266,6 @@
     margin-bottom: 1.25rem;
   }
 
-  .identity {
-    display: flex;
-    align-items: center;
-    gap: 0.65rem;
-    margin-bottom: 1rem;
-  }
-
-  .identity-mark {
-    display: grid;
-    width: 2.25rem;
-    height: 2.25rem;
-    flex: 0 0 auto;
-    place-items: center;
-    border-radius: 0.55rem;
-    background: #d7195f;
-    color: #fff;
-    font-size: 0.72rem;
-    font-weight: 900;
-    letter-spacing: -0.04em;
-  }
-
-  .identity-name {
-    margin: 0;
-    font-size: 0.72rem;
-    font-weight: 900;
-    letter-spacing: 0.12em;
-  }
-
-  .competition-name {
-    margin: 0.15rem 0 0;
-    color: #686b72;
-    font-size: 0.72rem;
-    font-weight: 700;
-  }
-
   h1 {
     margin: 0;
     font-size: clamp(1.5rem, 4vw, 2rem);
@@ -306,40 +279,6 @@
     color: #686b72;
     font-size: 0.9rem;
     line-height: 1.55;
-  }
-
-  .query-row {
-    display: flex;
-    padding: 0.35rem;
-    border: 1px solid #cfd1d5;
-    border-radius: 0.8rem;
-    background: #fff;
-    box-shadow: 0 6px 24px rgb(32 33 36 / 7%);
-    transition:
-      border-color 160ms ease,
-      box-shadow 160ms ease;
-  }
-
-  .query-row:focus-within {
-    border-color: #d7195f;
-    box-shadow:
-      0 0 0 3px rgb(215 25 95 / 12%),
-      0 8px 28px rgb(32 33 36 / 9%);
-  }
-
-  .query-row input {
-    min-width: 0;
-    min-height: 3.25rem;
-    flex: 1;
-    border: 0;
-    outline: 0;
-    padding: 0.75rem 1rem;
-    background: transparent;
-    color: inherit;
-  }
-
-  .query-row input::placeholder {
-    color: #767980;
   }
 
   button {
@@ -373,40 +312,6 @@
     background: #c8c9cc;
     color: #62656a;
     cursor: not-allowed;
-  }
-
-  .controls {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    align-items: end;
-    gap: 0.75rem;
-    margin-top: 0.75rem;
-    color: #686b72;
-    font-size: 0.82rem;
-  }
-
-  .controls label {
-    display: grid;
-    min-width: 0;
-    gap: 0.4rem;
-    font-weight: 700;
-  }
-
-  .controls input {
-    width: 100%;
-    min-width: 0;
-    min-height: 2.75rem;
-    border: 1px solid #cfd1d5;
-    border-radius: 0.5rem;
-    padding: 0.35rem 0.55rem;
-    background: #fff;
-    color: inherit;
-    font-size: 1rem;
-  }
-
-  .controls input:focus-visible {
-    outline: 3px solid rgb(215 25 95 / 18%);
-    border-color: #d7195f;
   }
 
   .results {
@@ -613,6 +518,319 @@
     clip-path: inset(50%);
   }
 
+  /* Big Fruit Tree — Fresh Market */
+  :global(html) {
+    --leaf: #244a30;
+    --fruit: #f1a52a;
+    --sun: #f4b937;
+    --sprout: #b9d7b4;
+    --cream: #fffdf4;
+    --ink: #203b29;
+    background: var(--cream);
+    color: var(--ink);
+  }
+
+  main {
+    width: min(100% - 2rem, 76rem);
+    padding: 1.5rem 0 3rem;
+  }
+
+  .search {
+    position: relative;
+    overflow: hidden;
+    border: 2px solid var(--leaf);
+    border-top: 0.75rem solid var(--sun);
+    border-radius: 1.5rem;
+    padding: clamp(1.5rem, 4vw, 3.5rem) clamp(1rem, 5vw, 4rem)
+      clamp(2rem, 5vw, 4rem);
+    background: var(--cream);
+    box-shadow: 0.65rem 0.75rem 0 #dcebd6;
+    transition: padding 180ms ease;
+  }
+
+  .search::before,
+  .search::after {
+    position: absolute;
+    border-radius: 50%;
+    content: '';
+    pointer-events: none;
+  }
+
+  .search::before {
+    top: -7rem;
+    right: -5rem;
+    width: 16rem;
+    height: 16rem;
+    background: #e0efd5;
+  }
+
+  .search::after {
+    bottom: -8rem;
+    left: -5rem;
+    width: 13rem;
+    height: 13rem;
+    background: #f7d875;
+    opacity: 0.58;
+  }
+
+  .search.has-results {
+    padding-top: 1.5rem;
+    padding-bottom: 2rem;
+  }
+
+  .intro,
+  form {
+    position: relative;
+    z-index: 1;
+  }
+
+  .intro {
+    margin-bottom: 1.8rem;
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+    color: var(--leaf);
+    font-size: 1.15rem;
+    font-weight: 950;
+    letter-spacing: 0.07em;
+  }
+
+  .brand-mark {
+    display: grid;
+    width: 2.65rem;
+    height: 2.65rem;
+    place-items: center;
+    border: 2px solid var(--leaf);
+    border-radius: 52% 46% 50% 44%;
+    background: var(--fruit);
+    box-shadow: 0.3rem 0.3rem 0 #78a869;
+    color: var(--leaf);
+    font-size: 1rem;
+    font-weight: 950;
+  }
+
+  .brand-promise {
+    position: absolute;
+    top: 0.8rem;
+    right: 0;
+    margin: 0;
+    color: #637268;
+    font-size: 0.72rem;
+    font-weight: 750;
+  }
+
+  h1 {
+    max-width: 46rem;
+    margin: clamp(2.75rem, 7vw, 5rem) auto 0;
+    color: var(--ink);
+    font-family:
+      'Arial Rounded MT Bold', 'Noto Sans TC', ui-rounded, system-ui,
+      sans-serif;
+    font-size: clamp(2.05rem, 5vw, 3.6rem);
+    font-weight: 950;
+    letter-spacing: -0.05em;
+    line-height: 1.08;
+    text-align: center;
+  }
+
+  .has-results h1 {
+    margin-top: 1.5rem;
+    font-size: clamp(1.7rem, 3.5vw, 2.5rem);
+  }
+
+  .intro-copy {
+    margin: 0.75rem auto 0;
+    color: #617066;
+    font-size: 0.95rem;
+    line-height: 1.55;
+    text-align: center;
+  }
+
+  .search-shell {
+    display: grid;
+    grid-template-columns: 9.5rem 9.5rem 10rem minmax(13rem, 1fr) auto;
+    align-items: stretch;
+    max-width: 64rem;
+    min-width: 0;
+    margin: 0 auto;
+    border: 2px solid var(--leaf);
+    border-radius: 1rem;
+    background: #fff;
+    box-shadow: 0.45rem 0.5rem 0 var(--sprout);
+    transition: box-shadow 160ms ease;
+  }
+
+  .search-shell:focus-within {
+    box-shadow:
+      0.45rem 0.5rem 0 var(--sprout),
+      0 0 0 4px rgb(36 74 48 / 12%);
+  }
+
+  .date-field {
+    display: grid;
+    min-width: 0;
+    align-content: center;
+    gap: 0.15rem;
+    border-right: 1px solid #d7dfd8;
+    padding: 0.7rem 0.9rem;
+  }
+
+  .date-field span {
+    color: #748078;
+    font-size: 0.68rem;
+    font-weight: 850;
+    letter-spacing: 0.06em;
+  }
+
+  .date-field input {
+    width: 100%;
+    min-width: 0;
+    min-height: 1.5rem;
+    border: 0;
+    outline: 0;
+    padding: 0;
+    background: transparent;
+    color: #263b2c;
+    font-size: 0.78rem;
+    font-weight: 800;
+  }
+
+  .query-field {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.65rem 0.9rem;
+  }
+
+  .search-icon {
+    color: var(--leaf);
+    font-size: 1.35rem;
+    font-weight: 900;
+  }
+
+  .query-field input {
+    width: 100%;
+    min-width: 0;
+    min-height: 2.5rem;
+    border: 0;
+    outline: 0;
+    padding: 0;
+    background: transparent;
+    color: var(--ink);
+  }
+
+  .query-field input::placeholder {
+    color: #7c8980;
+  }
+
+  .search-button {
+    min-width: 7.5rem;
+    margin: 0.4rem;
+    border: 2px solid var(--leaf);
+    border-radius: 0.7rem;
+    padding: 0.7rem 1.2rem;
+    background: var(--fruit);
+    color: var(--ink);
+    font-weight: 900;
+    white-space: nowrap;
+  }
+
+  .search-button:hover:not(:disabled) {
+    background: #f6b946;
+    transform: translateY(-1px);
+  }
+
+  .search-button:focus-visible,
+  .date-field input:focus-visible,
+  .query-field input:focus-visible {
+    outline: 3px solid rgb(36 74 48 / 22%);
+    outline-offset: 2px;
+  }
+
+  .search-button:disabled {
+    border-color: #748078;
+    background: #e4e6d7;
+    color: #606b63;
+  }
+
+  .results {
+    width: min(100%, 64rem);
+    margin: 2.25rem auto 0;
+  }
+
+  .result-summary p,
+  .request-id,
+  .updated,
+  .job-id {
+    color: #617066;
+  }
+
+  .status {
+    border: 1px solid #cfdbd0;
+    border-radius: 1rem;
+    background: #fff;
+  }
+
+  .status.error {
+    border-color: #d89162;
+    background: #fff8ed;
+  }
+
+  .spinner {
+    border-color: #d7e5d1;
+    border-top-color: var(--fruit);
+  }
+
+  ol {
+    gap: 0.9rem;
+  }
+
+  article {
+    border: 1px solid #d9e2da;
+    border-radius: 1rem;
+    padding: 1.4rem;
+    background: #fff;
+  }
+
+  .rank {
+    background: var(--leaf);
+    color: #fffdf4;
+  }
+
+  .metadata li {
+    background: #edf5e8;
+    color: #35533c;
+  }
+
+  .description {
+    display: block;
+    max-width: 72ch;
+    overflow: visible;
+    color: #49584e;
+    line-clamp: unset;
+    -webkit-line-clamp: unset;
+  }
+
+  dl {
+    border-top-color: #e4ebe4;
+  }
+
+  footer {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    width: min(100%, 64rem);
+    margin: 2.5rem auto 0;
+    padding-top: 1rem;
+    border-top: 1px solid #dce4dc;
+    color: #748078;
+    font-size: 0.7rem;
+  }
+
   @keyframes spin {
     to {
       transform: rotate(360deg);
@@ -625,16 +843,8 @@
       padding-top: 2rem;
     }
 
-    .query-row {
-      display: grid;
-    }
-
     button {
       min-height: 3rem;
-    }
-
-    .controls {
-      grid-template-columns: 1fr;
     }
 
     .result-summary {
@@ -650,10 +860,92 @@
     }
   }
 
+  @media (max-width: 50rem) {
+    .search-shell {
+      grid-template-columns: 1fr 1fr;
+    }
+
+    .date-field {
+      grid-column: 1 / -1;
+      border-right: 0;
+      border-bottom: 1px solid #d7dfd8;
+    }
+
+    .query-field,
+    .search-button {
+      grid-column: 1 / -1;
+    }
+
+    .query-field {
+      border-bottom: 1px solid #d7dfd8;
+    }
+
+    footer {
+      padding-inline: 0.25rem;
+    }
+  }
+
+  @media (max-width: 30rem) {
+    main {
+      width: min(100% - 1rem, 76rem);
+      padding-top: 0.75rem;
+    }
+
+    .search {
+      border-radius: 1.15rem;
+      padding: 1.25rem 0.75rem 1.75rem;
+      box-shadow: 0.35rem 0.45rem 0 #dcebd6;
+    }
+
+    .brand-promise {
+      display: none;
+    }
+
+    h1 {
+      margin-top: 2.5rem;
+      font-size: 2rem;
+    }
+
+    .search-shell {
+      grid-template-columns: 1fr;
+      box-shadow: 0.3rem 0.4rem 0 var(--sprout);
+    }
+
+    .date-field,
+    .query-field,
+    .search-button {
+      grid-column: auto;
+    }
+
+    .date-field,
+    .query-field {
+      min-width: 0;
+      border-right: 0;
+      border-bottom: 1px solid #d7dfd8;
+    }
+
+    .search-button {
+      min-height: 3rem;
+    }
+
+    article {
+      min-width: 0;
+      padding: 1.1rem;
+    }
+
+    footer {
+      display: grid;
+      gap: 0.35rem;
+    }
+  }
+
   @media (prefers-reduced-motion: reduce) {
-    .query-row,
-    button {
-      transition: none;
+    *,
+    *::before,
+    *::after {
+      scroll-behavior: auto !important;
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
     }
 
     .spinner {
