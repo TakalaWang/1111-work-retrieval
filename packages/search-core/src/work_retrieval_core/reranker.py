@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from collections.abc import Mapping
@@ -8,7 +9,33 @@ from typing import Protocol, runtime_checkable
 import boto3  # type: ignore[import-untyped]
 from botocore.config import Config  # type: ignore[import-untyped]
 
+AWS_REGION = "us-west-2"
+ENDPOINT_NAME = "work-retrieval-qwen3-reranker-8b-v8-business"
+ENDPOINT_CONFIG_NAME = "work-retrieval-qwen3-reranker-8b-v8-business-g6-16xl"
+ENDPOINT_MODEL_NAME = "work-retrieval-qwen3-reranker-8b-v8-business"
 MODEL_ID = "Qwen/Qwen3-Reranker-8B"
+MODEL_REVISION = "77d193c791ed757ca307ee72715aa132723da912"
+IMAGE_DIGEST = "sha256:18998be4e1276d4eb6e98afe80798aa357c1cc37545150de5c210bc9111beb1d"
+IMAGE_URI = "763104351884.dkr.ecr.us-west-2.amazonaws.com/vllm@" + IMAGE_DIGEST
+JOB_SEARCH_INSTRUCTION = (
+    "Judge whether the job matches the query. Exact occupation, title, category, and explicit "
+    "location, employment type, schedule, education, experience, and salary constraints dominate. "
+    "Shared skills never justify a different occupation. Only among equally relevant matches, "
+    "prefer complete, clear postings likely attractive to applicants; this predicted appeal is not "
+    "measured popularity and never outweighs relevance. Treat the body as supporting evidence. "
+    "Return yes only for a strong match."
+)
+CHAT_TEMPLATE = (
+    '<|im_start|>system\nAnswer only "yes" or "no": does Document meet Query under '
+    "Instruct?<|im_end|>\n"
+    "<|im_start|>user\n<Instruct>: "
+    + JOB_SEARCH_INSTRUCTION
+    + '\n<Query>: {{ messages | selectattr("role", "eq", '
+    '"query") | map(attribute="content") | first }}\n<Document>: {{ messages | selectattr('
+    '"role", "eq", "document") | map(attribute="content") | first }}<|im_end|>\n'
+    "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+)
+CHAT_TEMPLATE_SHA256 = "1024b310b7fd8b16c1e4d186b44a5b14640aaf2a009dbfd3d57f9e44d2da5077"
 MAX_DOCUMENTS = 50
 MAX_REQUEST_BYTES = 6_291_456
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 1
@@ -46,6 +73,8 @@ class SemanticReranker:
         cls,
         *,
         endpoint_name: str,
+        endpoint_config_name: str,
+        model_name: str,
         region_name: str,
         documents: JobDocumentLookup,
         connect_timeout_seconds: float = DEFAULT_CONNECT_TIMEOUT_SECONDS,
@@ -58,10 +87,24 @@ class SemanticReranker:
             or read_timeout_seconds <= 0
         ):
             raise ValueError("SageMaker reranker timeouts must be positive")
+        if (
+            endpoint_name != ENDPOINT_NAME
+            or endpoint_config_name != ENDPOINT_CONFIG_NAME
+            or model_name != ENDPOINT_MODEL_NAME
+            or region_name != AWS_REGION
+        ):
+            raise RuntimeError("reranker endpoint settings differ from the promoted identity")
         config = Config(
             connect_timeout=connect_timeout_seconds,
             read_timeout=read_timeout_seconds,
             retries={"total_max_attempts": 1, "mode": "standard"},
+        )
+        control = boto3.client("sagemaker", region_name=region_name, config=config)
+        _verify_endpoint_identity(
+            control,
+            endpoint_name=endpoint_name,
+            endpoint_config_name=endpoint_config_name,
+            model_name=model_name,
         )
         runtime = boto3.client("sagemaker-runtime", region_name=region_name, config=config)
         return cls(endpoint_name, documents, runtime)
@@ -147,3 +190,74 @@ def _response_scores(response: Mapping[str, object], expected_count: int) -> tup
     if set(scores) != set(range(expected_count)):
         raise RuntimeError("SageMaker reranker returned invalid indices")
     return tuple(scores[index] for index in range(expected_count))
+
+
+def model_environment() -> dict[str, str]:
+    if hashlib.sha256(CHAT_TEMPLATE.encode()).hexdigest() != CHAT_TEMPLATE_SHA256:
+        raise RuntimeError("chat template content differs from the pinned SHA-256")
+    serialized_template = "'" + CHAT_TEMPLATE.replace("\n", '{{ "\\n" }}') + "'"
+    if len(serialized_template) > 1_024:
+        raise RuntimeError("serialized chat template exceeds SageMaker's environment value limit")
+    return {
+        "HF_MODEL_ID": MODEL_ID,
+        "SM_VLLM_REVISION": MODEL_REVISION,
+        "SM_VLLM_RUNNER": "pooling",
+        "SM_VLLM_HF_OVERRIDES": "'"
+        + json.dumps(
+            {
+                "architectures": ["Qwen3ForSequenceClassification"],
+                "classifier_from_token": ["no", "yes"],
+                "is_original_qwen3_reranker": True,
+            },
+            separators=(",", ":"),
+        )
+        + "'",
+        "SM_VLLM_CHAT_TEMPLATE": serialized_template,
+        "SM_VLLM_MAX_MODEL_LEN": "4096",
+        "SM_VLLM_MAX_NUM_SEQS": "4",
+        "SM_VLLM_GPU_MEMORY_UTILIZATION": "0.92",
+        "SM_VLLM_ENFORCE_EAGER": "true",
+        "PROCESS_AUTO_RECOVERY": "true",
+        "WORK_RETRIEVAL_CHAT_TEMPLATE_SHA256": CHAT_TEMPLATE_SHA256,
+        "WORK_RETRIEVAL_RERANK_REQUEST_CONTRACT": "query_documents_only_v1",
+    }
+
+
+class SageMakerControlPlane(Protocol):
+    def describe_endpoint(self, **kwargs: object) -> Mapping[str, object]: ...
+
+    def describe_endpoint_config(self, **kwargs: object) -> Mapping[str, object]: ...
+
+    def describe_model(self, **kwargs: object) -> Mapping[str, object]: ...
+
+
+def _verify_endpoint_identity(
+    control: SageMakerControlPlane,
+    *,
+    endpoint_name: str,
+    endpoint_config_name: str,
+    model_name: str,
+) -> None:
+    endpoint = control.describe_endpoint(EndpointName=endpoint_name)
+    if (
+        endpoint.get("EndpointStatus") != "InService"
+        or endpoint.get("EndpointConfigName") != endpoint_config_name
+    ):
+        raise RuntimeError("reranker endpoint is not the promoted InService configuration")
+    configuration = control.describe_endpoint_config(EndpointConfigName=endpoint_config_name)
+    variants = configuration.get("ProductionVariants")
+    if (
+        not isinstance(variants, list)
+        or len(variants) != 1
+        or not isinstance(variants[0], dict)
+        or variants[0].get("ModelName") != model_name
+    ):
+        raise RuntimeError("reranker endpoint configuration has an unexpected model")
+    model = control.describe_model(ModelName=model_name)
+    container = model.get("PrimaryContainer")
+    if (
+        not isinstance(container, dict)
+        or container.get("Image") != IMAGE_URI
+        or container.get("Environment") != model_environment()
+    ):
+        raise RuntimeError("reranker endpoint model image, revision, or template differs")

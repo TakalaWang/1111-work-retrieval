@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import FrozenInstanceError, replace
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from threading import Lock
 
 import pytest
@@ -35,6 +35,7 @@ from work_retrieval_core.graph_policy import (
 from work_retrieval_core.manifest import (
     WHOLE_DOCUMENT_POLICY_VERSION,
     WHOLE_DOCUMENT_TEMPLATE_SHA256,
+    semantic_reranker_manifest,
 )
 
 DEMO_AS_OF = datetime(2026, 6, 8, tzinfo=UTC)
@@ -58,6 +59,7 @@ def _manifest(*, multiview: bool = False, graph: bool = False) -> dict[str, obje
             "guardrails",
         )
     }
+    challengers["semantic_reranker"] = semantic_reranker_manifest()
     if multiview:
         path = "embeddings/qwen3-embedding-8b/multiview/manifest.json"
         artifacts[path] = {"kind": "embedding", "sha256": "d" * 64, "size_bytes": 21}
@@ -201,6 +203,9 @@ class StubRetriever:
 
     def close(self) -> None:
         self.closed = True
+
+    def preflight(self, request: CandidateRequest) -> None:
+        self.requests.append((request, 0))
 
 
 class SequencedRetriever(StubRetriever):
@@ -387,12 +392,9 @@ def test_dynamic_as_of_filters_stale_rows_and_retains_future_snapshots() -> None
         ("資料工程師",),
     )
     assert lexical.requests == dense.requests == [(expected, 200)]
-    assert result.job_ids == ("1", "2", "3")
+    assert result.job_ids == ("1",)
     assert result.trace.location_filter == "verified_on_returned_candidates"
     assert result.trace.future_rows == "retained_with_zero_freshness"
-    future = next(item for item in result.trace.results if item.job_id == "2")
-    assert future.future_updated_snapshot is True
-    assert future.freshness_score == 0.0
     assert [(lane.name, lane.status, lane.reason) for lane in result.trace.lanes[-5:]] == [
         ("qwen_dense_multiview_maxsim", "disabled", "feature_flag_disabled"),
         ("graph", "disabled", "feature_flag_disabled"),
@@ -420,6 +422,7 @@ def test_enabled_graph_is_an_independent_shadow_evidence_lane() -> None:
 
     result = engine.search(SearchQuery("Python"), limit=10)
 
+    assert result.job_ids == ("1",)
     assert result.trace.lanes[0].as_dict() == {
         "name": "tantivy_bm25_full_jd",
         "status": "enabled",
@@ -450,22 +453,6 @@ def test_as_of_is_evaluated_for_each_request() -> None:
     assert first.trace.as_of == DEMO_AS_OF
     assert second.trace.as_of == DEMO_AS_OF + timedelta(days=1)
     assert dense.requests[0][0].minimum_updated_at != dense.requests[1][0].minimum_updated_at
-    engine.close()
-
-
-def test_request_date_overrides_clock_at_taipei_end_of_day() -> None:
-    lexical = StubRetriever()
-    engine = ProductionSearchEngine(
-        RuntimeManifest.from_dict(_manifest()),
-        RetrievalPorts(lexical, None, StubMetadata()),
-        clock=lambda: DEMO_AS_OF,
-    )
-
-    result = engine.search(SearchQuery("工程師", search_date=date(2026, 6, 9)), limit=10)
-
-    expected = datetime(2026, 6, 9, 15, 59, 59, 999_000, tzinfo=UTC)
-    assert result.trace.as_of == expected
-    assert lexical.requests[0][0].as_of == expected
     engine.close()
 
 
@@ -559,7 +546,7 @@ def test_multiview_runs_only_when_explicitly_enabled() -> None:
         multiview_artifact_key="embeddings/qwen3-embedding-8b/multiview/manifest.json",
         clock=lambda: DEMO_AS_OF,
     )
-    assert engine.search(SearchQuery("工程師"), limit=10).job_ids == ("9",)
+    assert engine.search(SearchQuery("工程師"), limit=10).job_ids == ()
     engine.close()
 
 
@@ -730,7 +717,7 @@ def test_reranker_preserves_non_pool_suffix_and_full_membership() -> None:
     result = engine.search(SearchQuery("工程師"), limit=3)
 
     assert reranker.calls == [("工程師", ("1", "2"))]
-    assert result.job_ids == ("1", "2", "3")
+    assert result.job_ids == ("1", "2")
     engine.close()
 
 
@@ -770,7 +757,7 @@ def test_shadow_reranker_scores_without_reordering_and_failure_keeps_incumbent()
         clock=lambda: DEMO_AS_OF,
     )
     result = engine.search(SearchQuery("工程師"), limit=3)
-    assert result.job_ids == ("1", "2", "3")
+    assert result.job_ids == ("1", "2")
     assert reranker.calls == [("工程師", ("1", "2", "3"))]
     trace = next(lane for lane in result.trace.lanes if lane.name == "reranker")
     assert (trace.status, trace.reason) == ("enabled", "shadow_scored")
@@ -786,7 +773,7 @@ def test_shadow_reranker_scores_without_reordering_and_failure_keeps_incumbent()
         clock=lambda: DEMO_AS_OF,
     )
     result = engine.search(SearchQuery("工程師"), limit=3)
-    assert result.job_ids == ("1", "2", "3")
+    assert result.job_ids == ("1", "2")
     trace = next(lane for lane in result.trace.lanes if lane.name == "reranker")
     assert (trace.status, trace.reason) == ("failed", "shadow_call_failed")
     engine.close()
@@ -1015,9 +1002,9 @@ def test_typed_job_constraints_are_audited_and_postgres_revalidated() -> None:
     engine.close()
 
 
-def test_manifest_rejects_enabled_challenger_without_production_adapter() -> None:
+def test_manifest_rejects_reranker_lineage_drift() -> None:
     value = _manifest()
-    value["challengers"]["semantic_reranker"] = {"enabled": True}  # type: ignore[index]
+    value["challengers"]["semantic_reranker"]["candidate_depth"] = 50  # type: ignore[index]
 
-    with pytest.raises(RuntimeError, match="must be disabled"):
+    with pytest.raises(RuntimeError, match="semantic reranker challenger"):
         RuntimeManifest.from_dict(value)

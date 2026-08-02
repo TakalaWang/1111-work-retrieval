@@ -200,27 +200,48 @@ def test_reranker_rejects_malformed_result_indices_and_scores(
 def test_from_aws_builds_runtime_with_explicit_botocore_timeouts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, dict[str, object]] = {}
     runtime = FakeRuntime({"results": [{"index": 0, "relevance_score": 0.8}]})
 
-    def client(service_name: str, **kwargs: object) -> FakeRuntime:
-        captured["service_name"] = service_name
-        captured.update(kwargs)
-        return runtime
+    class Control:
+        def describe_endpoint(self, **kwargs: object) -> dict[str, object]:
+            assert kwargs == {"EndpointName": reranker_module.ENDPOINT_NAME}
+            return {
+                "EndpointStatus": "InService",
+                "EndpointConfigName": reranker_module.ENDPOINT_CONFIG_NAME,
+            }
+
+        def describe_endpoint_config(self, **kwargs: object) -> dict[str, object]:
+            assert kwargs == {"EndpointConfigName": reranker_module.ENDPOINT_CONFIG_NAME}
+            return {"ProductionVariants": [{"ModelName": reranker_module.ENDPOINT_MODEL_NAME}]}
+
+        def describe_model(self, **kwargs: object) -> dict[str, object]:
+            assert kwargs == {"ModelName": reranker_module.ENDPOINT_MODEL_NAME}
+            return {
+                "PrimaryContainer": {
+                    "Image": reranker_module.IMAGE_URI,
+                    "Environment": reranker_module.model_environment(),
+                }
+            }
+
+    def client(service_name: str, **kwargs: object) -> object:
+        captured[service_name] = kwargs
+        return Control() if service_name == "sagemaker" else runtime
 
     monkeypatch.setattr(reranker_module.boto3, "client", client)
     reranker = reranker_module.SemanticReranker.from_aws(
-        endpoint_name="reranker-v7",
-        region_name="us-west-2",
+        endpoint_name=reranker_module.ENDPOINT_NAME,
+        endpoint_config_name=reranker_module.ENDPOINT_CONFIG_NAME,
+        model_name=reranker_module.ENDPOINT_MODEL_NAME,
+        region_name=reranker_module.AWS_REGION,
         documents=FakeDocuments({"1": "full job"}),
         connect_timeout_seconds=1,
         read_timeout_seconds=30,
     )
 
     assert reranker.score("engineer", ("1",)) == {"1": 0.8}
-    assert captured["service_name"] == "sagemaker-runtime"
-    assert captured["region_name"] == "us-west-2"
-    config = captured["config"]
+    assert set(captured) == {"sagemaker", "sagemaker-runtime"}
+    config = captured["sagemaker-runtime"]["config"]
     assert config.connect_timeout == 1
     assert config.read_timeout == 30
 

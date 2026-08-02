@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from work_retrieval_core.reranker import CHAT_TEMPLATE, JOB_SEARCH_INSTRUCTION
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
 
@@ -15,13 +16,13 @@ def test_deployment_is_pinned_to_competition_us_west_2() -> None:
     assert deployer.AWS_PROFILE == "competition"
     assert deployer.AWS_ACCOUNT == "378849533305"
     assert deployer.AWS_REGION == "us-west-2"
-    assert deployer.INSTANCE_TYPE == "ml.g5.4xlarge"
+    assert deployer.INSTANCE_TYPE == "ml.g6.16xlarge"
     assert deployer.EXECUTION_ROLE_NAME == "SageMakerQwen3RerankerRole"
     assert deployer.MODEL_ID == "Qwen/Qwen3-Reranker-8B"
     assert len(deployer.MODEL_REVISION) == 40
-    assert deployer.ENDPOINT_NAME.endswith("-v7")
-    assert deployer.MODEL_NAME.endswith("-v7")
-    assert "-v7-" in deployer.ENDPOINT_CONFIG_NAME
+    assert deployer.ENDPOINT_NAME.endswith("-v8-business")
+    assert deployer.MODEL_NAME.endswith("-v8-business")
+    assert deployer.ENDPOINT_CONFIG_NAME.endswith("-v8-business-g6-16xl")
     assert deployer.IMAGE_URI.endswith("@" + deployer.IMAGE_DIGEST)
 
 
@@ -42,12 +43,14 @@ def test_vllm_environment_uses_the_verified_reranker_contract() -> None:
     assert chat_template.startswith("'") and chat_template.endswith("'")
     assert '{{ "\\n" }}' in chat_template
     assert "Document" in environment["SM_VLLM_CHAT_TEMPLATE"]
-    assert "{{ instruction" not in deployer.CHAT_TEMPLATE
-    assert deployer.JOB_SEARCH_INSTRUCTION in deployer.CHAT_TEMPLATE
-    assert "'" not in deployer.JOB_SEARCH_INSTRUCTION
-    assert 'selectattr("role", "eq", "system")' not in deployer.CHAT_TEMPLATE
-    assert "related but different occupation" in deployer.JOB_SEARCH_INSTRUCTION
-    assert "job description body only as supporting evidence" in deployer.JOB_SEARCH_INSTRUCTION
+    assert len(environment["SM_VLLM_CHAT_TEMPLATE"]) <= 1_024
+    assert "{{ instruction" not in CHAT_TEMPLATE
+    assert JOB_SEARCH_INSTRUCTION in CHAT_TEMPLATE
+    assert "'" not in JOB_SEARCH_INSTRUCTION
+    assert 'selectattr("role", "eq", "system")' not in CHAT_TEMPLATE
+    assert "Shared skills never justify a different occupation" in JOB_SEARCH_INSTRUCTION
+    assert "predicted appeal is not measured popularity" in JOB_SEARCH_INSTRUCTION
+    assert "never outweighs relevance" in JOB_SEARCH_INSTRUCTION
     assert environment["WORK_RETRIEVAL_CHAT_TEMPLATE_SHA256"] == deployer.CHAT_TEMPLATE_SHA256
     assert environment["WORK_RETRIEVAL_RERANK_REQUEST_CONTRACT"] == "query_documents_only_v1"
 
@@ -79,8 +82,8 @@ def test_smoke_uses_only_the_pinned_template_instruction(monkeypatch: pytest.Mon
                 {"index": 2, "relevance_score": 0.1},
             ],
             "usage": {
-                "prompt_tokens": deployer.EXPECTED_SMOKE_PROMPT_TOKENS,
-                "total_tokens": deployer.EXPECTED_SMOKE_PROMPT_TOKENS,
+                "prompt_tokens": 500,
+                "total_tokens": 500,
             },
         }
 
@@ -90,7 +93,7 @@ def test_smoke_uses_only_the_pinned_template_instruction(monkeypatch: pytest.Mon
 
     assert set(captured) == {"model", "query", "documents"}
     assert "instruction" not in captured
-    assert evidence["prompt_tokens"] == deployer.EXPECTED_SMOKE_PROMPT_TOKENS
+    assert evidence["prompt_tokens"] == 500
 
 
 def test_black_box_regression_proves_request_instruction_has_no_effect(

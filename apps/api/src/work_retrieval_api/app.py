@@ -300,7 +300,6 @@ def create_app(runtime_factory: RuntimeFactory) -> FastAPI:
         request.state.duty_code_count = len(payload.duty_code)
         query = SearchQuery(
             text=payload.query,
-            search_date=payload.search_date,
             location_codes=tuple(payload.location_code),
             duty_codes=tuple(payload.duty_code),
         )

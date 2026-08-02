@@ -1258,6 +1258,9 @@ class WholeQwenExactRetriever:
         )
         self._closed = False
 
+    def preflight(self, request: CandidateRequest) -> None:
+        self._eligible_rows.eligible_indices(request, max_rows=self._max_eligible_rows)
+
     def retrieve(self, request: CandidateRequest, *, limit: int) -> tuple[CandidateEvidence, ...]:
         if self._closed:
             raise RuntimeError("whole-Qwen retriever is closed")

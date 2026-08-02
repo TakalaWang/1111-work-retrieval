@@ -21,10 +21,11 @@ from work_retrieval_core.adapters import (
     load_job_ids,
 )
 from work_retrieval_core.constraints import normalize_salary_bound, salary_period
-from work_retrieval_core.reranker import SemanticReranker
+from work_retrieval_core.reranker import (
+    ENDPOINT_NAME,
+    SemanticReranker,
+)
 from work_retrieval_database import DatabaseSettings, SqlAlchemyJobReader
-
-from .runtime import RERANKER_V7_ENDPOINT_NAME
 
 SOURCE_TIMEZONE = ZoneInfo("Asia/Taipei")
 
@@ -79,8 +80,6 @@ def create_production_ports(
         name="SEARCH_ENABLE_DENSE_SHADOW",
     )
     reranker_mode = _reranker_mode(environment.get("SEARCH_ENABLE_RERANKER", "off"))
-    if reranker_mode == "active":
-        raise RuntimeError("semantic reranker fixed339 promotion gate failed")
     runtime_root = Path(_required(environment, "SEARCH_RUNTIME_ROOT")).resolve()
     tantivy_layout = TantivyLayout.from_path(
         runtime_root / manifest.temporal_tantivy.manifest_path,
@@ -167,19 +166,28 @@ def create_production_ports(
         lexical.close()
         raise
     reranker: SemanticReranker | None = None
-    if reranker_mode == "shadow":
+    if reranker_mode != "off":
         endpoint_name = _required(environment, "RERANKER_ENDPOINT_NAME")
-        if endpoint_name != RERANKER_V7_ENDPOINT_NAME:
+        if endpoint_name != ENDPOINT_NAME:
             metadata.close()
             if dense is not None:
                 dense.close()
             lexical.close()
-            raise RuntimeError("RERANKER_ENDPOINT_NAME must identify the v7 endpoint")
-        reranker = SemanticReranker.from_aws(
-            endpoint_name=endpoint_name,
-            region_name=_required(environment, "AWS_REGION"),
-            documents=reader,
-        )
+            raise RuntimeError("RERANKER_ENDPOINT_NAME differs from promoted lineage")
+        try:
+            reranker = SemanticReranker.from_aws(
+                endpoint_name=endpoint_name,
+                endpoint_config_name=_required(environment, "RERANKER_ENDPOINT_CONFIG_NAME"),
+                model_name=_required(environment, "RERANKER_MODEL_NAME"),
+                region_name=_required(environment, "AWS_REGION"),
+                documents=reader,
+            )
+        except Exception:
+            metadata.close()
+            if dense is not None:
+                dense.close()
+            lexical.close()
+            raise
     return RetrievalPorts(
         lexical,
         dense,

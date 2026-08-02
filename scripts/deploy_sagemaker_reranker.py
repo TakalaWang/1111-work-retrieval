@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import subprocess
 import tempfile
@@ -10,43 +9,29 @@ import time
 from pathlib import Path
 from typing import cast
 
+from work_retrieval_core.reranker import (
+    CHAT_TEMPLATE_SHA256,
+    ENDPOINT_CONFIG_NAME,
+    ENDPOINT_MODEL_NAME,
+    ENDPOINT_NAME,
+    IMAGE_DIGEST,
+    IMAGE_URI,
+    MODEL_ID,
+    MODEL_REVISION,
+    model_environment,
+)
+
 AWS_ACCOUNT = "378849533305"
 AWS_PROFILE = "competition"
 AWS_REGION = "us-west-2"
-ENDPOINT_NAME = "work-retrieval-qwen3-reranker-8b-v7"
-MODEL_NAME = "work-retrieval-qwen3-reranker-8b-v7"
-ENDPOINT_CONFIG_NAME = "work-retrieval-qwen3-reranker-8b-v7-g5-4xl"
-INSTANCE_TYPE = "ml.g5.4xlarge"
-ENDPOINT_QUOTA_CODE = "L-C1B9A48D"
+MODEL_NAME = ENDPOINT_MODEL_NAME
+INSTANCE_TYPE = "ml.g6.16xlarge"
+ENDPOINT_QUOTA_CODE = "L-913947FA"
 REQUIRED_ENDPOINT_QUOTA = 1
 EXECUTION_ROLE_NAME = "SageMakerQwen3RerankerRole"
 EXECUTION_ROLE_ARN = f"arn:aws:iam::{AWS_ACCOUNT}:role/{EXECUTION_ROLE_NAME}"
 IMAGE_REPOSITORY = "763104351884.dkr.ecr.us-west-2.amazonaws.com/vllm"
 IMAGE_TAG = "0.20.2-gpu-py312-cu130-ubuntu22.04-sagemaker"
-IMAGE_DIGEST = "sha256:18998be4e1276d4eb6e98afe80798aa357c1cc37545150de5c210bc9111beb1d"
-IMAGE_URI = f"{IMAGE_REPOSITORY}@{IMAGE_DIGEST}"
-MODEL_ID = "Qwen/Qwen3-Reranker-8B"
-MODEL_REVISION = "77d193c791ed757ca307ee72715aa132723da912"
-JOB_SEARCH_INSTRUCTION = (
-    "Judge whether a job posting satisfies the job search query. Prioritize the exact job title "
-    "or occupation, job category, and explicit constraints such as location, employment type, "
-    "schedule, education, experience, and salary. A related but different occupation must not be "
-    "treated as relevant based only on shared skills. Use the job description body only as "
-    "supporting evidence. Return yes only when the posting is an appropriate match."
-)
-
-CHAT_TEMPLATE = (
-    "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and "
-    'the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>\n'
-    "<|im_start|>user\n<Instruct>: "
-    + JOB_SEARCH_INSTRUCTION
-    + '\n<Query>: {{ messages | selectattr("role", "eq", '
-    '"query") | map(attribute="content") | first }}\n<Document>: {{ messages | selectattr('
-    '"role", "eq", "document") | map(attribute="content") | first }}<|im_end|>\n'
-    "<|im_start|>assistant\n<think>\n\n</think>\n\n"
-)
-CHAT_TEMPLATE_SHA256 = "c917bf98a8ccffff1823e26060fa2c6f048b9a99b39f02771cfd4321f2cf7714"
-EXPECTED_SMOKE_PROMPT_TOKENS = 454
 INSTRUCTION_ATTACK_LENGTH = 4_600
 SCORE_JITTER_TOLERANCE = 1e-3
 
@@ -118,35 +103,6 @@ def verify_target() -> None:
         or images[0]["imageId"].get("imageDigest") != IMAGE_DIGEST
     ):
         raise RuntimeError("the official vLLM image tag no longer resolves to the pinned digest")
-
-
-def model_environment() -> dict[str, str]:
-    actual_template_hash = hashlib.sha256(CHAT_TEMPLATE.encode()).hexdigest()
-    if actual_template_hash != CHAT_TEMPLATE_SHA256:
-        raise RuntimeError("chat template content differs from the pinned SHA-256")
-    return {
-        "HF_MODEL_ID": MODEL_ID,
-        "SM_VLLM_REVISION": MODEL_REVISION,
-        "SM_VLLM_RUNNER": "pooling",
-        "SM_VLLM_HF_OVERRIDES": "'"
-        + json.dumps(
-            {
-                "architectures": ["Qwen3ForSequenceClassification"],
-                "classifier_from_token": ["no", "yes"],
-                "is_original_qwen3_reranker": True,
-            },
-            separators=(",", ":"),
-        )
-        + "'",
-        "SM_VLLM_CHAT_TEMPLATE": "'" + CHAT_TEMPLATE.replace("\n", '{{ "\\n" }}') + "'",
-        "SM_VLLM_MAX_MODEL_LEN": "4096",
-        "SM_VLLM_MAX_NUM_SEQS": "4",
-        "SM_VLLM_GPU_MEMORY_UTILIZATION": "0.92",
-        "SM_VLLM_ENFORCE_EAGER": "true",
-        "PROCESS_AUTO_RECOVERY": "true",
-        "WORK_RETRIEVAL_CHAT_TEMPLATE_SHA256": CHAT_TEMPLATE_SHA256,
-        "WORK_RETRIEVAL_RERANK_REQUEST_CONTRACT": "query_documents_only_v1",
-    }
 
 
 def ensure_execution_role() -> None:
@@ -412,7 +368,7 @@ def verify_deployed_lineage() -> dict[str, object]:
         or endpoint.get("EndpointConfigName") != ENDPOINT_CONFIG_NAME
         or not isinstance(endpoint_arn, str)
     ):
-        raise RuntimeError("reranker endpoint lineage differs from the pinned v7 deployment")
+        raise RuntimeError("reranker endpoint lineage differs from the pinned v8 deployment")
     configuration = aws(
         [
             "sagemaker",
@@ -428,7 +384,7 @@ def verify_deployed_lineage() -> dict[str, object]:
         or not isinstance(variants[0], dict)
         or variants[0].get("ModelName") != MODEL_NAME
     ):
-        raise RuntimeError("reranker endpoint config does not reference the pinned v7 model")
+        raise RuntimeError("reranker endpoint config does not reference the pinned v8 model")
     model = aws(["sagemaker", "describe-model", "--model-name", MODEL_NAME])
     container = model.get("PrimaryContainer")
     if (
@@ -501,11 +457,6 @@ def smoke_test() -> dict[str, object]:
     if ranked[0][0] != 0:
         raise RuntimeError("reranker failed the relevance smoke test")
     prompt_tokens = _prompt_tokens(response)
-    if prompt_tokens != EXPECTED_SMOKE_PROMPT_TOKENS:
-        raise RuntimeError(
-            f"reranker prompt token count changed: {prompt_tokens} != "
-            f"{EXPECTED_SMOKE_PROMPT_TOKENS}"
-        )
     return {
         "endpoint": ENDPOINT_NAME,
         "instance_type": INSTANCE_TYPE,

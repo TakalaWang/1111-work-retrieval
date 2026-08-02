@@ -14,6 +14,27 @@ from work_retrieval_core.graph_policy import (
     GRAPH_SERVING_IMPLEMENTATION_SHA256,
     GRAPH_SERVING_POLICY_SHA256,
 )
+from work_retrieval_core.reranker import (
+    CHAT_TEMPLATE_SHA256 as RERANKER_CHAT_TEMPLATE_SHA256,
+)
+from work_retrieval_core.reranker import (
+    ENDPOINT_CONFIG_NAME as RERANKER_ENDPOINT_CONFIG_NAME,
+)
+from work_retrieval_core.reranker import (
+    ENDPOINT_MODEL_NAME as RERANKER_ENDPOINT_MODEL_NAME,
+)
+from work_retrieval_core.reranker import (
+    ENDPOINT_NAME as RERANKER_ENDPOINT_NAME,
+)
+from work_retrieval_core.reranker import (
+    IMAGE_DIGEST as RERANKER_IMAGE_DIGEST,
+)
+from work_retrieval_core.reranker import (
+    MODEL_ID as RERANKER_MODEL_ID,
+)
+from work_retrieval_core.reranker import (
+    MODEL_REVISION as RERANKER_MODEL_REVISION,
+)
 
 ARTIFACT_KEY = re.compile(
     r"^(embeddings|models|indexes|graphs|rankers|evidence)/"
@@ -58,6 +79,12 @@ CHALLENGERS = {
 GRAPH_TRAIN_CUTOFF = "2026-06-08T00:00:00+08:00"
 GRAPH_MAX_SOURCE_TIMESTAMP = "2026-06-07T23:51:07.143000+08:00"
 GRAPH_SOURCE_JD_SHA256 = "53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089"
+RERANKER_CANDIDATE_DEPTH = 20
+RERANKER_BM25_WEIGHT = 4
+RERANKER_WHOLE_DENSE_WEIGHT = 1
+RERANKER_RANK_WEIGHT = 0.25
+RERANKER_PROTECTED_BM25_PREFIX = 1
+RERANKER_POLICY = "relevance_first_predicted_appeal_tiebreak_v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,12 +139,20 @@ class TemporalTantivy(Component):
 
 
 @dataclass(frozen=True, slots=True)
+class SemanticRerankerLineage:
+    endpoint_name: str
+    endpoint_config_name: str
+    model_name: str
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeManifest:
     artifacts: tuple[tuple[str, Artifact], ...]
     whole_embedding: WholeEmbedding
     temporal_tantivy: TemporalTantivy
     multiview_embedding: Component | None
     skill_graph: SkillGraph | None
+    semantic_reranker: SemanticRerankerLineage | None = None
 
     @classmethod
     def from_path(cls, path: str | Path) -> RuntimeManifest:
@@ -162,9 +197,17 @@ class RuntimeManifest:
         _exact_keys(challengers, CHALLENGERS, "challengers")
         multiview = _optional_component(challengers["multiview_embedding"], artifacts, "embedding")
         skill_graph = _skill_graph(challengers["skill_graph"], artifacts)
-        for name in ("semantic_reranker", "learning_to_rank", "guardrails"):
+        semantic_reranker = _semantic_reranker(challengers["semantic_reranker"])
+        for name in ("learning_to_rank", "guardrails"):
             _disabled_challenger(challengers[name], name)
-        return cls(tuple(artifacts.items()), whole, temporal, multiview, skill_graph)
+        return cls(
+            tuple(artifacts.items()),
+            whole,
+            temporal,
+            multiview,
+            skill_graph,
+            semantic_reranker,
+        )
 
     def artifact(self, key: str) -> Artifact | None:
         return next((artifact for name, artifact in self.artifacts if name == key), None)
@@ -512,6 +555,41 @@ def _disabled_challenger(value: object, name: str) -> None:
     raw = _mapping(value, f"challengers.{name}")
     if raw != {"enabled": False}:
         raise RuntimeError(f"{name} has no production adapter and must be disabled")
+
+
+def semantic_reranker_manifest() -> dict[str, object]:
+    return {
+        "enabled": True,
+        "complete": True,
+        "publication_allowed": True,
+        "endpoint_name": RERANKER_ENDPOINT_NAME,
+        "endpoint_config_name": RERANKER_ENDPOINT_CONFIG_NAME,
+        "model_name": RERANKER_ENDPOINT_MODEL_NAME,
+        "model_id": RERANKER_MODEL_ID,
+        "model_revision": RERANKER_MODEL_REVISION,
+        "image_digest": RERANKER_IMAGE_DIGEST,
+        "chat_template_sha256": RERANKER_CHAT_TEMPLATE_SHA256,
+        "candidate_depth": RERANKER_CANDIDATE_DEPTH,
+        "bm25_weight": RERANKER_BM25_WEIGHT,
+        "whole_dense_weight": RERANKER_WHOLE_DENSE_WEIGHT,
+        "reranker_rank_weight": RERANKER_RANK_WEIGHT,
+        "protected_bm25_prefix": RERANKER_PROTECTED_BM25_PREFIX,
+        "policy": RERANKER_POLICY,
+    }
+
+
+def _semantic_reranker(value: object) -> SemanticRerankerLineage | None:
+    raw = _mapping(value, "challengers.semantic_reranker")
+    if raw == {"enabled": False}:
+        return None
+    expected = semantic_reranker_manifest()
+    _exact_keys(raw, set(expected), "challengers.semantic_reranker")
+    _equal(raw, expected, "semantic reranker challenger")
+    return SemanticRerankerLineage(
+        RERANKER_ENDPOINT_NAME,
+        RERANKER_ENDPOINT_CONFIG_NAME,
+        RERANKER_ENDPOINT_MODEL_NAME,
+    )
 
 
 def _component_reference(

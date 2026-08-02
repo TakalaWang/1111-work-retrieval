@@ -24,6 +24,7 @@ from work_retrieval_core.graph_policy import (
     GRAPH_SERVING_IMPLEMENTATION_SHA256,
     GRAPH_SERVING_POLICY_SHA256,
 )
+from work_retrieval_core.manifest import semantic_reranker_manifest
 
 AWS_ACCOUNT = "378849533305"
 AWS_PROFILE = "competition"
@@ -1320,7 +1321,10 @@ def _validate_component_manifests(
         reachable.update(graph_files)
 
     for name, challenger in challengers.items():
-        if name in {"multiview_embedding", "skill_graph"} or challenger.get("enabled") is not True:
+        if (
+            name in {"multiview_embedding", "skill_graph", "semantic_reranker"}
+            or challenger.get("enabled") is not True
+        ):
             continue
         if name == "guardrails":
             raise RuntimeError("serving runtime does not parse guardrails")
@@ -1706,7 +1710,7 @@ def validate_runtime_manifest(
         _require_sha256(f"artifact SHA-256 for {path}", raw.get("sha256"))
         if type(raw.get("size_bytes")) is not int or cast(int, raw["size_bytes"]) < 0:
             raise RuntimeError(f"runtime artifact size is invalid: {path}")
-    for name in ("semantic_reranker", "learning_to_rank", "guardrails"):
+    for name in ("learning_to_rank", "guardrails"):
         if challengers[name] != {"enabled": False}:
             raise RuntimeError(f"{name} has no production adapter and must be disabled")
     evidence_paths: set[str] = set()
@@ -1718,6 +1722,10 @@ def validate_runtime_manifest(
             continue
         if enabled is not True:
             raise RuntimeError(f"challenger enabled flag is invalid: {name}")
+        if name == "semantic_reranker":
+            if challenger != semantic_reranker_manifest():
+                raise RuntimeError("semantic reranker lineage differs from the promoted profile")
+            continue
         if name == "guardrails":
             raise RuntimeError("serving runtime does not parse guardrails")
         if (
@@ -1906,8 +1914,8 @@ def _document_paths(runtime: Mapping[str, object]) -> set[str]:
     }
     paths.update(
         cast(str, value["manifest_path"])
-        for value in challengers.values()
-        if value.get("enabled") is True
+        for name, value in challengers.items()
+        if value.get("enabled") is True and name != "semantic_reranker"
     )
     for challenger in challengers.values():
         if challenger.get("enabled") is not True:

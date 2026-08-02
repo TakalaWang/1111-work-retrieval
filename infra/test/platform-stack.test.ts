@@ -191,7 +191,11 @@ describe('platform stack', () => {
           }),
           expect.objectContaining({
             Name: 'SEARCH_ENABLE_RERANKER',
-            Value: 'off'
+            Value: 'active'
+          }),
+          expect.objectContaining({
+            Name: 'SEARCH_DEMO_AS_OF',
+            Value: '2026-06-08'
           }),
           expect.objectContaining({
             Name: 'SEARCH_ENABLE_GRAPH',
@@ -199,7 +203,15 @@ describe('platform stack', () => {
           }),
           expect.objectContaining({
             Name: 'RERANKER_ENDPOINT_NAME',
-            Value: 'work-retrieval-qwen3-reranker-8b-v7'
+            Value: 'work-retrieval-qwen3-reranker-8b-v8-business'
+          }),
+          expect.objectContaining({
+            Name: 'RERANKER_ENDPOINT_CONFIG_NAME',
+            Value: 'work-retrieval-qwen3-reranker-8b-v8-business-g6-16xl'
+          }),
+          expect.objectContaining({
+            Name: 'RERANKER_MODEL_NAME',
+            Value: 'work-retrieval-qwen3-reranker-8b-v8-business'
           })
         ])
       );
@@ -277,7 +289,9 @@ describe('platform stack', () => {
       expect(text).toContain('/runtime/');
       expect(text).toContain('ArtifactManifestSha256');
       expect(text).toContain('endpoint/qwen3-embedding-8b-20260801-031826');
-      expect(text).toContain('endpoint/work-retrieval-qwen3-reranker-8b');
+      expect(text).toContain(
+        'endpoint/work-retrieval-qwen3-reranker-8b-v8-business'
+      );
       expect(text).toContain('sagemaker:DescribeEndpoint');
       expect(text).toContain('sagemaker:DescribeEndpointConfig');
       expect(text).toContain('sagemaker:DescribeModel');
@@ -285,6 +299,12 @@ describe('platform stack', () => {
         'endpoint-config/qwen3-embedding-8b-20260801-031826'
       );
       expect(text).toContain('model/qwen3-embedding-8b-20260801-031826');
+      expect(text).toContain(
+        'endpoint-config/work-retrieval-qwen3-reranker-8b-v8-business-g6-16xl'
+      );
+      expect(text).toContain(
+        'model/work-retrieval-qwen3-reranker-8b-v8-business'
+      );
       expect(text).not.toContain(':endpoint/*');
     }
   });

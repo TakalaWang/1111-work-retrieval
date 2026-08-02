@@ -4,12 +4,11 @@ import json
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, datetime, timedelta
 from math import isfinite
 from threading import BoundedSemaphore, Lock
 from time import monotonic
 from typing import Protocol, runtime_checkable
-from zoneinfo import ZoneInfo
 
 from work_retrieval_core.constraints import (
     QueryConstraints,
@@ -21,7 +20,13 @@ from work_retrieval_core.constraints import (
     no_experience_allows,
     work_shift_allows,
 )
-from work_retrieval_core.manifest import RuntimeManifest
+from work_retrieval_core.manifest import (
+    RERANKER_BM25_WEIGHT,
+    RERANKER_CANDIDATE_DEPTH,
+    RERANKER_RANK_WEIGHT,
+    RERANKER_WHOLE_DENSE_WEIGHT,
+    RuntimeManifest,
+)
 from work_retrieval_core.ranking import (
     BusinessEvidence,
     CandidateEvidenceGate,
@@ -36,10 +41,8 @@ LANE_TIMEOUT_SECONDS = 5.0
 SHADOW_COLLECTION_SECONDS = 1.0
 METADATA_RESERVE_SECONDS = 1.0
 MAX_INFLIGHT_SEARCHES = 8
-RERANK_POOL_LIMIT = 50
 RERANKER_TIMEOUT_SECONDS = 8.0
 INCUMBENT_LANES = {"tantivy_bm25_full_jd"}
-SEARCH_TIMEZONE = ZoneInfo("Asia/Taipei")
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,7 +52,6 @@ class SearchQuery:
     text: str
     location_codes: tuple[str, ...] = ()
     duty_codes: tuple[str, ...] = ()
-    search_date: date | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +133,11 @@ class CandidateReranker(Protocol):
     def score(self, query: str, job_ids: tuple[str, ...]) -> Mapping[str, float]: ...
 
     def close(self) -> None: ...
+
+
+@runtime_checkable
+class DenseCapacityPreflight(Protocol):
+    def preflight(self, request: CandidateRequest) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,6 +232,8 @@ class SearchAuditTrace:
                 "source_modified_at_upper_bound": (
                     "not_applied_snapshot_timestamp_is_not_creation_time"
                 ),
+                "source_visibility": "not_available_in_authoritative_39_column_snapshot",
+                "recruitment_status": "not_available_in_authoritative_39_column_snapshot",
                 "education": (
                     self.constraint_filter
                     if self.constraints.education is not None
@@ -332,6 +341,12 @@ class ProductionSearchEngine:
             raise RuntimeError("reranker requires whole-Dense candidate evidence")
         if reranker_mode != "off" and not isinstance(ports.reranker, CandidateReranker):
             raise TypeError("enabled reranker port does not satisfy CandidateReranker")
+        if reranker_mode != "off" and manifest.semantic_reranker is None:
+            raise RuntimeError("reranker requires promoted manifest lineage")
+        if reranker_mode == "active" and not isinstance(
+            ports.dense_whole_jd, DenseCapacityPreflight
+        ):
+            raise TypeError("active reranker requires dense capacity preflight")
 
         self._ports = ports
         self._enable_dense_shadow = enable_dense_shadow
@@ -339,6 +354,12 @@ class ProductionSearchEngine:
         self._reranker_mode = reranker_mode
         self._enable_graph = enable_graph
         self._clock = clock or (lambda: datetime.now(UTC))
+        if reranker_mode == "active":
+            as_of = _aware(self._clock(), field="as_of")
+            assert isinstance(ports.dense_whole_jd, DenseCapacityPreflight)
+            ports.dense_whole_jd.preflight(
+                CandidateRequest("", (), (), as_of, as_of - timedelta(days=MAX_AGE_DAYS))
+            )
         lane_count = 1 + int(enable_dense_shadow) + int(enable_multiview_maxsim) + int(enable_graph)
         self._executor = ThreadPoolExecutor(
             max_workers=lane_count * max_inflight_searches,
@@ -362,11 +383,7 @@ class ProductionSearchEngine:
             self._inflight.release()
 
     def _search_once(self, query: SearchQuery, *, limit: int) -> SearchResult:
-        as_of = (
-            _request_as_of(query.search_date)
-            if query.search_date is not None
-            else _aware(self._clock(), field="as_of")
-        )
+        as_of = _aware(self._clock(), field="as_of")
         eligible_from = as_of - timedelta(days=MAX_AGE_DAYS)
         compiled = self._compile_query(query.text)
         constraints = compile_constraints(query.text)
@@ -451,6 +468,13 @@ class ProductionSearchEngine:
                 else:
                     existing.evidence.append(rank_evidence)
 
+        ranked_candidates = {
+            job_id: candidate
+            for job_id, candidate in ranked_candidates.items()
+            if {item.lane for item in candidate.evidence}
+            & {"tantivy_bm25_full_jd", "qwen_dense_whole_jd"}
+        }
+
         if not self._enable_dense_shadow:
             lane_traces.append(
                 LaneTrace(
@@ -474,6 +498,12 @@ class ProductionSearchEngine:
             for job_id, candidate in ranked_candidates.items()
         ]
         scored.sort(key=_serving_order)
+        if self._reranker_mode != "active":
+            scored = [
+                item
+                for item in scored
+                if any(evidence.lane == "tantivy_bm25_full_jd" for evidence in item.evidence)
+            ]
         reranker_trace = LaneTrace("reranker", "disabled", "feature_flag_disabled", 0)
         if self._reranker_mode != "off" and "qwen_dense_whole_jd" not in lane_failures:
             assert self._ports.reranker is not None
@@ -542,7 +572,7 @@ class ProductionSearchEngine:
                         protected_prefix=0,
                         protected_job_ids=_lane_ids(ranked_candidates, "tantivy_bm25_full_jd")[:1],
                         suitability_threshold=0.9,
-                        reranker_weight=0.25,
+                        reranker_weight=RERANKER_RANK_WEIGHT,
                         business_weight=0.0,
                     )
                     ordered_ids = (
@@ -578,6 +608,29 @@ class ProductionSearchEngine:
             )
         )
         selected = tuple(scored[:limit])
+        if self._reranker_mode == "active" and selected:
+            selected_ids = tuple(item.job_id for item in selected)
+            try:
+                final_metadata = self._executor.submit(
+                    self._ports.metadata.get_many,
+                    selected_ids,
+                ).result(timeout=METADATA_RESERVE_SECONDS)
+            except Exception as error:
+                raise SearchUnavailableError("final job metadata revalidation failed") from error
+            current = self._validate_metadata(
+                selected_ids,
+                final_metadata,
+                request=request,
+                required_ids=set(selected_ids),
+            )
+            selected = tuple(
+                self._result_trace(
+                    job_id,
+                    _RankedCandidate(current[job_id], ranked_candidates[job_id].evidence),
+                    as_of=as_of,
+                )
+                for job_id in selected_ids
+            )
         return SearchResult(
             job_ids=tuple(item.job_id for item in selected),
             trace=SearchAuditTrace(
@@ -843,10 +896,6 @@ def _aware(value: datetime, *, field: str) -> datetime:
     return value
 
 
-def _request_as_of(value: date) -> datetime:
-    return datetime.combine(value, time(23, 59, 59, 999_000), SEARCH_TIMEZONE).astimezone(UTC)
-
-
 def _isoformat(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
@@ -890,8 +939,8 @@ def _reranker_pool_ids(candidates: Mapping[str, _RankedCandidate]) -> tuple[str,
             "bm25": _lane_ids(candidates, "tantivy_bm25_full_jd"),
             "whole_dense": _lane_ids(candidates, "qwen_dense_whole_jd"),
         },
-        {"bm25": 4.0, "whole_dense": 1.0},
-        limit=RERANK_POOL_LIMIT,
+        {"bm25": RERANKER_BM25_WEIGHT, "whole_dense": RERANKER_WHOLE_DENSE_WEIGHT},
+        limit=RERANKER_CANDIDATE_DEPTH,
     )
 
 

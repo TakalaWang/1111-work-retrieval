@@ -7,7 +7,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from work_retrieval_api.runtime import RERANKER_ENDPOINT_ENV, runtime_from_environment
+from work_retrieval_api.runtime import (
+    RERANKER_ENDPOINT_CONFIG_ENV,
+    RERANKER_ENDPOINT_ENV,
+    RERANKER_MODEL_ENV,
+    runtime_from_environment,
+)
 from work_retrieval_core import (
     CandidateEvidence,
     CandidateRequest,
@@ -16,6 +21,11 @@ from work_retrieval_core import (
     RuntimeManifest,
     SearchEngine,
     SearchQuery,
+)
+from work_retrieval_core.reranker import (
+    ENDPOINT_CONFIG_NAME,
+    ENDPOINT_MODEL_NAME,
+    ENDPOINT_NAME,
 )
 
 
@@ -31,6 +41,9 @@ class StubRetriever:
 
     def close(self) -> None:
         self.closed = True
+
+    def preflight(self, request: CandidateRequest) -> None:
+        self.requests.append(request)
 
 
 class StubMetadata:
@@ -65,6 +78,7 @@ def _manifest(*, graph: bool = False) -> dict[str, object]:
     from work_retrieval_core.manifest import (
         WHOLE_DOCUMENT_POLICY_VERSION,
         WHOLE_DOCUMENT_TEMPLATE_SHA256,
+        semantic_reranker_manifest,
     )
 
     whole = "embeddings/qwen3-embedding-8b/whole/manifest.json"
@@ -83,6 +97,7 @@ def _manifest(*, graph: bool = False) -> dict[str, object]:
             "guardrails",
         )
     }
+    challengers["semantic_reranker"] = semantic_reranker_manifest()
     if graph:
         graph_path = "graphs/skill-graph/manifest.json"
         candidate_path = "evidence/skill-graph/candidate-manifest.json"
@@ -378,7 +393,7 @@ def test_graph_feature_flag_reaches_production_factory(tmp_path: Path) -> None:
     engine.close()
 
 
-def test_environment_runs_v7_in_shadow_without_reordering(tmp_path: Path) -> None:
+def test_environment_runs_promoted_reranker_active(tmp_path: Path) -> None:
     manifest_path = tmp_path / "runtime.json"
     _write_manifest(manifest_path)
     reranker = StubReranker()
@@ -387,8 +402,10 @@ def test_environment_runs_v7_in_shadow_without_reordering(tmp_path: Path) -> Non
         {
             "SEARCH_RUNTIME_MANIFEST_PATH": str(manifest_path),
             "SEARCH_ENABLE_DENSE_SHADOW": "true",
-            "SEARCH_ENABLE_RERANKER": "shadow",
-            RERANKER_ENDPOINT_ENV: "work-retrieval-qwen3-reranker-8b-v7",
+            "SEARCH_ENABLE_RERANKER": "active",
+            RERANKER_ENDPOINT_ENV: ENDPOINT_NAME,
+            RERANKER_ENDPOINT_CONFIG_ENV: ENDPOINT_CONFIG_NAME,
+            RERANKER_MODEL_ENV: ENDPOINT_MODEL_NAME,
         },
         port_factory=lambda manifest, multiview, graph, environment: RetrievalPorts(
             StubRetriever(), StubRetriever(), StubMetadata(), reranker=reranker
@@ -406,7 +423,7 @@ def test_environment_runs_v7_in_shadow_without_reordering(tmp_path: Path) -> Non
         {"SEARCH_ENABLE_RERANKER": "1"},
         {
             "SEARCH_ENABLE_RERANKER": "shadow",
-            RERANKER_ENDPOINT_ENV: "work-retrieval-qwen3-reranker-8b-v7",
+            RERANKER_ENDPOINT_ENV: ENDPOINT_NAME,
         },
         {
             "SEARCH_ENABLE_DENSE_SHADOW": "true",
@@ -416,7 +433,7 @@ def test_environment_runs_v7_in_shadow_without_reordering(tmp_path: Path) -> Non
         {
             "SEARCH_ENABLE_DENSE_SHADOW": "true",
             "SEARCH_ENABLE_RERANKER": "active",
-            RERANKER_ENDPOINT_ENV: "work-retrieval-qwen3-reranker-8b-v7",
+            RERANKER_ENDPOINT_ENV: ENDPOINT_NAME,
         },
     ],
 )

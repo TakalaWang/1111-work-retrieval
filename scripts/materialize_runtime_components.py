@@ -19,6 +19,7 @@ from typing import cast
 import numpy as np
 import promote_runtime_artifacts as contract
 from work_retrieval_core.adapters import CorpusQueryCompiler
+from work_retrieval_core.manifest import semantic_reranker_manifest
 
 WHOLE_DESTINATION = Path("runtime") / contract.WHOLE_RUNTIME_PREFIX
 TANTIVY_DESTINATION = Path("runtime") / contract.TANTIVY_RUNTIME_PREFIX
@@ -778,7 +779,10 @@ def materialize(
                         "temporal_filter_semantics": contract.TEMPORAL_FILTER_SEMANTICS,
                     },
                 },
-                "challengers": {name: {"enabled": False} for name in contract.CHALLENGERS},
+                "challengers": {
+                    **{name: {"enabled": False} for name in contract.CHALLENGERS},
+                    "semantic_reranker": semantic_reranker_manifest(),
+                },
             },
         }
         _write_json(temporary / release_spec_path, release_spec)
