@@ -775,8 +775,8 @@
 
   .description {
     display: block;
-    max-width: 72ch;
     overflow: visible;
+    overflow-wrap: anywhere;
     color: #49584e;
     line-clamp: unset;
     -webkit-line-clamp: unset;
