@@ -19,11 +19,11 @@
 - Modify: legacy experiment `src/temporal_qwen_reranker_ablation.py`
 - Test: legacy `tests/test_temporal_qwen_reranker_ablation.py`
 
-1. Add a failing deployment test proving the Jinja template reads vLLM's request-level `instruction` variable and has a job-search default, rather than reading a missing system message and falling back to web search.
-2. Add a failing experiment test proving the SageMaker request contains an immutable prompt policy and its SHA-256 lineage.
-3. Update the template and bump the immutable model/endpoint-config identity; keep the endpoint name stable.
-4. Run focused tests, deploy the new config, and run a correct-versus-adversarial instruction probe. The probe must produce materially different scores before the 339-context run begins.
-5. Run fixed Top-10 and Top-20 prompt variants independently; never reuse raw-score caches across prompt policies.
+1. Add a failing deployment test proving the public rerank request accepts only `model`, `query`, and `documents`; vLLM 0.20.2 does not expose a request-level `instruction` field in `RerankRequest`.
+2. Put the immutable job-search instruction directly in the SageMaker chat template and pin its SHA-256 in the model environment and readback evidence.
+3. Deploy a separate v7 model, endpoint config, and endpoint so v6 scorers remain available. The v7 endpoint uses the independently available `ml.g5.4xlarge` quota.
+4. Run a black-box invariance probe with a 4,600-character top-level `instruction`. Require identical prompt-token usage and ranking, with only a measured `1e-3` numerical-score jitter allowance, proving the field is not part of the variable contract.
+5. Measure and pin the exact fixed smoke prompt-token count, then run only the predeclared fixed Top-10 ablation. Never reuse raw-score caches across template policies.
 
 ### Task 2: Compile explicit education and salary intent
 
