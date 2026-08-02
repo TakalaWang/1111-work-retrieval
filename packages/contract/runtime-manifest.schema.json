@@ -94,7 +94,7 @@
       "properties": {
         "multiview_embedding": { "$ref": "#/$defs/multiviewEmbedding" },
         "skill_graph": { "$ref": "#/$defs/skillGraph" },
-        "semantic_reranker": { "$ref": "#/$defs/semanticReranker" },
+        "semantic_reranker": { "$ref": "#/$defs/disabled" },
         "learning_to_rank": { "$ref": "#/$defs/disabled" },
         "guardrails": { "$ref": "#/$defs/disabled" }
       }
@@ -202,7 +202,7 @@
         "updated_at_field": { "const": "updated_at_epoch_ms" },
         "hard_filters": { "const": true },
         "temporal_filter_semantics": {
-          "const": "updated_at >= as_of - 180 days before Top-K; future snapshots retained with freshness 0"
+          "const": "updated_at >= as_of - 180 days before Top-K; updated_at > as_of retained with freshness=0"
         }
       }
     },
@@ -211,65 +211,6 @@
       "additionalProperties": false,
       "required": ["enabled"],
       "properties": { "enabled": { "const": false } }
-    },
-    "semanticReranker": {
-      "oneOf": [
-        { "$ref": "#/$defs/disabled" },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "enabled",
-            "complete",
-            "publication_allowed",
-            "endpoint_name",
-            "endpoint_config_name",
-            "model_name",
-            "model_id",
-            "model_revision",
-            "image_digest",
-            "chat_template_sha256",
-            "candidate_depth",
-            "bm25_weight",
-            "whole_dense_weight",
-            "reranker_rank_weight",
-            "protected_bm25_prefix",
-            "policy"
-          ],
-          "properties": {
-            "enabled": { "const": true },
-            "complete": { "const": true },
-            "publication_allowed": { "const": true },
-            "endpoint_name": {
-              "const": "work-retrieval-qwen3-reranker-8b-v8-business"
-            },
-            "endpoint_config_name": {
-              "const": "work-retrieval-qwen3-reranker-8b-v8-business-g6-16xl"
-            },
-            "model_name": {
-              "const": "work-retrieval-qwen3-reranker-8b-v8-business"
-            },
-            "model_id": { "const": "Qwen/Qwen3-Reranker-8B" },
-            "model_revision": {
-              "const": "77d193c791ed757ca307ee72715aa132723da912"
-            },
-            "image_digest": {
-              "const": "sha256:18998be4e1276d4eb6e98afe80798aa357c1cc37545150de5c210bc9111beb1d"
-            },
-            "chat_template_sha256": {
-              "const": "1024b310b7fd8b16c1e4d186b44a5b14640aaf2a009dbfd3d57f9e44d2da5077"
-            },
-            "candidate_depth": { "const": 20 },
-            "bm25_weight": { "const": 4 },
-            "whole_dense_weight": { "const": 1 },
-            "reranker_rank_weight": { "const": 0.25 },
-            "protected_bm25_prefix": { "const": 1 },
-            "policy": {
-              "const": "relevance_first_predicted_appeal_tiebreak_v1"
-            }
-          }
-        }
-      ]
     },
     "mrlEvidence": {
       "type": "object",

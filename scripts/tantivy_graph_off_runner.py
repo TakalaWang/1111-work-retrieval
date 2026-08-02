@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the Graph-off TREC baseline from canonical queries and temporal-v3 Tantivy."""
+"""Generate the Graph-off TREC baseline from canonical queries and temporal-v2 Tantivy."""
 
 from __future__ import annotations
 
@@ -29,22 +29,13 @@ from work_retrieval_core.adapters import (
     FilterTaxonomy,
     TantivyBm25Retriever,
 )
-from work_retrieval_core.constraints import compile_constraints
 from work_retrieval_core.engine import MAX_AGE_DAYS, CandidateRequest
 
 QUERY_KEYS = {"qid", "query", "as_of", "location_codes", "duty_codes"}
 SAFE_QID = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 MAXIMUM_RESULTS = 1000
-ALGORITHM = "temporal-v3-tantivy-bm25-graph-off-v1"
-TAG = "tantivy-temporal-v3"
-POLICY_SOURCE_FILES = (
-    "packages/search-core/src/work_retrieval_core/constraints.py",
-    "packages/search-core/src/work_retrieval_core/adapters.py",
-    "packages/search-core/src/work_retrieval_core/engine.py",
-    "packages/search-core/src/work_retrieval_core/serialization.py",
-    "scripts/tantivy_index_pipeline.py",
-    "scripts/tantivy_graph_off_runner.py",
-)
+ALGORITHM = "temporal-v2-tantivy-bm25-graph-off-v1"
+TAG = "tantivy-temporal-v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,11 +120,6 @@ def _compiler(
     )
 
 
-def _policy_source_lineage() -> dict[str, str]:
-    root = Path(__file__).parents[1]
-    return {name: sha256_file(root / name) for name in POLICY_SOURCE_FILES}
-
-
 def generate_graph_off(
     *,
     split_manifest_path: Path,
@@ -185,7 +171,6 @@ def generate_graph_off(
                         minimum_updated_at=record.as_of - timedelta(days=MAX_AGE_DAYS),
                         lexical_texts=compiled.lexical_texts,
                         query_rewrites=compiled.rewrites,
-                        constraints=compile_constraints(record.query),
                     ),
                     limit=MAXIMUM_RESULTS,
                 )
@@ -206,7 +191,6 @@ def generate_graph_off(
             "lexical_policy_sha256": manifest["lexical_policy_sha256"],
             "query_corrections": manifest["query_corrections"],
             "trec_score_policy": "strict_rank_descending_integer_v1",
-            "source_files": _policy_source_lineage(),
         }
         result: dict[str, Any] = {
             "schema_version": 1,
@@ -224,7 +208,6 @@ def generate_graph_off(
                 "tantivy_job_ids": sha256_file(job_ids_path),
                 "tantivy_filter_taxonomy": sha256_file(taxonomy_path),
                 "retrieval_config": hashlib.sha256(canonical_json(retrieval_config)).hexdigest(),
-                **{f"source:{name}": digest for name, digest in _policy_source_lineage().items()},
             },
             "run_sha256": sha256_file(run_path),
         }

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable, Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import cast
 
 import pytest
@@ -118,6 +118,22 @@ def test_more_than_fifty_codes_are_accepted(client: Callable[[], TestClient]) ->
             json={"query": "工程師", "duty_code": codes},
         )
     assert response.status_code == 200
+
+
+@pytest.mark.parametrize("search_date", ["0001-07-01", "2026-06-08", "9999-12-30"])
+def test_search_date_valid_boundaries_reach_engine(
+    client: Callable[[], TestClient], engine: FakeEngine, search_date: str
+) -> None:
+    with client() as http:
+        response = http.post(
+            "/api/v1/jobs/search",
+            json={"query": "工程師", "search_date": search_date},
+        )
+
+    assert response.status_code == 200
+    assert engine.queries == [
+        (SearchQuery("工程師", search_date=date.fromisoformat(search_date)), 10)
+    ]
 
 
 @pytest.mark.parametrize(

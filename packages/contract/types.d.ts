@@ -83,6 +83,8 @@ export interface components {
             location_code?: string[];
             /** Query */
             query: string;
+            /** Search Date */
+            search_date?: string | null;
         };
         /** SearchResponse */
         SearchResponse: {
