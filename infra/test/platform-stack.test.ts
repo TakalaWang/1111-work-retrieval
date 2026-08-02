@@ -279,6 +279,7 @@ describe('platform stack', () => {
   test('routes only CloudFront-authorized API traffic and monitors targets', () => {
     template.hasResourceProperties('AWS::CloudFront::Distribution', {
       DistributionConfig: Match.objectLike({
+        Aliases: ['1111.takalawang.dev'],
         CacheBehaviors: Match.arrayWith([
           Match.objectLike({
             PathPattern: '/api/*',
@@ -286,7 +287,13 @@ describe('platform stack', () => {
           }),
           Match.objectLike({ PathPattern: '/healthz' }),
           Match.objectLike({ PathPattern: '/readyz' })
-        ])
+        ]),
+        ViewerCertificate: {
+          AcmCertificateArn:
+            'arn:aws:acm:us-east-1:378849533305:certificate/c76499fc-2946-41f4-bc40-3cec2859fffe',
+          MinimumProtocolVersion: 'TLSv1.2_2021',
+          SslSupportMethod: 'sni-only'
+        }
       })
     });
     template.hasResourceProperties('AWS::EC2::SecurityGroupIngress', {
@@ -408,6 +415,12 @@ describe('platform stack', () => {
   });
 
   test('exports all deployment and operational identifiers', () => {
+    template.hasOutput('ApiBaseUrl', {
+      Value: 'https://1111.takalawang.dev/api/v1'
+    });
+    template.hasOutput('WebUrl', {
+      Value: 'https://1111.takalawang.dev'
+    });
     for (const output of [
       'ApiRepositoryUri',
       'ApiBaseUrl',
