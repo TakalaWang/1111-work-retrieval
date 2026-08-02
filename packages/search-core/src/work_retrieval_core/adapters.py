@@ -169,8 +169,10 @@ class FilterTaxonomy:
         )
         if raw["schema_version"] != 1:
             raise RuntimeError("filter taxonomy schema_version must equal 1")
-        locations = _code_term_mapping(raw["location_code_to_terms"], "location")
-        duties = _code_term_mapping(raw["duty_code_to_terms"], "duty")
+        locations = _expand_descendants(
+            _code_term_mapping(raw["location_code_to_terms"], "location")
+        )
+        duties = _expand_descendants(_code_term_mapping(raw["duty_code_to_terms"], "duty"))
         return cls(locations, duties, _reverse(locations), _reverse(duties))
 
     def resolve_locations(self, codes: tuple[str, ...]) -> tuple[str, ...] | None:
@@ -1417,6 +1419,25 @@ def _reverse(mapping: Mapping[str, tuple[str, ...]]) -> dict[str, tuple[str, ...
     return {term: tuple(sorted(codes)) for term, codes in reverse.items()}
 
 
+def _expand_descendants(
+    mapping: Mapping[str, tuple[str, ...]],
+) -> dict[str, tuple[str, ...]]:
+    paths = {code: frozenset(terms) for code, terms in mapping.items()}
+    return {
+        code: tuple(
+            sorted(
+                {
+                    term
+                    for candidate_terms in mapping.values()
+                    if ancestors.issubset(candidate_terms)
+                    for term in candidate_terms
+                }
+            )
+        )
+        for code, ancestors in paths.items()
+    }
+
+
 def _resolve_codes(
     codes: tuple[str, ...],
     mapping: Mapping[str, tuple[str, ...]],
@@ -1426,14 +1447,4 @@ def _resolve_codes(
     missing = [code for code in codes if code not in mapping]
     if missing:
         return None
-    selected = tuple(frozenset(mapping[code]) for code in codes)
-    return tuple(
-        sorted(
-            {
-                term
-                for candidate_terms in mapping.values()
-                if any(ancestors.issubset(candidate_terms) for ancestors in selected)
-                for term in candidate_terms
-            }
-        )
-    )
+    return tuple(sorted({term for code in codes for term in mapping[code]}))
