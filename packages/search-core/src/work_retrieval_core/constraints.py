@@ -344,12 +344,11 @@ def _compile_education(normalized: str) -> EducationConstraint | None:
         for pattern in _EXPLICIT_EDUCATION
         for match in pattern.finditer(compact)
     }
-    if "+" in compact:
-        candidates.update(
-            EDUCATION_ALIASES[segment]
-            for segment in compact.split("+")
-            if segment in EDUCATION_ALIASES
-        )
+    candidates.update(
+        EDUCATION_ALIASES[segment]
+        for segment in re.split(r"[\s+]+", normalized)
+        if segment in EDUCATION_ALIASES
+    )
     if len(candidates) != 1:
         return None
     return EducationConstraint(candidates.pop())

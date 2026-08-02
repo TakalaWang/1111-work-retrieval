@@ -81,7 +81,7 @@ FILTER_SEMANTICS = (
 )
 EXACT_DENSE_CHUNK_ROWS = 24_576
 EXACT_DENSE_MAX_ELIGIBLE_ROWS = 250_000
-EXACT_DENSE_TIMEOUT_SECONDS = 2.0
+EXACT_DENSE_TIMEOUT_SECONDS = 4.0
 LEXICAL_POLICY_VERSION = "2026-08-02-pretokenized-v3"
 ENDPOINT_NAME = "qwen3-embedding-8b-20260801-031826"
 ENDPOINT_CONFIG_NAME = ENDPOINT_NAME
@@ -1275,7 +1275,6 @@ class WholeQwenExactRetriever:
         if not self._inflight.acquire(blocking=False):
             raise RuntimeError("exact dense scanner is busy")
         try:
-            deadline = self._clock() + self._timeout_seconds
             query = self._encoder.encode(request.text)
             if (
                 query.shape != (WHOLE_DIMENSION,)
@@ -1283,8 +1282,7 @@ class WholeQwenExactRetriever:
                 or not np.isfinite(query).all()
             ):
                 raise RuntimeError("dense query embedding violates the 1024d contract")
-            if self._clock() >= deadline:
-                raise RuntimeError("exact dense scan exceeded its deadline")
+            deadline = self._clock() + self._timeout_seconds
             eligible = self._eligible_rows.eligible_indices(
                 request,
                 max_rows=self._max_eligible_rows,

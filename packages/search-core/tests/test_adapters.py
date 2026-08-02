@@ -411,6 +411,33 @@ def test_exact_dense_scan_rejects_unbounded_or_expired_work(tmp_path: Path) -> N
         ).retrieve(_request(), limit=2)
 
 
+def test_exact_dense_scan_deadline_starts_after_remote_query_encoding(tmp_path: Path) -> None:
+    vectors = np.zeros((3, 1024), dtype=np.float16)
+    vectors[:, 0] = [0.2, 1.0, 0.8]
+    np.save(tmp_path / "vectors.npy", vectors, allow_pickle=False)
+    now = [0.0]
+
+    class DelayedEncoder(FixedEncoder):
+        def encode(self, query: str) -> np.ndarray:
+            now[0] = 3.0
+            return super().encode(query)
+
+    retriever = WholeQwenExactRetriever(
+        runtime_root=tmp_path,
+        layout=WholeEmbeddingLayout("job-ids.json", (EmbeddingShard("vectors.npy", 0, 3),)),
+        job_ids=("1", "2", "3"),
+        eligible_rows=FixedEligibleRows(),
+        encoder=DelayedEncoder(),
+        timeout_seconds=2.0,
+        clock=lambda: now[0],
+    )
+
+    assert tuple(candidate.job_id for candidate in retriever.retrieve(_request(), limit=2)) == (
+        "3",
+        "1",
+    )
+
+
 class FakeControlPlane:
     def __init__(self, image: str = adapters.TEI_IMAGE_URI) -> None:
         self.image = image
