@@ -836,14 +836,12 @@ source = { editable = "packages/database" }
 dependencies = [
     { name = "psycopg", extra = ["binary"] },
     { name = "sqlalchemy" },
-    { name = "work-retrieval-core" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4" },
     { name = "sqlalchemy", specifier = ">=2.0,<3" },
-    { name = "work-retrieval-core", editable = "packages/search-core" },
 ]
 
 [[package]]

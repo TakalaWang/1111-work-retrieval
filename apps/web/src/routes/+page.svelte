@@ -4,6 +4,7 @@
   import { ApiError, searchJobDetails } from '$lib/search';
 
   let query = $state('');
+  let searchDate = $state('2026-06-08');
   /** @type {string[]} */
   let locationCodes = $state([]);
   /** @type {string[]} */
@@ -29,6 +30,7 @@
     try {
       const outcome = await searchJobDetails({
         query,
+        searchDate: searchDate || undefined,
         locationCodes,
         dutyCodes
       });
@@ -91,6 +93,16 @@
           bind:selected={locationCodes}
           disabled={loading}
         />
+        <label class="date-field" for="search-date">
+          <span>搜尋日期</span>
+          <input
+            id="search-date"
+            bind:value={searchDate}
+            type="date"
+            name="search_date"
+            disabled={loading}
+          />
+        </label>
         <label class="query-field" for="job-query">
           <span class="sr-only">搜尋職缺</span>
           <span class="search-icon" aria-hidden="true">⌕</span>
@@ -604,7 +616,7 @@
 
   .search-shell {
     display: grid;
-    grid-template-columns: 9.5rem 9.5rem minmax(13rem, 1fr) auto;
+    grid-template-columns: 9.5rem 9.5rem 10rem minmax(13rem, 1fr) auto;
     align-items: stretch;
     max-width: 64rem;
     min-width: 0;
@@ -620,6 +632,35 @@
     box-shadow:
       0.45rem 0.5rem 0 var(--sprout),
       0 0 0 4px rgb(36 74 48 / 12%);
+  }
+
+  .date-field {
+    display: grid;
+    min-width: 0;
+    align-content: center;
+    gap: 0.15rem;
+    border-right: 1px solid #d7dfd8;
+    padding: 0.7rem 0.9rem;
+  }
+
+  .date-field span {
+    color: #748078;
+    font-size: 0.68rem;
+    font-weight: 850;
+    letter-spacing: 0.06em;
+  }
+
+  .date-field input {
+    width: 100%;
+    min-width: 0;
+    min-height: 1.5rem;
+    border: 0;
+    outline: 0;
+    padding: 0;
+    background: transparent;
+    color: #263b2c;
+    font-size: 0.78rem;
+    font-weight: 800;
   }
 
   .query-field {
@@ -669,6 +710,7 @@
   }
 
   .search-button:focus-visible,
+  .date-field input:focus-visible,
   .query-field input:focus-visible {
     outline: 3px solid rgb(36 74 48 / 22%);
     outline-offset: 2px;
@@ -790,6 +832,12 @@
       grid-template-columns: 1fr 1fr;
     }
 
+    .date-field {
+      grid-column: 1 / -1;
+      border-right: 0;
+      border-bottom: 1px solid #d7dfd8;
+    }
+
     .query-field,
     .search-button {
       grid-column: 1 / -1;
@@ -826,11 +874,13 @@
       box-shadow: 0.3rem 0.4rem 0 var(--sprout);
     }
 
+    .date-field,
     .query-field,
     .search-button {
       grid-column: auto;
     }
 
+    .date-field,
     .query-field {
       min-width: 0;
       border-right: 0;

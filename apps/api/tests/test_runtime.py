@@ -7,12 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from work_retrieval_api.runtime import (
-    RERANKER_ENDPOINT_CONFIG_ENV,
-    RERANKER_ENDPOINT_ENV,
-    RERANKER_MODEL_ENV,
-    runtime_from_environment,
-)
+from work_retrieval_api.runtime import runtime_from_environment
 from work_retrieval_core import (
     CandidateEvidence,
     CandidateRequest,
@@ -21,11 +16,6 @@ from work_retrieval_core import (
     RuntimeManifest,
     SearchEngine,
     SearchQuery,
-)
-from work_retrieval_core.reranker import (
-    ENDPOINT_CONFIG_NAME,
-    ENDPOINT_MODEL_NAME,
-    ENDPOINT_NAME,
 )
 
 
@@ -42,10 +32,6 @@ class StubRetriever:
     def close(self) -> None:
         self.closed = True
 
-    def preflight(self, request: CandidateRequest) -> bool:
-        del request
-        return True
-
 
 class StubMetadata:
     def get_many(self, job_ids: tuple[str, ...]) -> tuple[JobMetadata, ...]:
@@ -59,18 +45,6 @@ class StubMetadata:
         pass
 
 
-class StubReranker:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, tuple[str, ...]]] = []
-
-    def score(self, query: str, job_ids: tuple[str, ...]) -> dict[str, float]:
-        self.calls.append((query, job_ids))
-        return {job_id: 1.0 for job_id in job_ids}
-
-    def close(self) -> None:
-        pass
-
-
 def _manifest(*, graph: bool = False) -> dict[str, object]:
     from work_retrieval_core.graph_policy import (
         GRAPH_SERVING_IMPLEMENTATION_SHA256,
@@ -79,11 +53,10 @@ def _manifest(*, graph: bool = False) -> dict[str, object]:
     from work_retrieval_core.manifest import (
         WHOLE_DOCUMENT_POLICY_VERSION,
         WHOLE_DOCUMENT_TEMPLATE_SHA256,
-        semantic_reranker_manifest,
     )
 
     whole = "embeddings/qwen3-embedding-8b/whole/manifest.json"
-    lexical = "indexes/tantivy-bm25-temporal-v3/manifest.json"
+    lexical = "indexes/tantivy-bm25-temporal-v2/manifest.json"
     artifacts = {
         whole: {"kind": "embedding", "sha256": "b" * 64, "size_bytes": 42},
         lexical: {"kind": "index", "sha256": "c" * 64, "size_bytes": 42},
@@ -98,7 +71,6 @@ def _manifest(*, graph: bool = False) -> dict[str, object]:
             "guardrails",
         )
     }
-    challengers["semantic_reranker"] = semantic_reranker_manifest()
     if graph:
         graph_path = "graphs/skill-graph/manifest.json"
         candidate_path = "evidence/skill-graph/candidate-manifest.json"
@@ -205,8 +177,7 @@ def _manifest(*, graph: bool = False) -> dict[str, object]:
                 "updated_at_field": "updated_at_epoch_ms",
                 "hard_filters": True,
                 "temporal_filter_semantics": (
-                    "updated_at >= as_of - 180 days before Top-K; future snapshots retained "
-                    "with freshness 0"
+                    "updated_at >= as_of - 180 days before Top-K; future rows retained"
                 ),
             },
         },
@@ -370,12 +341,7 @@ def test_graph_feature_flag_reaches_production_factory(tmp_path: Path) -> None:
     ) -> RetrievalPorts:
         del manifest, multiview, environment
         received.append(graph)
-        return RetrievalPorts(
-            StubRetriever(),
-            StubRetriever(),
-            StubMetadata(),
-            graph=StubRetriever(),
-        )
+        return RetrievalPorts(StubRetriever(), StubRetriever(), StubMetadata())
 
     engine = runtime_from_environment(
         {
@@ -386,66 +352,7 @@ def test_graph_feature_flag_reaches_production_factory(tmp_path: Path) -> None:
     )
 
     assert received == [True]
-    lanes = engine.search(SearchQuery("工程師"), limit=10).trace.lanes
-    assert [lane.name for lane in lanes[:2]] == [
-        "tantivy_bm25_full_jd",
-        "graph_conditioned_tantivy",
-    ]
-    engine.close()
-
-
-def test_environment_runs_promoted_reranker_active(tmp_path: Path) -> None:
-    manifest_path = tmp_path / "runtime.json"
-    _write_manifest(manifest_path)
-    reranker = StubReranker()
-
-    engine = runtime_from_environment(
-        {
-            "SEARCH_RUNTIME_MANIFEST_PATH": str(manifest_path),
-            "SEARCH_ENABLE_DENSE_SHADOW": "true",
-            "SEARCH_ENABLE_RERANKER": "active",
-            RERANKER_ENDPOINT_ENV: ENDPOINT_NAME,
-            RERANKER_ENDPOINT_CONFIG_ENV: ENDPOINT_CONFIG_NAME,
-            RERANKER_MODEL_ENV: ENDPOINT_MODEL_NAME,
-        },
-        port_factory=lambda manifest, multiview, graph, environment: RetrievalPorts(
-            StubRetriever(), StubRetriever(), StubMetadata(), reranker=reranker
-        ),
+    assert engine.search(SearchQuery("工程師"), limit=10).trace.lanes[0].name == (
+        "graph_conditioned_tantivy"
     )
-
-    assert engine.search(SearchQuery("工程師"), limit=10).job_ids == ()
-    assert reranker.calls == []
     engine.close()
-
-
-@pytest.mark.parametrize(
-    "environment",
-    [
-        {"SEARCH_ENABLE_RERANKER": "1"},
-        {
-            "SEARCH_ENABLE_RERANKER": "shadow",
-            RERANKER_ENDPOINT_ENV: ENDPOINT_NAME,
-        },
-        {
-            "SEARCH_ENABLE_DENSE_SHADOW": "true",
-            "SEARCH_ENABLE_RERANKER": "shadow",
-            RERANKER_ENDPOINT_ENV: "old-reranker",
-        },
-        {
-            "SEARCH_ENABLE_DENSE_SHADOW": "true",
-            "SEARCH_ENABLE_RERANKER": "active",
-            RERANKER_ENDPOINT_ENV: ENDPOINT_NAME,
-        },
-    ],
-)
-def test_reranker_runtime_settings_fail_closed(tmp_path: Path, environment: dict[str, str]) -> None:
-    manifest_path = tmp_path / "runtime.json"
-    _write_manifest(manifest_path)
-
-    with pytest.raises(RuntimeError, match=r"RERANKER|reranker"):
-        runtime_from_environment(
-            {"SEARCH_RUNTIME_MANIFEST_PATH": str(manifest_path), **environment},
-            port_factory=lambda manifest, multiview, graph, values: RetrievalPorts(
-                StubRetriever(), StubRetriever(), StubMetadata()
-            ),
-        )

@@ -11,8 +11,8 @@
 - Web 與 API 目前可由 [https://1111.takalawang.dev](https://1111.takalawang.dev)
   同源存取。
 - Qwen3 Embedding endpoint `qwen3-embedding-8b-20260801-031826` 與 reranker endpoint
-  `work-retrieval-qwen3-reranker-8b-v7` 均為 `InService`。
-- 下列 live readback 對應 `main` commit `6d2bd0e8aaace42ed043f673ad4efd66587131bd`，由 production workflow
+  `work-retrieval-qwen3-reranker-8b` 均為 `InService`。
+- `main` commit `6d2bd0e8aaace42ed043f673ad4efd66587131bd` 已由 production workflow
   [run 30718253906](https://github.com/TakalaWang/1111-work-retrieval/actions/runs/30718253906) 成功部署；runtime
   manifest 為 `964ae7e235bfdf90f639a216991757f905554ce35b83f4069aa68cb2d8d2ddbf`，ECS 使用的
   digest-pinned image 為 `sha256:6fa7c4814e1abee26da888868cd1f064828c48bae6f49d3a1617395069f1392b`。
@@ -88,8 +88,6 @@ account 的 infrastructure bootstrap。先確認目前是已拉到最新的 `mai
 scripts/bootstrap_competition_release.sh \
   inputs/competition.zip \
   artifacts/bootstrap-$(date +%Y%m%d-%H%M%S) \
-  artifacts/evaluations/temporal-v3-fixed-339.attestation.json \
-  <externally-approved-attestation-sha256> \
   DEPLOY \
   your-alert-email@example.com
 ```
@@ -98,40 +96,23 @@ scripts/bootstrap_competition_release.sh \
 5xx 與 unhealthy-host alarms 才會寄信。要更換 email，使用新值重新執行 deployment workflow；不要把 email
 或 AWS credentials 寫入 `.env`、commit 或 artifact manifest。
 
-Temporal-v3 attestation 必須由固定 339-query 的外部 evaluator 產生，並與獨立核准的 SHA-256
-一起傳入。它必須 pin canonical queries、evaluation split、qrels、baseline/candidate TREC
-run、evaluated manifest，以及由 dataset/order、compiler/index-builder/revalidation source-file SHA 與索引
-policy 組成的 stable fingerprint；NDCG@10 必須正成長，Precision@10、Top-1 與 MRR 不得退步。
-Bootstrap 不會自己製造分數、不會自己核准 attestation SHA，缺件、bytes 不符或任一指標
-退步都會在寫入 PostgreSQL 與發布 runtime 前 fail closed。該 development evidence 不宣稱是官方分數。
-上面的 attestation 不是單獨 JSON；它必須與 verifier 封存的 9 件 evidence 放在同一目錄。
-`scripts/verify_temporal_v3_promotion.py create` 會複製固定 inputs/runs/manifests、建立完整
-size/SHA inventory，從 qrels 與 run bytes 重算指標，而且只在所有 gate 通過時寫出
-`attestation.json`。完整命令與檔案契約見
-[`docs/retrieval-pipelines.md`](docs/retrieval-pipelines.md#temporal-v3-fixed-339-promotion-evidence)。
-
 這個命令會依序且 fail-closed 地：
 
 1. 不使用 `extractall`，只從 ZIP 安全取出唯一的 `職缺.csv`、`城市對照表.csv`、`職務對照表.csv`；
 2. 驗證 1,218,635 筆固定 snapshot 的 bytes、SHA-256、39 欄 schema 與 taxonomy；
 3. 從 content-addressed S3 prefix 下載並逐檔驗證既有 sealed Whole-JD Qwen cache，不重算 embedding；
-4. 重建 temporal-v3 Tantivy，並在任何外部寫入前驗證固定 339-query attestation 的核准 bytes、
-   stable policy/source lineage、正 NDCG@10 delta 與其餘三個非退步指標。索引包含 location/duty、
-   學歷、月薪、明確工作性質、班別、無經驗、管理人數 hard filters 與 180 天時序欄位。官方
-   CSV 沒有可見性欄位，因此這個封閉競賽 JD pool 被明確當作 eligible corpus；建置的
-   `visibility=1` 是該前提假設，不是來源欄位。真實廠商 feed 必須提供並重驗當下可見性；
-5. 將 CSV idempotently 匯入 Aurora PostgreSQL；單一 transaction 先取得固定 advisory lock，取不到即
+4. 將 CSV idempotently 匯入 Aurora PostgreSQL；單一 transaction 先取得固定 advisory lock，取不到即
    fail closed，再完成 staging、replacement 與 source SHA marker；statement trigger 會在任何 DML 後使
    marker 失效，只有 rows／ID／source-row 邊界、marker 與 guard 全部相符才回報 `unchanged`；
+5. 由官方 CSV 建 temporal-v2 full-JD Tantivy（含 numeric location/duty hard filters 與 180 天時序欄位）；
 6. materialize、dry-run，將 content-addressed source bundle 逐檔 SHA-256 上傳且 manifest 最後寫入，
    再發布並 read-back immutable runtime bundle；
 7. 以 GitHub OIDC 觸發 `main` 的 production workflow，等待 image scan、CDK/ECS/CloudFront 與 public smoke
    全部成功才結束。
 
 `NEW_WORK_ROOT` 必須不存在；中途失敗時保留該目錄供稽核，不會偷偷沿用 partial output。這個 production
-bootstrap 只發布已核准的 temporal BM25 incumbent；Whole-Dense 與 Qwen v7 reranker 有 production shadow
-adapter，但不得在沒有正向 promotion evidence 時改排。multi-view 與 LTR 目前沒有 production serving
-adapter；Graph 預設關閉。Graph 的建置與 Graph-on/off 實驗是下方
+bootstrap 只發布已核准的 temporal BM25 incumbent；Whole-Dense 與 Graph serving adapter 預設關閉，
+multi-view、LTR 與 reranker 目前沒有 production serving adapter。Graph 的建置與 Graph-on/off 實驗是下方
 獨立的 offline 流程，不會由這個命令產生；只有含正向 promotion evidence 的 Graph runtime bundle 才能配合
 `SEARCH_ENABLE_GRAPH=true` 開進 Top-10。
 
@@ -191,14 +172,12 @@ ARTIFACT_BUCKET, ARTIFACT_MANIFEST_SHA256, AWS_REGION
 SEARCH_RUNTIME_ROOT, SEARCH_RUNTIME_MANIFEST_PATH, SEARCH_PORT_FACTORY
 SEARCH_ENABLE_DENSE_SHADOW, SEARCH_ENABLE_MULTIVIEW_MAXSIM
 EMBEDDING_ENDPOINT_NAME, EMBEDDING_ENDPOINT_CONFIG_NAME, EMBEDDING_MODEL_NAME
-SEARCH_ENABLE_RERANKER, RERANKER_ENDPOINT_NAME
 ```
 
 公開路徑：
 
-- `POST /api/v1/jobs/search`：Tantivy full-JD BM25 incumbent Top 10；whole-Qwen Dense 與 Qwen v7 reranker
-  預設為 shadow。active rerank 只允許 relevance score ≥ 0.9，且同 duty 或同時具有 BM25／Dense 證據的
-  candidate；BM25 Top-1 固定保護，Graph／skill-only candidate 不能單獨升位。
+- `POST /api/v1/jobs/search`：Tantivy full-JD BM25 incumbent Top 10；whole-Qwen dense 預設關閉，啟用時僅作
+  shadow/tail evidence，不得改排 incumbent Top 10。
 - `GET /healthz`：process health；`GET /readyz`：initialized-runtime health 與實際載入的 root manifest SHA-256。
 
 Aurora credentials 由 ECS 經 Secrets Manager 注入，不保存於 image、Git 或 workflow。
@@ -209,10 +188,6 @@ ablation 的可重現命令都保留在 [`scripts`](scripts)，完整契約見
 職務分層的 deterministic 5,000 筆代表樣本（hard cap 10,000），Graph 與 query correction 都必須經
 fixed-input NDCG@10 正向驗證才可啟用。
 
-Query hard-filter grammar、JD/query-log coverage、外派與年資不進 production 的理由，以及
-`job_information_completeness` 的未上線 promotion gate 見
-[`docs/typed-constraint-evidence.md`](docs/typed-constraint-evidence.md)。
-
 ## 資料與 runtime artifacts
 
 | 項目                      | 已驗證版本                                                                                                                                                                                        |
@@ -222,7 +197,7 @@ Query hard-filter grammar、JD/query-log coverage、外派與年資不進 produc
 | Database schema           | Alembic `0002_create_jobs`；Aurora PostgreSQL 16                                                                                                                                                  |
 | Runtime manifest contract | [`runtime-manifest.schema.json`](packages/contract/runtime-manifest.schema.json)，repository schema version `2`；live manifest `964ae7e235bfdf90f639a216991757f905554ce35b83f4069aa68cb2d8d2ddbf` |
 | Embedding endpoint        | `qwen3-embedding-8b-20260801-031826`；`InService`                                                                                                                                                 |
-| Reranker endpoint         | `work-retrieval-qwen3-reranker-8b-v7`；`InService`                                                                                                                                                |
+| Reranker endpoint         | `work-retrieval-qwen3-reranker-8b`；`InService`                                                                                                                                                   |
 | Production retrieval      | temporal BM25 `cpu-incumbent` 已部署；main `6d2bd0e8aaace42ed043f673ad4efd66587131bd`、run `30718253906`、CPU `1/1/0`、GPU `0/0/0`、public smoke 通過                                             |
 
 Runtime v2 promotion 只接受一份已固定 source manifest SHA、selected inventory SHA、component
@@ -231,7 +206,7 @@ manifest 驗證，但不寫入 AWS：
 
 正式路徑重用 sealed EVA whole-job cache，不重新呼叫 embedding model。Materializer 驗證 source manifest、
 source inventory、122 個 4096d shards 與 global job order，然後只衍生 first-1024 + float32 L2 normalize +
-float16 serving shards；source bytes 永不覆寫。Tantivy 必須是已核准的 temporal-v3 build，query correction
+float16 serving shards；source bytes 永不覆寫。Tantivy 必須是已核准的 temporal-v2 build，query correction
 預設關閉，只有帶 organizer 正向 NDCG@10 attestation 才可啟用。
 
 一鍵、離線、無 AWS 寫入的 materialize + promotion dry-run：
@@ -240,7 +215,7 @@ float16 serving shards；source bytes 永不覆寫。Tantivy 必須是已核准�
 scripts/reproduce_runtime_release.sh \
   artifacts/experiments/qwen3-8b/full \
   artifacts/evidence/sealed-whole-source-inventory.json \
-  artifacts/experiments/tantivy-bm25-temporal-v3 \
+  artifacts/experiments/tantivy-bm25-temporal-v2 \
   artifacts/runtime-source \
   <approved-tantivy-component-sha256> \
   <approved-tantivy-build-sha256> \
@@ -310,12 +285,10 @@ synth 與 endpoint smoke 都是 acceptance evidence，不是 Recall、MRR、nDCG
 [`docs/development-graph-ablation-report.md`](docs/development-graph-ablation-report.md)。
 
 Graph-on/off 的正式單一入口是 `scripts/run_graph_ablation.sh`：它只接受 exact-key canonical query
-JSONL（`qid`、`query`、含 timezone 的 `as_of`、`location_codes`、`duty_codes`），先由已驗證的 temporal-v3
+JSONL（`qid`、`query`、含 timezone 的 `as_of`、`location_codes`、`duty_codes`），先由已驗證的 temporal-v2
 Tantivy 重建 `graph_off`，再由 train-only Graph 產生 bounded typed bridge terms，以相同時間、地區、職務、
 可見性與 180-day freshness 邊界回查該 Tantivy eligible universe；因此 `graph_on` 可納入不在 baseline
-或歷史 Graph Job 節點中的新職缺，但不能沿 train Job edge 直接回傳舊職缺。兩者預設交給 repository 內建的
-`scripts/evaluate_trec_runs.py` 計算 NDCG@10、Precision@10、Top-1 與 MRR；正式 organizer evaluator 可用
-`GRAPH_EVALUATOR_COMMAND`、`GRAPH_EVALUATOR_ID`、`GRAPH_EVALUATOR_KIND=organizer` 覆寫，
+或歷史 Graph Job 節點中的新職缺，但不能沿 train Job edge 直接回傳舊職缺。兩者最後交給外部 evaluator，
 runner 同時強制讀取 pinned extraction evidence 與 extraction manifest，重建並逐 bytes 驗證六張 Graph 表，
 不接受只在 Graph 內部自洽的預建 artifact。
 離線 runner 與 production adapter 共用同一份 Graph serving policy、implementation SHA 與固定輸入 golden

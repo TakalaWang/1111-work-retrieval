@@ -1,16 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 10 ]]; then
-  echo "usage: $0 SPLIT GRAPH EVIDENCE EXTRACTION_MANIFEST QRELS CANONICAL_QUERIES JOBS_CSV TANTIVY_OUTPUT MIN_NDCG_DELTA OUTPUT_DIR" >&2
+if [[ $# -ne 13 ]]; then
+  echo "usage: $0 SPLIT GRAPH EVIDENCE EXTRACTION_MANIFEST QRELS CANONICAL_QUERIES JOBS_CSV TANTIVY_OUTPUT EVALUATOR EVALUATOR_ID EVALUATOR_KIND MIN_NDCG_DELTA OUTPUT_DIR" >&2
   exit 2
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OUTPUT_DIR="${10}"
-EVALUATOR_COMMAND="${GRAPH_EVALUATOR_COMMAND:-uv run python $SCRIPT_DIR/evaluate_trec_runs.py}"
-EVALUATOR_ID="${GRAPH_EVALUATOR_ID:-builtin-trec-v1}"
-EVALUATOR_KIND="${GRAPH_EVALUATOR_KIND:-train_semantic_proxy}"
+OUTPUT_DIR="${13}"
 if [[ -e "$OUTPUT_DIR" ]]; then
   echo "output directory already exists: $OUTPUT_DIR" >&2
   exit 1
@@ -48,8 +45,8 @@ uv run python "$SCRIPT_DIR/graph_ablation_runner.py" \
   --graph-off-manifest "$OUTPUT_DIR/baseline/graph-off.manifest.json" \
   --graph-on-run "$OUTPUT_DIR/generated/graph-on.run" \
   --graph-on-manifest "$OUTPUT_DIR/generated/graph-on.manifest.json" \
-  --evaluator-command "$EVALUATOR_COMMAND" \
-  --evaluator-id "$EVALUATOR_ID" \
-  --evaluator-kind "$EVALUATOR_KIND" \
-  --minimum-ndcg-delta "$9" \
+  --evaluator-command "$9" \
+  --evaluator-id "${10}" \
+  --evaluator-kind "${11}" \
+  --minimum-ndcg-delta "${12}" \
   --output "$OUTPUT_DIR/graph-ablation.json"

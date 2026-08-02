@@ -290,7 +290,7 @@ class GraphConditionedRetriever:
         return eligible(request, max_rows=max_rows)
 
     def close(self) -> None:
-        pass
+        self._baseline.close()
 
     def _require_time(self, deadline: float) -> None:
         if self._clock() >= deadline:

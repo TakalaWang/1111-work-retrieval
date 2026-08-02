@@ -24,7 +24,6 @@ from work_retrieval_core.graph_policy import (
     GRAPH_SERVING_IMPLEMENTATION_SHA256,
     GRAPH_SERVING_POLICY_SHA256,
 )
-from work_retrieval_core.manifest import semantic_reranker_manifest
 
 AWS_ACCOUNT = "378849533305"
 AWS_PROFILE = "competition"
@@ -52,9 +51,9 @@ WHOLE_SOURCE_MANIFEST_SOURCE_PATH = "provenance/qwen3-embedding-8b-clean-v1/sour
 WHOLE_SOURCE_INVENTORY_SOURCE_PATH = "provenance/qwen3-embedding-8b-clean-v1/source-inventory.json"
 APPROVED_TANTIVY_BUILD_MANIFEST_SHA256: str | None = None
 APPROVED_TANTIVY_INDEX_SHA256: str | None = None
-TANTIVY_RUNTIME_PREFIX = "indexes/tantivy-bm25-temporal-v3"
+TANTIVY_RUNTIME_PREFIX = "indexes/tantivy-bm25-temporal-v2"
 APPROVED_TANTIVY_BUILD_PROVENANCE_PATH = f"{TANTIVY_RUNTIME_PREFIX}/build-manifest.json"
-TANTIVY_BUILD_PROVENANCE_SOURCE_PATH = "provenance/tantivy-bm25-temporal-v3/build-manifest.json"
+TANTIVY_BUILD_PROVENANCE_SOURCE_PATH = "provenance/tantivy-bm25-temporal-v2/build-manifest.json"
 MATERIALIZATION_REPORT_PATH = "evidence/provenance/materialization-report.json"
 TANTIVY_JOB_IDS_RUNTIME_PATH = f"{TANTIVY_RUNTIME_PREFIX}/job-ids.json"
 APPROVED_MODEL = "Qwen/Qwen3-Embedding-8B"
@@ -99,14 +98,7 @@ APPROVED_TANTIVY_SCHEMA_FIELDS = [
     "location_filter",
     "duty_filter",
     "visibility_filter",
-    "education_filter",
-    "job_attribute_filter",
-    "work_shift_filter",
-    "experience_filter",
-    "management_filter",
     "updated_at_epoch_ms",
-    "monthly_salary_lower_filter",
-    "monthly_salary_recall_filter",
     "job_index",
 ]
 APPROVED_TANTIVY_ENGINE = "tantivy v0.26.0, index_format v7"
@@ -117,8 +109,8 @@ APPROVED_TANTIVY_FIELD_BOOSTS = {
     "industry": 1.0,
     "body": 0.5,
 }
-APPROVED_LEXICAL_POLICY_VERSION = "2026-08-02-pretokenized-v3"
-APPROVED_LEXICAL_POLICY_SHA256 = "adf196a92c2da9cf54b6d12cd878371f000503140df69ef69615f1171e2e7ae8"
+APPROVED_LEXICAL_POLICY_VERSION = "2026-08-01-pretokenized-v2"
+APPROVED_LEXICAL_POLICY_SHA256 = "c1ba79b6d98e4650500249b53fe34a184a5ab32c0651d16daeb5255e8a4d7abb"
 APPROVED_TANTIVY_TOKENIZERS = {
     "title": "default",
     "duty": "default",
@@ -128,11 +120,6 @@ APPROVED_TANTIVY_TOKENIZERS = {
     "location_filter": "raw",
     "duty_filter": "raw",
     "visibility_filter": "raw",
-    "education_filter": "raw",
-    "job_attribute_filter": "raw",
-    "work_shift_filter": "raw",
-    "experience_filter": "raw",
-    "management_filter": "raw",
 }
 APPROVED_TANTIVY_SOURCE_FIELDS = {
     "title": ["title"],
@@ -179,13 +166,9 @@ GRAPH_SERVING_FILES = {
     "relation-evidence.jsonl",
 }
 TEMPORAL_FILTER_SEMANTICS = (
-    "updated_at >= as_of - 180 days before Top-K; future snapshots retained with freshness 0"
+    "updated_at >= as_of - 180 days before Top-K; updated_at > as_of retained with freshness=0"
 )
-TANTIVY_FILTER_SEMANTICS = (
-    "visibility AND (location OR) AND (duty OR) AND optional education "
-    "AND optional monthly salary/job attribute/work shift/no-experience/management, "
-    "applied before Top-K"
-)
+TANTIVY_FILTER_SEMANTICS = "visibility AND (location OR) AND (duty OR), applied before Top-K"
 ARTIFACT_ROOTS = {
     "embedding": "embeddings",
     "model": "models",
@@ -428,7 +411,7 @@ def select_artifacts(
 ) -> list[dict[str, object]]:
     inventory = _parse_source_manifest(source)
     if APPROVED_TANTIVY_BUILD_MANIFEST_SHA256 is None or APPROVED_TANTIVY_INDEX_SHA256 is None:
-        raise RuntimeError("approved temporal-v3 Tantivy build lineage is not configured")
+        raise RuntimeError("approved temporal-v2 Tantivy build lineage is not configured")
     required_provenance = {
         WHOLE_SOURCE_MANIFEST_SOURCE_PATH: (
             APPROVED_WHOLE_SOURCE_MANIFEST_SHA256,
@@ -1059,16 +1042,8 @@ def _validate_component_manifests(
             "tokenizers",
             "source_fields",
             "source_csv_fields",
-            "salary_filter_excluded_rows",
         },
     )
-    salary_filter_excluded_rows = tantivy_build["salary_filter_excluded_rows"]
-    if (
-        not isinstance(salary_filter_excluded_rows, int)
-        or isinstance(salary_filter_excluded_rows, bool)
-        or not 0 <= salary_filter_excluded_rows <= whole.get("rows", -1)
-    ):
-        raise RuntimeError("Tantivy salary filter exclusion count is invalid")
     _require_equal(
         "Tantivy build manifest",
         {
@@ -1321,10 +1296,7 @@ def _validate_component_manifests(
         reachable.update(graph_files)
 
     for name, challenger in challengers.items():
-        if (
-            name in {"multiview_embedding", "skill_graph", "semantic_reranker"}
-            or challenger.get("enabled") is not True
-        ):
+        if name in {"multiview_embedding", "skill_graph"} or challenger.get("enabled") is not True:
             continue
         if name == "guardrails":
             raise RuntimeError("serving runtime does not parse guardrails")
@@ -1403,7 +1375,7 @@ def _validate_materialization_lineage(
     manifest: Mapping[str, object], documents: Mapping[str, bytes]
 ) -> set[str]:
     if APPROVED_TANTIVY_BUILD_MANIFEST_SHA256 is None or APPROVED_TANTIVY_INDEX_SHA256 is None:
-        raise RuntimeError("approved temporal-v3 Tantivy build lineage is not configured")
+        raise RuntimeError("approved temporal-v2 Tantivy build lineage is not configured")
     artifacts = cast(Mapping[str, object], manifest["artifacts"])
     incumbents = cast(Mapping[str, Mapping[str, object]], manifest["incumbents"])
     for path, expected_sha256, label in (
@@ -1710,7 +1682,7 @@ def validate_runtime_manifest(
         _require_sha256(f"artifact SHA-256 for {path}", raw.get("sha256"))
         if type(raw.get("size_bytes")) is not int or cast(int, raw["size_bytes"]) < 0:
             raise RuntimeError(f"runtime artifact size is invalid: {path}")
-    for name in ("learning_to_rank", "guardrails"):
+    for name in ("semantic_reranker", "learning_to_rank", "guardrails"):
         if challengers[name] != {"enabled": False}:
             raise RuntimeError(f"{name} has no production adapter and must be disabled")
     evidence_paths: set[str] = set()
@@ -1722,10 +1694,6 @@ def validate_runtime_manifest(
             continue
         if enabled is not True:
             raise RuntimeError(f"challenger enabled flag is invalid: {name}")
-        if name == "semantic_reranker":
-            if challenger != semantic_reranker_manifest():
-                raise RuntimeError("semantic reranker lineage differs from the promoted profile")
-            continue
         if name == "guardrails":
             raise RuntimeError("serving runtime does not parse guardrails")
         if (
@@ -1914,8 +1882,8 @@ def _document_paths(runtime: Mapping[str, object]) -> set[str]:
     }
     paths.update(
         cast(str, value["manifest_path"])
-        for name, value in challengers.items()
-        if value.get("enabled") is True and name != "semantic_reranker"
+        for value in challengers.values()
+        if value.get("enabled") is True
     )
     for challenger in challengers.values():
         if challenger.get("enabled") is not True:
@@ -2334,11 +2302,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--approved-tantivy-build-sha256",
-        help="compiled temporal-v3 Tantivy build-manifest SHA-256",
+        help="compiled temporal-v2 Tantivy build-manifest SHA-256",
     )
     parser.add_argument(
         "--approved-tantivy-index-sha256",
-        help="compiled temporal-v3 Tantivy canonical index-tree SHA-256",
+        help="compiled temporal-v2 Tantivy canonical index-tree SHA-256",
     )
     parser.add_argument("--execute", action="store_true", help="perform server-side S3 copies")
     parser.add_argument(
