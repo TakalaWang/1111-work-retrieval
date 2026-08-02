@@ -1,4 +1,5 @@
 from datetime import datetime
+from decimal import Decimal
 from unittest.mock import MagicMock
 
 import pytest
@@ -7,6 +8,7 @@ from sqlalchemy import Engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import NullPool
+from work_retrieval_core.serialization import FULL_JOB_FIELDS, serialize_full_job
 from work_retrieval_database import (
     DatabaseSettings,
     JobStoreUnavailableError,
@@ -100,7 +102,22 @@ def test_reader_fetches_exact_metadata_for_batch_revalidation() -> None:
     session = _session()
     timestamp = datetime(2026, 6, 8, 12, 30)
     session.execute.return_value.all.return_value = [
-        ("1", "台北市", "資訊", "軟體", "後端", timestamp)
+        (
+            "1",
+            "台北市",
+            "資訊",
+            "軟體",
+            "後端",
+            timestamp,
+            "全職",
+            "日班",
+            "不拘",
+            "需管理人數10人以下",
+            "大學,碩士",
+            "月薪‧40000‧60000",
+            Decimal("40000.00"),
+            Decimal("60000.00"),
+        )
     ]
     reader = SqlAlchemyJobReader(engine, session_factory=lambda: session)
 
@@ -109,9 +126,22 @@ def test_reader_fetches_exact_metadata_for_batch_revalidation() -> None:
     assert len(records) == 1
     assert records[0].job_id == "1"
     assert records[0].source_modified_at == timestamp
+    assert records[0].job_attribute == "全職"
+    assert records[0].work_hours == "日班"
+    assert records[0].experience_requirement == "不拘"
+    assert records[0].management_count == "需管理人數10人以下"
+    assert records[0].education_requirement == "大學,碩士"
+    assert records[0].salary_min == Decimal("40000.00")
+    assert records[0].salary_max == Decimal("60000.00")
     statement = session.execute.call_args.args[0]
     assert "jobs.work_city" in str(statement)
     assert "jobs.source_modified_at" in str(statement)
+    assert "jobs.job_attribute" in str(statement)
+    assert "jobs.work_hours" in str(statement)
+    assert "jobs.experience_requirement" in str(statement)
+    assert "jobs.management_count" in str(statement)
+    assert "jobs.education_requirement" in str(statement)
+    assert "jobs.salary_min" in str(statement)
 
 
 def test_metadata_batch_rejects_invalid_identifiers_before_querying() -> None:
@@ -124,6 +154,42 @@ def test_metadata_batch_rejects_invalid_identifiers_before_querying() -> None:
             reader.metadata_for_job_ids(job_ids)
 
     assert reader.metadata_for_job_ids(()) == ()
+    session_factory.assert_not_called()
+
+
+def test_reader_serializes_full_job_documents_in_one_batch() -> None:
+    engine = MagicMock(spec=Engine)
+    session = _session()
+    values = {field: None for _label, field in FULL_JOB_FIELDS}
+    values.update(
+        {
+            "title": "資料工程師",
+            "description": "<p>建立 ETL pipeline</p>",
+            "work_hours_description": "彈性工時",
+        }
+    )
+    session.execute.return_value.all.return_value = [
+        ("1", *(values[field] for _label, field in FULL_JOB_FIELDS))
+    ]
+    reader = SqlAlchemyJobReader(engine, session_factory=lambda: session)
+
+    result = reader.job_documents_for_job_ids(("1", "2"))
+
+    assert result == {"1": serialize_full_job(values)}
+    statement = str(session.execute.call_args.args[0])
+    assert all(f"jobs.{field}" in statement for _label, field in FULL_JOB_FIELDS)
+
+
+def test_full_job_document_batch_validates_identifiers_before_querying() -> None:
+    engine = MagicMock(spec=Engine)
+    session_factory = MagicMock()
+    reader = SqlAlchemyJobReader(engine, session_factory=session_factory)
+
+    for job_ids in (("1", "1"), ("job-1",), ("\uff11\uff12",)):
+        with pytest.raises(ValueError, match="ASCII decimal"):
+            reader.job_documents_for_job_ids(job_ids)
+
+    assert reader.job_documents_for_job_ids(()) == {}
     session_factory.assert_not_called()
 
 

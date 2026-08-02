@@ -74,8 +74,47 @@ with the same source and arguments before constructing a new root runtime manife
 `scripts/tantivy_index_pipeline.py` rebuilds the fielded index from the same source CSV and row
 order as whole-Qwen. Title, three duty fields, skill/certificate fields, three industry fields and
 all remaining full-JD fields (including job content) are deterministically pre-tokenized. Location,
-duty and visibility remain raw hard-filter fields; update time and row index are unsigned fast
-fields. The component pins the tokenizer/source-field policy hash and the complete index-tree SHA.
+duty, education, job attribute, work shift, no-experience and management are raw hard-filter
+fields; monthly salary uses separate indexed lower-bound and recall-bound unsigned fields. The
+official competition CSV has no visibility column, so this closed competition JD pool is explicitly
+treated as the already-eligible corpus and the builder writes constant `visibility=1`. That value is
+a corpus-eligibility assumption, not source-derived evidence. A live provider feed must supply and
+revalidate its real visibility state before using this pipeline. Update time and row index are
+unsigned fast fields. The component pins the
+tokenizer/source-field policy hash and the complete index-tree SHA. Exact grammar, coverage and
+unpromoted ambiguous cues are pinned in [`typed-constraint-evidence.md`](typed-constraint-evidence.md).
+
+### Temporal-v3 fixed-339 promotion evidence
+
+The deployment gate never trusts metrics copied into a standalone JSON file. First generate and
+seal the candidate run without opening the qrels. After that seal exists, create the evidence bundle:
+
+```bash
+uv run python scripts/verify_temporal_v3_promotion.py create \
+  --output artifacts/evaluations/temporal-v3-fixed-339 \
+  --canonical-queries <fixed-canonical-queries.jsonl> \
+  --evaluation-split <fixed-split-manifest.json> \
+  --qrels <fixed-gt1.qrels> \
+  --baseline-run <sealed-temporal-v2.run> \
+  --baseline-run-manifest <sealed-temporal-v2.manifest.json> \
+  --candidate-run <sealed-temporal-v3.run> \
+  --candidate-run-manifest <sealed-temporal-v3.manifest.json> \
+  --candidate-manifest <evaluated-temporal-v3-component/manifest.json> \
+  --candidate-build-manifest <evaluated-temporal-v3-component/build-manifest.json>
+```
+
+`create` accepts only the repository-pinned canonical-query, split, qrels, temporal-v2 baseline and
+jobs SHA values. It seals nine evidence files with byte size and SHA-256, recomputes NDCG@10,
+Precision@10, Top-1, MRR, zero-result contexts and underfilled-Top-10 contexts directly from the run
+and qrels bytes, and writes `attestation.json` only when NDCG@10 is positive and every remaining
+ranking/coverage guardrail is non-regressing. Candidate lineage includes the dataset/order, stable
+index policy and exact compiler, adapter, engine, serializer, index-builder and run-generator source
+file SHA values. Physical Tantivy segment hashes are still verified inside each build, but are not
+used as the cross-rebuild identity because Tantivy segment bytes are nondeterministic.
+
+At deployment, pass the bundle's `attestation.json` and its independently read-back SHA-256 to the
+bootstrap. `verify` re-reads all nine inventoried files and recomputes every metric before any
+PostgreSQL or runtime publication write.
 
 The BM25 baseline has no LLM dependency: its default component declares
 `query_corrections={"enabled":false}` and can be built, validated and evaluated before any Graph
@@ -245,14 +284,14 @@ The graph must remain disabled when graph-on does not materially improve the com
 NDCG@10 ablation. A recall-only gain or a qualitative trace does not pass this gate.
 
 `scripts/graph_candidate_runner.py` manufactures `graph_on` from the frozen `graph_off` TREC run,
-the frozen train-only Graph and the exact SHA-pinned temporal-v2 Tantivy component. Anchors enter by
+the frozen train-only Graph and the exact SHA-pinned temporal-v3 Tantivy component. Anchors enter by
 three audited routes, in priority order: exact query-to-skill alias match; explicit duty filter to
 the frozen Duty→Skill aggregate; or consensus from at least two of at most ten Graph-covered
 baseline seed jobs. At most one typed incident edge turns those anchors into bounded bridge terms.
 The Graph's historical Job→Skill edges only identify seed anchors and never supply candidate job
 IDs. Every bridge term instead re-queries the current Tantivy eligible universe with the canonical
-query's identical `as_of`, location and duty filters, plus visibility and the 180-day freshness
-boundary. A resulting job may therefore be novel to both `graph_off` and the train-only Graph while
+query's identical `as_of`, location, duty and compiled typed constraints, plus visibility and the
+180-day freshness boundary. A resulting job may therefore be novel to both `graph_off` and the train-only Graph while
 remaining inside the same production eligibility contract.
 
 Expansion is bounded to eight anchors, ten typed edges per anchor, sixteen bridge terms and fifty
@@ -270,7 +309,7 @@ types and fusion values. Job IDs must be canonical positive ASCII decimals; quer
 duplicates and non-contiguous query blocks fail closed.
 
 The one-command ablation wrapper does not accept a precomputed `graph_off`, manufacture qrels or
-manufacture scores. It first retrieves `graph_off` from the declared temporal-v2 Tantivy component,
+manufacture scores. It first retrieves `graph_off` from the declared temporal-v3 Tantivy component,
 then generates `graph_on`, then invokes an organizer-provided evaluator or a declared train-only
 semantic-proxy evaluator. The ablation runner independently regenerates the challenger run,
 manifest and trace and requires all three to be byte-identical before evaluation; an arbitrary
@@ -316,7 +355,7 @@ scripts/run_graph_ablation.sh \
   artifacts/evaluations/qrels.txt \
   artifacts/evaluations/queries.canonical.jsonl \
   dataset/職缺.csv \
-  artifacts/experiments/tantivy-bm25-temporal-v2 \
+  artifacts/experiments/tantivy-bm25-temporal-v3 \
   'uv run python <organizer-evaluator.py>' \
   organizer-v1 organizer 0.001 \
   artifacts/evaluations/graph-ablation/<experiment-id>

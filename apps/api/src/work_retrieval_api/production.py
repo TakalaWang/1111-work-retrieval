@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -19,7 +20,11 @@ from work_retrieval_core.adapters import (
     graph_conditioned_retriever,
     load_job_ids,
 )
+from work_retrieval_core.constraints import normalize_salary_bound, salary_period
+from work_retrieval_core.reranker import SemanticReranker
 from work_retrieval_database import DatabaseSettings, SqlAlchemyJobReader
+
+from .runtime import RERANKER_V7_ENDPOINT_NAME
 
 SOURCE_TIMEZONE = ZoneInfo("Asia/Taipei")
 
@@ -31,17 +36,28 @@ class ProductionJobMetadataLookup:
 
     def get_many(self, job_ids: tuple[str, ...]) -> tuple[JobMetadata, ...]:
         records = self._reader.metadata_for_job_ids(job_ids)
-        return tuple(
-            JobMetadata(
-                job_id=record.job_id,
-                source_modified_at=_source_timestamp(record.source_modified_at),
-                location_codes=self._taxonomy.location_codes_for_term(record.work_city),
-                duty_codes=self._taxonomy.duty_codes_for_terms(
-                    (record.duty_major, record.duty_middle, record.duty_minor)
-                ),
+        result: list[JobMetadata] = []
+        for record in records:
+            salary_min, salary_max = _salary_bounds(record.salary_min, record.salary_max)
+            result.append(
+                JobMetadata(
+                    job_id=record.job_id,
+                    source_modified_at=_source_timestamp(record.source_modified_at),
+                    location_codes=self._taxonomy.location_codes_for_term(record.work_city),
+                    duty_codes=self._taxonomy.duty_codes_for_terms(
+                        (record.duty_major, record.duty_middle, record.duty_minor)
+                    ),
+                    job_attribute=record.job_attribute,
+                    work_hours=record.work_hours,
+                    experience_requirement=record.experience_requirement,
+                    management_count=record.management_count,
+                    education_requirement=record.education_requirement,
+                    salary_period=salary_period(record.salary_text),
+                    salary_min=salary_min,
+                    salary_max=salary_max,
+                )
             )
-            for record in records
-        )
+        return tuple(result)
 
     def job_details(self, job_id: str) -> dict[str, str | None] | None:
         return self._reader.job_details(job_id)
@@ -58,7 +74,13 @@ def create_production_ports(
 ) -> RetrievalPorts:
     if enable_multiview:
         raise RuntimeError("multi-view serving has no promoted production adapter")
-    enable_dense_shadow = _boolean(environment.get("SEARCH_ENABLE_DENSE_SHADOW", "false"))
+    enable_dense_shadow = _boolean(
+        environment.get("SEARCH_ENABLE_DENSE_SHADOW", "false"),
+        name="SEARCH_ENABLE_DENSE_SHADOW",
+    )
+    reranker_mode = _reranker_mode(environment.get("SEARCH_ENABLE_RERANKER", "off"))
+    if reranker_mode == "active":
+        raise RuntimeError("semantic reranker fixed339 promotion gate failed")
     runtime_root = Path(_required(environment, "SEARCH_RUNTIME_ROOT")).resolve()
     tantivy_layout = TantivyLayout.from_path(
         runtime_root / manifest.temporal_tantivy.manifest_path,
@@ -137,16 +159,34 @@ def create_production_ports(
             lexical.close()
             raise
     try:
-        metadata = ProductionJobMetadataLookup(
-            SqlAlchemyJobReader.from_settings(DatabaseSettings.from_environment(environment)),
-            taxonomy,
-        )
+        reader = SqlAlchemyJobReader.from_settings(DatabaseSettings.from_environment(environment))
+        metadata = ProductionJobMetadataLookup(reader, taxonomy)
     except Exception:
         if dense is not None:
             dense.close()
         lexical.close()
         raise
-    return RetrievalPorts(lexical, dense, metadata, query_compiler=compiler)
+    reranker: SemanticReranker | None = None
+    if reranker_mode == "shadow":
+        endpoint_name = _required(environment, "RERANKER_ENDPOINT_NAME")
+        if endpoint_name != RERANKER_V7_ENDPOINT_NAME:
+            metadata.close()
+            if dense is not None:
+                dense.close()
+            lexical.close()
+            raise RuntimeError("RERANKER_ENDPOINT_NAME must identify the v7 endpoint")
+        reranker = SemanticReranker.from_aws(
+            endpoint_name=endpoint_name,
+            region_name=_required(environment, "AWS_REGION"),
+            documents=reader,
+        )
+    return RetrievalPorts(
+        lexical,
+        dense,
+        metadata,
+        query_compiler=compiler,
+        reranker=reranker,
+    )
 
 
 def _required(environment: Mapping[str, str], name: str) -> str:
@@ -156,15 +196,31 @@ def _required(environment: Mapping[str, str], name: str) -> str:
     return value.strip()
 
 
-def _boolean(value: str) -> bool:
+def _boolean(value: str, *, name: str) -> bool:
     if value == "true":
         return True
     if value == "false":
         return False
-    raise RuntimeError("SEARCH_ENABLE_DENSE_SHADOW must be true or false")
+    raise RuntimeError(f"{name} must be true or false")
+
+
+def _reranker_mode(value: str) -> str:
+    if value in {"off", "shadow", "active"}:
+        return value
+    raise RuntimeError("SEARCH_ENABLE_RERANKER must be off, shadow, or active")
 
 
 def _source_timestamp(value: datetime) -> datetime:
     if value.tzinfo is not None or value.utcoffset() is not None:
         raise RuntimeError("source_modified_at must use the database's naive Taiwan contract")
     return value.replace(tzinfo=SOURCE_TIMEZONE).astimezone(UTC)
+
+
+def _salary_bounds(
+    lower: Decimal | None,
+    upper: Decimal | None,
+) -> tuple[int | None, int | None]:
+    try:
+        return normalize_salary_bound(lower), normalize_salary_bound(upper)
+    except ValueError:
+        return None, None

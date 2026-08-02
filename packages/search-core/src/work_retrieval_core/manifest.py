@@ -21,6 +21,9 @@ ARTIFACT_KEY = re.compile(
 )
 SHA256 = re.compile(r"^[a-f0-9]{64}$")
 DEMO_REFERENCE = "2026-06-08T23:59:59.999+08:00"
+TEMPORAL_FILTER_SEMANTICS = (
+    "updated_at >= as_of - 180 days before Top-K; future snapshots retained with freshness 0"
+)
 MODEL = "Qwen/Qwen3-Embedding-8B"
 MODEL_REVISION = "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"
 WHOLE_DIMENSION = 1024
@@ -278,13 +281,8 @@ def _temporal_tantivy(value: object, artifacts: Mapping[str, Artifact]) -> Tempo
     if not isinstance(engine, str) or not engine.strip():
         raise RuntimeError("temporal Tantivy engine must be non-empty")
     semantics = raw["temporal_filter_semantics"]
-    if (
-        not isinstance(semantics, str)
-        or "updated_at >= as_of - 180 days" not in semantics
-        or "before Top-K" not in semantics
-        or "updated_at <= as_of" in semantics
-    ):
-        raise RuntimeError("temporal Tantivy policy is incompatible with retained future rows")
+    if semantics != TEMPORAL_FILTER_SEMANTICS:
+        raise RuntimeError("temporal Tantivy policy differs from the snapshot-time contract")
     path, sha256 = _component_reference(raw, artifacts, "index")
     index_sha256 = _sha(raw["index_sha256"], "temporal Tantivy index")
     jobs_sha256 = _sha(raw["jobs_sha256"], "temporal Tantivy jobs")
