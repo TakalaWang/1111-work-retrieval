@@ -1,3 +1,12 @@
+from work_retrieval_core.constraints import (
+    EducationConstraint,
+    JobAttributeConstraint,
+    ManagementConstraint,
+    MonthlySalaryConstraint,
+    NoExperienceConstraint,
+    QueryConstraints,
+    WorkShiftConstraint,
+)
 from work_retrieval_core.engine import (
     CandidateEvidence,
     CandidateRequest,
@@ -26,11 +35,17 @@ __all__ = [
     "CandidateRequest",
     "CandidateRetriever",
     "CompiledQuery",
+    "EducationConstraint",
+    "JobAttributeConstraint",
     "JobMetadata",
     "JobMetadataLookup",
     "LaneTrace",
+    "ManagementConstraint",
+    "MonthlySalaryConstraint",
+    "NoExperienceConstraint",
     "ProductionSearchEngine",
     "QueryCompiler",
+    "QueryConstraints",
     "QueryRewrite",
     "RankEvidence",
     "ResultTrace",
@@ -41,4 +56,5 @@ __all__ = [
     "SearchQuery",
     "SearchResult",
     "SearchUnavailableError",
+    "WorkShiftConstraint",
 ]

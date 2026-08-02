@@ -41,6 +41,8 @@ def full_jobs_csv(root: Path, job_ids: tuple[str, ...]) -> Path:
         tantivy_builder.DEFAULT_DUTY_CODE_FIELD,
         tantivy_builder.DEFAULT_VISIBILITY_FIELD,
         tantivy_builder.DEFAULT_MODIFIED_AT_FIELD,
+        tantivy_builder.SALARY_LOWER_SOURCE_FIELD,
+        tantivy_builder.SALARY_UPPER_SOURCE_FIELD,
     )
     fields = list(dict.fromkeys([*(label for label, _field in FULL_JOB_FIELDS), *extra]))
     with path.open("w", encoding="utf-8", newline="") as target:
@@ -56,6 +58,14 @@ def full_jobs_csv(root: Path, job_ids: tuple[str, ...]) -> Path:
                     "職務中類": "資訊軟體",
                     "職務大類": "資訊科技",
                     "電腦技能資料": "Python SQL",
+                    "薪資": "月薪",
+                    "薪資下限": "40000",
+                    "薪資上限": "60000",
+                    "學歷需求": "不拘",
+                    "職缺屬性": "全職",
+                    "工時": "日班",
+                    "工作經驗需求": "不拘",
+                    "管理人數": "需管理人數10人以下",
                     "工作城市": "台北市",
                     "職務內容": "使用 Python 與 SQL 建立資料平台",
                     tantivy_builder.DEFAULT_LOCATION_CODE_FIELD: "100100",
@@ -288,7 +298,7 @@ def test_materializer_reuses_sealed_whole_and_round_trips_current_tantivy(
     assert whole["source_manifest_sha256"] == promotion.APPROVED_WHOLE_SOURCE_MANIFEST_SHA256
     assert whole["source_inventory_sha256"] == promotion.APPROVED_WHOLE_SOURCE_INVENTORY_SHA256
     assert temporal["query_corrections"] == {"enabled": False}
-    assert temporal["index_directory"] == "indexes/tantivy-bm25-temporal-v2/index"
+    assert temporal["index_directory"] == "indexes/tantivy-bm25-temporal-v3/index"
     source_vectors = np.load(whole_source / "embeddings-00000.f16.npy", allow_pickle=False)
     derived_path = output / "runtime" / cast(str, whole["shards"][0]["vectors_path"])
     derived = np.load(derived_path, allow_pickle=False)

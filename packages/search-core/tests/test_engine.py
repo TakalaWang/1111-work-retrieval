@@ -19,6 +19,14 @@ from work_retrieval_core import (
     SearchQuery,
     SearchUnavailableError,
 )
+from work_retrieval_core.constraints import (
+    EducationConstraint,
+    JobAttributeConstraint,
+    ManagementConstraint,
+    MonthlySalaryConstraint,
+    NoExperienceConstraint,
+    WorkShiftConstraint,
+)
 from work_retrieval_core.manifest import (
     WHOLE_DOCUMENT_POLICY_VERSION,
     WHOLE_DOCUMENT_TEMPLATE_SHA256,
@@ -30,7 +38,7 @@ HEX = "a" * 64
 
 def _manifest(*, multiview: bool = False) -> dict[str, object]:
     whole_path = "embeddings/qwen3-embedding-8b/whole/manifest.json"
-    tantivy_path = "indexes/tantivy-bm25-temporal-v2/manifest.json"
+    tantivy_path = "indexes/tantivy-bm25-temporal-v3/manifest.json"
     artifacts: dict[str, object] = {
         whole_path: {"kind": "embedding", "sha256": "b" * 64, "size_bytes": 84},
         tantivy_path: {"kind": "index", "sha256": "c" * 64, "size_bytes": 42},
@@ -112,7 +120,8 @@ def _manifest(*, multiview: bool = False) -> dict[str, object]:
                 "updated_at_field": "updated_at_epoch_ms",
                 "hard_filters": True,
                 "temporal_filter_semantics": (
-                    "updated_at >= as_of - 180 days before Top-K; future rows retained"
+                    "updated_at >= as_of - 180 days before Top-K; "
+                    "future snapshots retained with freshness 0"
                 ),
             },
         },
@@ -199,7 +208,7 @@ def test_manifest_requires_both_incumbents_and_selects_only_their_prefixes() -> 
             include_dense=False, include_multiview=False
         )
     ] == [
-        "indexes/tantivy-bm25-temporal-v2/manifest.json",
+        "indexes/tantivy-bm25-temporal-v3/manifest.json",
     ]
     assert [
         path
@@ -208,7 +217,7 @@ def test_manifest_requires_both_incumbents_and_selects_only_their_prefixes() -> 
         )
     ] == [
         "embeddings/qwen3-embedding-8b/whole/manifest.json",
-        "indexes/tantivy-bm25-temporal-v2/manifest.json",
+        "indexes/tantivy-bm25-temporal-v3/manifest.json",
     ]
 
     missing = _manifest()
@@ -239,9 +248,11 @@ def test_multiview_requires_both_manifest_artifact_and_port() -> None:
         )
 
 
-def test_dynamic_as_of_filters_before_top_k_and_retains_future_rows() -> None:
-    lexical = StubRetriever((_candidate("1", 10.0, 1), _candidate("2", 9.0, 2)))
-    dense = StubRetriever((_candidate("3", 0.8, 1), _candidate("1", 0.7, 2)))
+def test_dynamic_as_of_filters_stale_rows_and_retains_future_snapshots() -> None:
+    lexical = StubRetriever((_candidate("1", 10.0, 1),))
+    dense = StubRetriever(
+        (_candidate("2", 0.9, 1), _candidate("3", 0.8, 2), _candidate("1", 0.7, 3))
+    )
     metadata = StubMetadata((_metadata("1", 0), _metadata("2", -1), _metadata("3", 30)))
     engine = ProductionSearchEngine(
         RuntimeManifest.from_dict(_manifest()),
@@ -263,8 +274,10 @@ def test_dynamic_as_of_filters_before_top_k_and_retains_future_rows() -> None:
     assert lexical.requests == dense.requests == [(expected, 200)]
     assert result.job_ids == ("1", "2", "3")
     assert result.trace.location_filter == "verified_on_returned_candidates"
+    assert result.trace.future_rows == "retained_with_zero_freshness"
     future = next(item for item in result.trace.results if item.job_id == "2")
-    assert future.freshness_score == 0 and future.future_updated_snapshot
+    assert future.future_updated_snapshot is True
+    assert future.freshness_score == 0.0
     assert [(lane.name, lane.status, lane.reason) for lane in result.trace.lanes[-5:]] == [
         ("qwen_dense_multiview_maxsim", "disabled", "feature_flag_disabled"),
         ("graph", "disabled", "ablation_not_approved"),
@@ -468,6 +481,154 @@ def test_query_rewrite_preserves_original_and_is_audited() -> None:
             "policy": "train_jd_corpus_v1",
         }
     ]
+    engine.close()
+
+
+def test_constraints_are_immutable_lane_inputs_audited_and_metadata_revalidated() -> None:
+    lexical = StubRetriever((_candidate("1", 4.0, 1), _candidate("3", 2.0, 2)))
+    metadata = StubMetadata(
+        (
+            JobMetadata(
+                "1",
+                DEMO_AS_OF,
+                ("100100",),
+                ("140200",),
+                education_requirement="大學,碩士",
+                salary_period="月薪",
+                salary_min=40_000,
+                salary_max=60_000,
+            ),
+            JobMetadata(
+                "3",
+                DEMO_AS_OF,
+                ("100100",),
+                ("140200",),
+                education_requirement="不拘",
+                salary_period="月薪",
+                salary_min=50_000,
+                salary_max=0,
+            ),
+        )
+    )
+    engine = ProductionSearchEngine(
+        RuntimeManifest.from_dict(_manifest()),
+        RetrievalPorts(lexical, None, metadata),
+        clock=lambda: DEMO_AS_OF,
+    )
+
+    result = engine.search(SearchQuery("後端工程師 學歷大學 月薪五萬"), limit=10)
+
+    request = lexical.requests[0][0]
+    assert request.text == "後端工程師 學歷大學 月薪五萬"
+    assert request.constraints.education == EducationConstraint("大學")
+    assert request.constraints.monthly_salary == MonthlySalaryConstraint(50_000, strict=False)
+    assert result.job_ids == ("1", "3")
+    trace = result.trace.as_dict()
+    assert trace["constraints"] == {
+        "education": {
+            "degree": "大學",
+            "policy": "accepted_set_contains_degree_or_不拘",
+        },
+        "monthly_salary": {
+            "minimum": 50_000,
+            "strict": False,
+            "confidence": "medium",
+            "policy": "positive_upper_else_lower_reaches_minimum",
+        },
+        "job_attribute": None,
+        "work_shift": None,
+        "no_experience": None,
+        "management": None,
+    }
+    assert trace["hard_filters"]["education"] == ("tantivy_pre_topk_and_postgres_revalidated")
+    assert trace["hard_filters"]["monthly_salary"] == ("tantivy_pre_topk_and_postgres_revalidated")
+    engine.close()
+
+
+def test_strict_monthly_minimum_requires_the_advertised_lower_bound() -> None:
+    lexical = StubRetriever((_candidate("2", 1.0, 1),))
+    metadata = StubMetadata(
+        (
+            JobMetadata(
+                "2",
+                DEMO_AS_OF,
+                (),
+                (),
+                salary_period="月薪",
+                salary_min=50_000,
+                salary_max=0,
+            ),
+        )
+    )
+    engine = ProductionSearchEngine(
+        RuntimeManifest.from_dict(_manifest()),
+        RetrievalPorts(lexical, None, metadata),
+        clock=lambda: DEMO_AS_OF,
+    )
+
+    result = engine.search(SearchQuery("月薪至少50000"), limit=10)
+
+    assert result.job_ids == ("2",)
+    engine.close()
+
+
+def test_constraint_metadata_drift_fails_closed() -> None:
+    lexical = StubRetriever((_candidate("1", 1.0, 1),))
+    metadata = StubMetadata(
+        (
+            JobMetadata(
+                "1",
+                DEMO_AS_OF,
+                (),
+                (),
+                education_requirement="碩士",
+            ),
+        )
+    )
+    engine = ProductionSearchEngine(
+        RuntimeManifest.from_dict(_manifest()),
+        RetrievalPorts(lexical, None, metadata),
+        clock=lambda: DEMO_AS_OF,
+    )
+
+    with pytest.raises(SearchUnavailableError, match="education hard filter"):
+        engine.search(SearchQuery("學歷大學"), limit=10)
+    engine.close()
+
+
+def test_typed_job_constraints_are_audited_and_postgres_revalidated() -> None:
+    lexical = StubRetriever((_candidate("1", 1.0, 1),))
+    metadata = StubMetadata(
+        (
+            JobMetadata(
+                "1",
+                DEMO_AS_OF,
+                (),
+                (),
+                job_attribute="兼職",
+                work_hours="晚班,輪班",
+                experience_requirement="不拘",
+                management_count="需管理人數10人以下",
+            ),
+        )
+    )
+    engine = ProductionSearchEngine(
+        RuntimeManifest.from_dict(_manifest()),
+        RetrievalPorts(lexical, None, metadata),
+        clock=lambda: DEMO_AS_OF,
+    )
+
+    result = engine.search(SearchQuery("晚班兼職 無經驗 需管理人數"), limit=10)
+
+    constraints = lexical.requests[0][0].constraints
+    assert constraints.job_attribute == JobAttributeConstraint("兼職")
+    assert constraints.work_shift == WorkShiftConstraint("晚班")
+    assert constraints.no_experience == NoExperienceConstraint()
+    assert constraints.management == ManagementConstraint()
+    assert result.job_ids == ("1",)
+    hard_filters = result.trace.as_dict()["hard_filters"]
+    for name in ("job_attribute", "work_shift", "no_experience", "management"):
+        assert hard_filters[name] == "tantivy_pre_topk_and_postgres_revalidated"
     engine.close()
 
 

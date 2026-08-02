@@ -46,9 +46,9 @@ WHOLE_SOURCE_MANIFEST_SOURCE_PATH = "provenance/qwen3-embedding-8b-clean-v1/sour
 WHOLE_SOURCE_INVENTORY_SOURCE_PATH = "provenance/qwen3-embedding-8b-clean-v1/source-inventory.json"
 APPROVED_TANTIVY_BUILD_MANIFEST_SHA256: str | None = None
 APPROVED_TANTIVY_INDEX_SHA256: str | None = None
-TANTIVY_RUNTIME_PREFIX = "indexes/tantivy-bm25-temporal-v2"
+TANTIVY_RUNTIME_PREFIX = "indexes/tantivy-bm25-temporal-v3"
 APPROVED_TANTIVY_BUILD_PROVENANCE_PATH = f"{TANTIVY_RUNTIME_PREFIX}/build-manifest.json"
-TANTIVY_BUILD_PROVENANCE_SOURCE_PATH = "provenance/tantivy-bm25-temporal-v2/build-manifest.json"
+TANTIVY_BUILD_PROVENANCE_SOURCE_PATH = "provenance/tantivy-bm25-temporal-v3/build-manifest.json"
 MATERIALIZATION_REPORT_PATH = "evidence/provenance/materialization-report.json"
 TANTIVY_JOB_IDS_RUNTIME_PATH = f"{TANTIVY_RUNTIME_PREFIX}/job-ids.json"
 APPROVED_MODEL = "Qwen/Qwen3-Embedding-8B"
@@ -93,7 +93,14 @@ APPROVED_TANTIVY_SCHEMA_FIELDS = [
     "location_filter",
     "duty_filter",
     "visibility_filter",
+    "education_filter",
+    "job_attribute_filter",
+    "work_shift_filter",
+    "experience_filter",
+    "management_filter",
     "updated_at_epoch_ms",
+    "monthly_salary_lower_filter",
+    "monthly_salary_recall_filter",
     "job_index",
 ]
 APPROVED_TANTIVY_ENGINE = "tantivy v0.26.0, index_format v7"
@@ -104,8 +111,8 @@ APPROVED_TANTIVY_FIELD_BOOSTS = {
     "industry": 1.0,
     "body": 0.5,
 }
-APPROVED_LEXICAL_POLICY_VERSION = "2026-08-01-pretokenized-v2"
-APPROVED_LEXICAL_POLICY_SHA256 = "c1ba79b6d98e4650500249b53fe34a184a5ab32c0651d16daeb5255e8a4d7abb"
+APPROVED_LEXICAL_POLICY_VERSION = "2026-08-02-pretokenized-v3"
+APPROVED_LEXICAL_POLICY_SHA256 = "adf196a92c2da9cf54b6d12cd878371f000503140df69ef69615f1171e2e7ae8"
 APPROVED_TANTIVY_TOKENIZERS = {
     "title": "default",
     "duty": "default",
@@ -115,6 +122,11 @@ APPROVED_TANTIVY_TOKENIZERS = {
     "location_filter": "raw",
     "duty_filter": "raw",
     "visibility_filter": "raw",
+    "education_filter": "raw",
+    "job_attribute_filter": "raw",
+    "work_shift_filter": "raw",
+    "experience_filter": "raw",
+    "management_filter": "raw",
 }
 APPROVED_TANTIVY_SOURCE_FIELDS = {
     "title": ["title"],
@@ -153,9 +165,13 @@ APPROVED_GRAPH_TRAIN_CUTOFF = "2026-06-08T00:00:00+08:00"
 APPROVED_GRAPH_MAX_SOURCE_TIMESTAMP = "2026-06-07T23:51:07.143000+08:00"
 APPROVED_GRAPH_SOURCE_JD_SHA256 = "53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089"
 TEMPORAL_FILTER_SEMANTICS = (
-    "updated_at >= as_of - 180 days before Top-K; updated_at > as_of retained with freshness=0"
+    "updated_at >= as_of - 180 days before Top-K; future snapshots retained with freshness 0"
 )
-TANTIVY_FILTER_SEMANTICS = "visibility AND (location OR) AND (duty OR), applied before Top-K"
+TANTIVY_FILTER_SEMANTICS = (
+    "visibility AND (location OR) AND (duty OR) AND optional education "
+    "AND optional monthly salary/job attribute/work shift/no-experience/management, "
+    "applied before Top-K"
+)
 ARTIFACT_ROOTS = {
     "embedding": "embeddings",
     "model": "models",
@@ -398,7 +414,7 @@ def select_artifacts(
 ) -> list[dict[str, object]]:
     inventory = _parse_source_manifest(source)
     if APPROVED_TANTIVY_BUILD_MANIFEST_SHA256 is None or APPROVED_TANTIVY_INDEX_SHA256 is None:
-        raise RuntimeError("approved temporal-v2 Tantivy build lineage is not configured")
+        raise RuntimeError("approved temporal-v3 Tantivy build lineage is not configured")
     required_provenance = {
         WHOLE_SOURCE_MANIFEST_SOURCE_PATH: (
             APPROVED_WHOLE_SOURCE_MANIFEST_SHA256,
@@ -1029,8 +1045,16 @@ def _validate_component_manifests(
             "tokenizers",
             "source_fields",
             "source_csv_fields",
+            "salary_filter_excluded_rows",
         },
     )
+    salary_filter_excluded_rows = tantivy_build["salary_filter_excluded_rows"]
+    if (
+        not isinstance(salary_filter_excluded_rows, int)
+        or isinstance(salary_filter_excluded_rows, bool)
+        or not 0 <= salary_filter_excluded_rows <= whole.get("rows", -1)
+    ):
+        raise RuntimeError("Tantivy salary filter exclusion count is invalid")
     _require_equal(
         "Tantivy build manifest",
         {
@@ -1303,7 +1327,7 @@ def _validate_materialization_lineage(
     manifest: Mapping[str, object], documents: Mapping[str, bytes]
 ) -> set[str]:
     if APPROVED_TANTIVY_BUILD_MANIFEST_SHA256 is None or APPROVED_TANTIVY_INDEX_SHA256 is None:
-        raise RuntimeError("approved temporal-v2 Tantivy build lineage is not configured")
+        raise RuntimeError("approved temporal-v3 Tantivy build lineage is not configured")
     artifacts = cast(Mapping[str, object], manifest["artifacts"])
     incumbents = cast(Mapping[str, Mapping[str, object]], manifest["incumbents"])
     for path, expected_sha256, label in (
@@ -2114,11 +2138,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--approved-tantivy-build-sha256",
-        help="compiled temporal-v2 Tantivy build-manifest SHA-256",
+        help="compiled temporal-v3 Tantivy build-manifest SHA-256",
     )
     parser.add_argument(
         "--approved-tantivy-index-sha256",
-        help="compiled temporal-v2 Tantivy canonical index-tree SHA-256",
+        help="compiled temporal-v3 Tantivy canonical index-tree SHA-256",
     )
     parser.add_argument("--execute", action="store_true", help="perform server-side S3 copies")
     parser.add_argument(

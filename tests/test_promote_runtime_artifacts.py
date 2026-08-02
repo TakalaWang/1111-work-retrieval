@@ -153,6 +153,7 @@ def base_documents() -> dict[str, bytes]:
         "tokenizers": promotion.APPROVED_TANTIVY_TOKENIZERS,
         "source_fields": promotion.APPROVED_TANTIVY_SOURCE_FIELDS,
         "source_csv_fields": {"title": "職務名稱"},
+        "salary_filter_excluded_rows": 0,
     }
     tantivy_build_payload = encoded(tantivy_build)
     temporal = {
@@ -163,7 +164,7 @@ def base_documents() -> dict[str, bytes]:
         "job_row_order_sha256": HEX["b"],
         "index_sha256": index_sha256,
         "updated_at_field": "updated_at_epoch_ms",
-        "filter_semantics": "visibility AND (location OR) AND (duty OR), applied before Top-K",
+        "filter_semantics": promotion.TANTIVY_FILTER_SEMANTICS,
         "temporal_filter_semantics": promotion.TEMPORAL_FILTER_SEMANTICS,
         "index_directory": f"{promotion.TANTIVY_RUNTIME_PREFIX}/index",
         "index_files": [index_path],
@@ -331,7 +332,7 @@ def base_spec(source: dict[str, object], documents: dict[str, bytes]) -> dict[st
             "kind": "evidence",
         },
         {
-            "source_prefix": "provenance/tantivy-bm25-temporal-v2/",
+            "source_prefix": "provenance/tantivy-bm25-temporal-v3/",
             "destination_prefix": f"{tantivy_prefix}/",
             "kind": "evidence",
         },
@@ -523,8 +524,12 @@ def test_contract_matches_core_temporal_and_challenger_semantics() -> None:
     ]["future_jobs"]
     required = set(SCHEMA["properties"]["challengers"]["required"])
     guardrails = SCHEMA["properties"]["challengers"]["properties"]["guardrails"]
+    temporal_semantics = SCHEMA["$defs"]["temporalTantivy"]["properties"][
+        "temporal_filter_semantics"
+    ]
 
     assert future_policy == {"const": "retained_with_zero_freshness"}
+    assert temporal_semantics == {"const": promotion.TEMPORAL_FILTER_SEMANTICS}
     assert guardrails == {"$ref": "#/$defs/disabled"}
     assert (
         promotion.CHALLENGERS
@@ -1128,7 +1133,7 @@ def test_promotion_fails_closed_until_temporal_v2_lineage_is_configured(
     source, spec, _ = release_fixture
     monkeypatch.setattr(promotion, "APPROVED_TANTIVY_BUILD_MANIFEST_SHA256", None)
 
-    with pytest.raises(RuntimeError, match="temporal-v2 Tantivy build lineage"):
+    with pytest.raises(RuntimeError, match="temporal-v3 Tantivy build lineage"):
         promotion.select_artifacts(source, spec)
 
 
@@ -1493,6 +1498,11 @@ def test_deploy_downloads_and_validates_v2_manifest_body() -> None:
 def test_bootstrap_stages_source_and_deploys_promoted_runtime_sha() -> None:
     bootstrap = (ROOT / "scripts" / "bootstrap_competition_release.sh").read_text(encoding="utf-8")
 
+    assert "TYPED_V3_ATTESTATION APPROVED_ATTESTATION_SHA256 DEPLOY" in bootstrap
+    assert "verify_temporal_v3_promotion.py" in bootstrap
+    assert bootstrap.index("verify_temporal_v3_promotion.py") < bootstrap.index(
+        "import_jobs_to_aws.py"
+    )
     assert "--stage-source" in bootstrap
     assert 'json.loads(sys.argv[1])["manifest_sha256"]' in bootstrap
     assert "runtime_sha=$(uv run python -c 'import hashlib" not in bootstrap

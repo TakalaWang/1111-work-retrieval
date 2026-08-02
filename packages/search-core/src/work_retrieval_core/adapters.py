@@ -20,6 +20,7 @@ import numpy.typing as npt
 import tantivy
 from botocore.config import Config  # type: ignore[import-untyped]
 
+from work_retrieval_core.constraints import MANAGEMENT_REQUIRED_TOKEN, NO_EXPERIENCE_VALUES
 from work_retrieval_core.engine import (
     CandidateEvidence,
     CandidateRequest,
@@ -55,8 +56,21 @@ FIELD_BOOSTS = {
 }
 FILTER_FIELDS = ("location_filter", "duty_filter")
 VISIBILITY_FIELD = "visibility_filter"
+EDUCATION_FILTER_FIELD = "education_filter"
+JOB_ATTRIBUTE_FILTER_FIELD = "job_attribute_filter"
+WORK_SHIFT_FILTER_FIELD = "work_shift_filter"
+EXPERIENCE_FILTER_FIELD = "experience_filter"
+MANAGEMENT_FILTER_FIELD = "management_filter"
 UPDATED_AT_FIELD = "updated_at_epoch_ms"
+MONTHLY_SALARY_LOWER_FIELD = "monthly_salary_lower_filter"
+MONTHLY_SALARY_RECALL_FIELD = "monthly_salary_recall_filter"
+NUMERIC_FILTER_FIELDS = (MONTHLY_SALARY_LOWER_FIELD, MONTHLY_SALARY_RECALL_FIELD)
 JOB_INDEX_FIELD = "job_index"
+FILTER_SEMANTICS = (
+    "visibility AND (location OR) AND (duty OR) AND optional education "
+    "AND optional monthly salary/job attribute/work shift/no-experience/management, "
+    "applied before Top-K"
+)
 LATIN = re.compile(r"[a-z0-9][a-z0-9+#.\-]*")
 HTML_TAG = re.compile(r"<[^>]*>")
 URL = re.compile(r"\b(?:https?://|www\.)\S+", re.IGNORECASE)
@@ -64,7 +78,7 @@ ZERO_WIDTH = re.compile(r"[\u200b-\u200f\u2060\ufeff]")
 EXACT_DENSE_CHUNK_ROWS = 24_576
 EXACT_DENSE_MAX_ELIGIBLE_ROWS = 250_000
 EXACT_DENSE_TIMEOUT_SECONDS = 2.0
-LEXICAL_POLICY_VERSION = "2026-08-01-pretokenized-v2"
+LEXICAL_POLICY_VERSION = "2026-08-02-pretokenized-v3"
 ENDPOINT_NAME = "qwen3-embedding-8b-20260801-031826"
 ENDPOINT_CONFIG_NAME = ENDPOINT_NAME
 ENDPOINT_MODEL_NAME = ENDPOINT_NAME
@@ -82,7 +96,16 @@ TEI_ENVIRONMENT = {
     "MAX_INPUT_LENGTH": "512",
 }
 TEXT_FIELDS = ("title", "duty", "skills", "industry", "body")
-RAW_FILTER_FIELDS = ("location_filter", "duty_filter", "visibility_filter")
+RAW_FILTER_FIELDS = (
+    "location_filter",
+    "duty_filter",
+    "visibility_filter",
+    EDUCATION_FILTER_FIELD,
+    JOB_ATTRIBUTE_FILTER_FIELD,
+    WORK_SHIFT_FILTER_FIELD,
+    EXPERIENCE_FILTER_FIELD,
+    MANAGEMENT_FILTER_FIELD,
+)
 TOKENIZERS = {**dict.fromkeys(TEXT_FIELDS, "default"), **dict.fromkeys(RAW_FILTER_FIELDS, "raw")}
 SOURCE_FIELDS = {
     "title": ["title"],
@@ -508,7 +531,7 @@ class TantivyLayout:
                 "jobs_sha256": temporal.jobs_sha256,
                 "job_row_order_sha256": temporal.job_row_order_sha256,
                 "index_sha256": temporal.index_sha256,
-                "index_directory": "indexes/tantivy-bm25-temporal-v2/index",
+                "index_directory": "indexes/tantivy-bm25-temporal-v3/index",
                 "schema_fields": [
                     "title",
                     "duty",
@@ -518,7 +541,14 @@ class TantivyLayout:
                     "location_filter",
                     "duty_filter",
                     "visibility_filter",
+                    "education_filter",
+                    "job_attribute_filter",
+                    "work_shift_filter",
+                    "experience_filter",
+                    "management_filter",
                     "updated_at_epoch_ms",
+                    "monthly_salary_lower_filter",
+                    "monthly_salary_recall_filter",
                     "job_index",
                 ],
                 "field_boosts": FIELD_BOOSTS,
@@ -526,9 +556,7 @@ class TantivyLayout:
                 "lexical_policy_sha256": lexical_policy_sha256(),
                 "tokenizers": TOKENIZERS,
                 "source_fields": SOURCE_FIELDS,
-                "filter_semantics": (
-                    "visibility AND (location OR) AND (duty OR), applied before Top-K"
-                ),
+                "filter_semantics": FILTER_SEMANTICS,
                 "updated_at_field": UPDATED_AT_FIELD,
                 "temporal_filter_semantics": temporal.temporal_filter_semantics,
             },
@@ -724,6 +752,96 @@ class TantivyBm25Retriever:
                         _constant(tantivy.Query.term_set_query(self._schema, field, list(values))),
                     )
                 )
+        education = request.constraints.education
+        if education is not None:
+            clauses.append(
+                (
+                    tantivy.Occur.Must,
+                    _constant(
+                        tantivy.Query.term_set_query(
+                            self._schema,
+                            EDUCATION_FILTER_FIELD,
+                            [education.degree, "不拘"],
+                        )
+                    ),
+                )
+            )
+        salary = request.constraints.monthly_salary
+        if salary is not None:
+            salary_field = (
+                MONTHLY_SALARY_LOWER_FIELD if salary.strict else MONTHLY_SALARY_RECALL_FIELD
+            )
+            clauses.append(
+                (
+                    tantivy.Occur.Must,
+                    _constant(
+                        tantivy.Query.range_query(
+                            self._schema,
+                            salary_field,
+                            tantivy.FieldType.Unsigned,
+                            salary.minimum,
+                            None,
+                            True,
+                            True,
+                            False,
+                        )
+                    ),
+                )
+            )
+        job_attribute = request.constraints.job_attribute
+        if job_attribute is not None:
+            clauses.append(
+                (
+                    tantivy.Occur.Must,
+                    _constant(
+                        tantivy.Query.term_query(
+                            self._schema,
+                            JOB_ATTRIBUTE_FILTER_FIELD,
+                            job_attribute.value,
+                        )
+                    ),
+                )
+            )
+        work_shift = request.constraints.work_shift
+        if work_shift is not None:
+            clauses.append(
+                (
+                    tantivy.Occur.Must,
+                    _constant(
+                        tantivy.Query.term_query(
+                            self._schema,
+                            WORK_SHIFT_FILTER_FIELD,
+                            work_shift.value,
+                        )
+                    ),
+                )
+            )
+        if request.constraints.no_experience is not None:
+            clauses.append(
+                (
+                    tantivy.Occur.Must,
+                    _constant(
+                        tantivy.Query.term_set_query(
+                            self._schema,
+                            EXPERIENCE_FILTER_FIELD,
+                            list(NO_EXPERIENCE_VALUES),
+                        )
+                    ),
+                )
+            )
+        if request.constraints.management is not None:
+            clauses.append(
+                (
+                    tantivy.Occur.Must,
+                    _constant(
+                        tantivy.Query.term_query(
+                            self._schema,
+                            MANAGEMENT_FILTER_FIELD,
+                            MANAGEMENT_REQUIRED_TOKEN,
+                        )
+                    ),
+                )
+            )
         minimum_epoch_ms = int(request.minimum_updated_at.timestamp() * 1000)
         clauses.append(
             (
@@ -1008,29 +1126,42 @@ def _validate_tantivy_schema(path: Path) -> None:
                 },
             }
         )
-    expected_schema.extend(
-        [
+    expected_schema.append(
+        {
+            "name": UPDATED_AT_FIELD,
+            "type": "u64",
+            "options": {
+                "indexed": True,
+                "fieldnorms": False,
+                "fast": True,
+                "stored": False,
+            },
+        }
+    )
+    for name in NUMERIC_FILTER_FIELDS:
+        expected_schema.append(
             {
-                "name": UPDATED_AT_FIELD,
+                "name": name,
                 "type": "u64",
                 "options": {
                     "indexed": True,
                     "fieldnorms": False,
-                    "fast": True,
+                    "fast": False,
                     "stored": False,
                 },
+            }
+        )
+    expected_schema.append(
+        {
+            "name": JOB_INDEX_FIELD,
+            "type": "u64",
+            "options": {
+                "indexed": False,
+                "fieldnorms": False,
+                "fast": True,
+                "stored": False,
             },
-            {
-                "name": JOB_INDEX_FIELD,
-                "type": "u64",
-                "options": {
-                    "indexed": False,
-                    "fieldnorms": False,
-                    "fast": True,
-                    "stored": False,
-                },
-            },
-        ]
+        }
     )
     if meta.get("schema") != expected_schema:
         raise RuntimeError("Tantivy meta schema or tokenizers differ from the promoted policy")

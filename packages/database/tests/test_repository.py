@@ -1,4 +1,5 @@
 from datetime import datetime
+from decimal import Decimal
 from unittest.mock import MagicMock
 
 import pytest
@@ -100,7 +101,22 @@ def test_reader_fetches_exact_metadata_for_batch_revalidation() -> None:
     session = _session()
     timestamp = datetime(2026, 6, 8, 12, 30)
     session.execute.return_value.all.return_value = [
-        ("1", "台北市", "資訊", "軟體", "後端", timestamp)
+        (
+            "1",
+            "台北市",
+            "資訊",
+            "軟體",
+            "後端",
+            timestamp,
+            "全職",
+            "日班",
+            "不拘",
+            "需管理人數10人以下",
+            "大學,碩士",
+            "月薪‧40000‧60000",
+            Decimal("40000.00"),
+            Decimal("60000.00"),
+        )
     ]
     reader = SqlAlchemyJobReader(engine, session_factory=lambda: session)
 
@@ -109,9 +125,22 @@ def test_reader_fetches_exact_metadata_for_batch_revalidation() -> None:
     assert len(records) == 1
     assert records[0].job_id == "1"
     assert records[0].source_modified_at == timestamp
+    assert records[0].job_attribute == "全職"
+    assert records[0].work_hours == "日班"
+    assert records[0].experience_requirement == "不拘"
+    assert records[0].management_count == "需管理人數10人以下"
+    assert records[0].education_requirement == "大學,碩士"
+    assert records[0].salary_min == Decimal("40000.00")
+    assert records[0].salary_max == Decimal("60000.00")
     statement = session.execute.call_args.args[0]
     assert "jobs.work_city" in str(statement)
     assert "jobs.source_modified_at" in str(statement)
+    assert "jobs.job_attribute" in str(statement)
+    assert "jobs.work_hours" in str(statement)
+    assert "jobs.experience_requirement" in str(statement)
+    assert "jobs.management_count" in str(statement)
+    assert "jobs.education_requirement" in str(statement)
+    assert "jobs.salary_min" in str(statement)
 
 
 def test_metadata_batch_rejects_invalid_identifiers_before_querying() -> None:

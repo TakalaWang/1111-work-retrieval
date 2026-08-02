@@ -4,6 +4,7 @@ import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import URL, Engine, create_engine, select
 from sqlalchemy.exc import SQLAlchemyError
@@ -25,6 +26,14 @@ class JobMetadataRecord:
     duty_middle: str | None
     duty_minor: str | None
     source_modified_at: datetime
+    job_attribute: str | None
+    work_hours: str | None
+    experience_requirement: str | None
+    management_count: str | None
+    education_requirement: str | None
+    salary_text: str
+    salary_min: Decimal | None
+    salary_max: Decimal | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +119,14 @@ class SqlAlchemyJobReader:
                     Job.duty_middle,
                     Job.duty_minor,
                     Job.source_modified_at,
+                    Job.job_attribute,
+                    Job.work_hours,
+                    Job.experience_requirement,
+                    Job.management_count,
+                    Job.education_requirement,
+                    Job.salary_text,
+                    Job.salary_min,
+                    Job.salary_max,
                 ).where(Job.job_id.in_(job_ids))
                 rows = session.execute(statement).all()
         except SQLAlchemyError as error:

@@ -52,7 +52,7 @@ def _manifest() -> dict[str, object]:
     )
 
     whole = "embeddings/qwen3-embedding-8b/whole/manifest.json"
-    lexical = "indexes/tantivy-bm25-temporal-v2/manifest.json"
+    lexical = "indexes/tantivy-bm25-temporal-v3/manifest.json"
     artifacts = {
         whole: {"kind": "embedding", "sha256": "b" * 64, "size_bytes": 42},
         lexical: {"kind": "index", "sha256": "c" * 64, "size_bytes": 42},
@@ -114,7 +114,8 @@ def _manifest() -> dict[str, object]:
                 "updated_at_field": "updated_at_epoch_ms",
                 "hard_filters": True,
                 "temporal_filter_semantics": (
-                    "updated_at >= as_of - 180 days before Top-K; future rows retained"
+                    "updated_at >= as_of - 180 days before Top-K; "
+                    "future snapshots retained with freshness 0"
                 ),
             },
         },

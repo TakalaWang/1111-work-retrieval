@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -16,6 +17,7 @@ from work_retrieval_core.adapters import (
     WholeQwenExactRetriever,
     load_job_ids,
 )
+from work_retrieval_core.constraints import normalize_salary_bound, salary_period
 from work_retrieval_database import DatabaseSettings, SqlAlchemyJobReader
 
 SOURCE_TIMEZONE = ZoneInfo("Asia/Taipei")
@@ -28,17 +30,28 @@ class ProductionJobMetadataLookup:
 
     def get_many(self, job_ids: tuple[str, ...]) -> tuple[JobMetadata, ...]:
         records = self._reader.metadata_for_job_ids(job_ids)
-        return tuple(
-            JobMetadata(
-                job_id=record.job_id,
-                source_modified_at=_source_timestamp(record.source_modified_at),
-                location_codes=self._taxonomy.location_codes_for_term(record.work_city),
-                duty_codes=self._taxonomy.duty_codes_for_terms(
-                    (record.duty_major, record.duty_middle, record.duty_minor)
-                ),
+        result: list[JobMetadata] = []
+        for record in records:
+            salary_min, salary_max = _salary_bounds(record.salary_min, record.salary_max)
+            result.append(
+                JobMetadata(
+                    job_id=record.job_id,
+                    source_modified_at=_source_timestamp(record.source_modified_at),
+                    location_codes=self._taxonomy.location_codes_for_term(record.work_city),
+                    duty_codes=self._taxonomy.duty_codes_for_terms(
+                        (record.duty_major, record.duty_middle, record.duty_minor)
+                    ),
+                    job_attribute=record.job_attribute,
+                    work_hours=record.work_hours,
+                    experience_requirement=record.experience_requirement,
+                    management_count=record.management_count,
+                    education_requirement=record.education_requirement,
+                    salary_period=salary_period(record.salary_text),
+                    salary_min=salary_min,
+                    salary_max=salary_max,
+                )
             )
-            for record in records
-        )
+        return tuple(result)
 
     def job_details(self, job_id: str) -> dict[str, str | None] | None:
         return self._reader.job_details(job_id)
@@ -141,3 +154,13 @@ def _source_timestamp(value: datetime) -> datetime:
     if value.tzinfo is not None or value.utcoffset() is not None:
         raise RuntimeError("source_modified_at must use the database's naive Taiwan contract")
     return value.replace(tzinfo=SOURCE_TIMEZONE).astimezone(UTC)
+
+
+def _salary_bounds(
+    lower: Decimal | None,
+    upper: Decimal | None,
+) -> tuple[int | None, int | None]:
+    try:
+        return normalize_salary_bound(lower), normalize_salary_bound(upper)
+    except ValueError:
+        return None, None

@@ -69,6 +69,7 @@ TANTIVY_BUILD_KEYS = {
     "tokenizers",
     "source_fields",
     "source_csv_fields",
+    "salary_filter_excluded_rows",
 }
 
 
@@ -512,6 +513,12 @@ def materialize(
         tantivy_build = _read_object(tantivy_build_manifest_path, "Tantivy build manifest")
         if set(tantivy_build) != TANTIVY_BUILD_KEYS:
             raise RuntimeError("Tantivy build manifest schema differs")
+        if (
+            not isinstance(tantivy_build["salary_filter_excluded_rows"], int)
+            or isinstance(tantivy_build["salary_filter_excluded_rows"], bool)
+            or not 0 <= tantivy_build["salary_filter_excluded_rows"] <= rows
+        ):
+            raise RuntimeError("Tantivy salary filter exclusion count is invalid")
         contract._require_equal(
             "Tantivy build",
             {

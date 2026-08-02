@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from math import isfinite
 from threading import BoundedSemaphore, Lock
@@ -11,6 +11,16 @@ from time import monotonic
 from typing import Protocol, runtime_checkable
 from zoneinfo import ZoneInfo
 
+from work_retrieval_core.constraints import (
+    QueryConstraints,
+    compile_constraints,
+    education_requirement_allows,
+    job_attribute_allows,
+    management_requirement_allows,
+    monthly_salary_allows,
+    no_experience_allows,
+    work_shift_allows,
+)
 from work_retrieval_core.manifest import RuntimeManifest
 from work_retrieval_core.serialization import canonical_code
 
@@ -44,6 +54,7 @@ class CandidateRequest:
     minimum_updated_at: datetime
     lexical_texts: tuple[str, ...] = ()
     query_rewrites: tuple[QueryRewrite, ...] = ()
+    constraints: QueryConstraints = field(default_factory=QueryConstraints)
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +86,14 @@ class JobMetadata:
     source_modified_at: datetime
     location_codes: tuple[str, ...]
     duty_codes: tuple[str, ...]
+    education_requirement: str | None = None
+    salary_period: str | None = None
+    salary_min: int | None = None
+    salary_max: int | None = None
+    job_attribute: str | None = None
+    work_hours: str | None = None
+    experience_requirement: str | None = None
+    management_count: str | None = None
 
 
 @runtime_checkable
@@ -170,6 +189,8 @@ class SearchAuditTrace:
     query_rewrites: tuple[QueryRewrite, ...]
     lanes: tuple[LaneTrace, ...]
     results: tuple[ResultTrace, ...]
+    constraints: QueryConstraints = field(default_factory=QueryConstraints)
+    constraint_filter: str = "not_requested"
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -183,7 +204,41 @@ class SearchAuditTrace:
                 "source_modified_at_lower_bound": (
                     "verified_on_returned_candidates" if self.results else "no_returned_candidates"
                 ),
+                "source_modified_at_upper_bound": (
+                    "not_applied_snapshot_timestamp_is_not_creation_time"
+                ),
+                "education": (
+                    self.constraint_filter
+                    if self.constraints.education is not None
+                    else "not_requested"
+                ),
+                "monthly_salary": (
+                    self.constraint_filter
+                    if self.constraints.monthly_salary is not None
+                    else "not_requested"
+                ),
+                "job_attribute": (
+                    self.constraint_filter
+                    if self.constraints.job_attribute is not None
+                    else "not_requested"
+                ),
+                "work_shift": (
+                    self.constraint_filter
+                    if self.constraints.work_shift is not None
+                    else "not_requested"
+                ),
+                "no_experience": (
+                    self.constraint_filter
+                    if self.constraints.no_experience is not None
+                    else "not_requested"
+                ),
+                "management": (
+                    self.constraint_filter
+                    if self.constraints.management is not None
+                    else "not_requested"
+                ),
             },
+            "constraints": self.constraints.as_dict(),
             "query_rewrites": [rewrite.as_dict() for rewrite in self.query_rewrites],
             "lanes": [lane.as_dict() for lane in self.lanes],
             "results": [result.as_dict() for result in self.results],
@@ -282,6 +337,7 @@ class ProductionSearchEngine:
         )
         eligible_from = as_of - timedelta(days=MAX_AGE_DAYS)
         compiled = self._compile_query(query.text)
+        constraints = compile_constraints(query.text)
         request = CandidateRequest(
             text=query.text,
             location_codes=tuple(canonical_code(value) for value in query.location_codes),
@@ -290,6 +346,7 @@ class ProductionSearchEngine:
             minimum_updated_at=eligible_from,
             lexical_texts=compiled.lexical_texts,
             query_rewrites=compiled.rewrites,
+            constraints=constraints,
         )
         lanes: list[tuple[str, CandidateRetriever]] = [
             ("tantivy_bm25_full_jd", self._ports.lexical_full_jd),
@@ -445,6 +502,12 @@ class ProductionSearchEngine:
                 query_rewrites=request.query_rewrites,
                 lanes=tuple(lane_traces),
                 results=selected,
+                constraints=request.constraints,
+                constraint_filter=(
+                    "tantivy_pre_topk_and_postgres_revalidated"
+                    if request.constraints.requested()
+                    else "not_requested"
+                ),
             ),
         )
 
@@ -525,6 +588,51 @@ class ProductionSearchEngine:
             if request.duty_codes and not duties.intersection(request.duty_codes):
                 if item.job_id in required_ids:
                     raise SearchUnavailableError("candidate violated the duty hard filter")
+                continue
+            education = request.constraints.education
+            if education is not None and not education_requirement_allows(
+                item.education_requirement,
+                education.degree,
+            ):
+                if item.job_id in required_ids:
+                    raise SearchUnavailableError("candidate violated the education hard filter")
+                continue
+            salary = request.constraints.monthly_salary
+            if salary is not None and not monthly_salary_allows(
+                item.salary_period,
+                item.salary_min,
+                item.salary_max,
+                salary,
+            ):
+                if item.job_id in required_ids:
+                    raise SearchUnavailableError(
+                        "candidate violated the monthly salary hard filter"
+                    )
+                continue
+            job_attribute = request.constraints.job_attribute
+            if job_attribute is not None and not job_attribute_allows(
+                item.job_attribute,
+                job_attribute,
+            ):
+                if item.job_id in required_ids:
+                    raise SearchUnavailableError("candidate violated the job attribute hard filter")
+                continue
+            work_shift = request.constraints.work_shift
+            if work_shift is not None and not work_shift_allows(item.work_hours, work_shift):
+                if item.job_id in required_ids:
+                    raise SearchUnavailableError("candidate violated the work shift hard filter")
+                continue
+            if request.constraints.no_experience is not None and not no_experience_allows(
+                item.experience_requirement
+            ):
+                if item.job_id in required_ids:
+                    raise SearchUnavailableError("candidate violated the experience hard filter")
+                continue
+            if request.constraints.management is not None and not management_requirement_allows(
+                item.management_count
+            ):
+                if item.job_id in required_ids:
+                    raise SearchUnavailableError("candidate violated the management hard filter")
                 continue
             by_id[item.job_id] = item
         if not required_ids.issubset(by_id):

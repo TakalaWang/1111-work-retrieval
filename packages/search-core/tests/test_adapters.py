@@ -10,7 +10,18 @@ import numpy as np
 import pytest
 import tantivy
 import work_retrieval_core.adapters as adapters
-from work_retrieval_core import Artifact, CandidateRequest, RuntimeManifest
+from work_retrieval_core import (
+    Artifact,
+    CandidateRequest,
+    EducationConstraint,
+    JobAttributeConstraint,
+    ManagementConstraint,
+    MonthlySalaryConstraint,
+    NoExperienceConstraint,
+    QueryConstraints,
+    RuntimeManifest,
+    WorkShiftConstraint,
+)
 from work_retrieval_core.adapters import (
     CorpusQueryCompiler,
     EmbeddingShard,
@@ -55,21 +66,58 @@ def _index(path: Path) -> tuple[tuple[str, ...], TantivyBm25Retriever]:
     builder = tantivy.SchemaBuilder()
     for field in ("title", "duty", "skills", "industry", "body"):
         builder.add_text_field(field)
-    for field in ("location_filter", "duty_filter", "visibility_filter"):
+    for field in adapters.RAW_FILTER_FIELDS:
         builder.add_text_field(field, tokenizer_name="raw")
     builder.add_unsigned_field("updated_at_epoch_ms", indexed=True, fast=True)
+    for field in adapters.NUMERIC_FILTER_FIELDS:
+        builder.add_unsigned_field(field, indexed=True)
     builder.add_unsigned_field("job_index", fast=True)
     schema = builder.build()
     index = tantivy.Index(schema, path=str(path), reuse=False)
     writer = index.writer()
     rows = (
-        ("1", "平台職缺", "Kubernetes 維運服務", "台北市", "資訊系統", 1, -10),
-        ("2", "平台職缺", "Kubernetes 維運服務", "台北市", "資訊系統", 1, -181),
-        ("3", "平台職缺", "Kubernetes 維運服務", "台北市", "資訊系統", 1, 1),
-        ("4", "平台職缺", "Kubernetes 維運服務", "台北市", "資訊系統", 0, -1),
-        ("5", "平台職缺", "Kubernetes 維運服務", "高雄市", "資訊系統", 1, -1),
+        (
+            "1",
+            "平台職缺",
+            "Kubernetes Kubernetes Kubernetes 維運服務",
+            "台北市",
+            "資訊系統",
+            1,
+            -10,
+            "碩士",
+            55_000,
+            70_000,
+        ),
+        ("2", "平台職缺", "Kubernetes 維運服務", "台北市", "資訊系統", 1, -181, "不拘", 50_000, 0),
+        ("3", "平台職缺", "Kubernetes 維運服務", "台北市", "資訊系統", 1, 1, "碩士", 40_000, 0),
+        ("4", "平台職缺", "Kubernetes 維運服務", "台北市", "資訊系統", 0, -1, "不拘", 50_000, 0),
+        ("5", "平台職缺", "Kubernetes 維運服務", "高雄市", "資訊系統", 1, -1, "不拘", 50_000, 0),
+        (
+            "6",
+            "平台職缺",
+            "Kubernetes Kubernetes 維運服務",
+            "台北市",
+            "資訊系統",
+            1,
+            -180,
+            "大學",
+            40_000,
+            60_000,
+        ),
+        ("7", "平台職缺", "Kubernetes 維運服務", "台北市", "資訊系統", 1, 0, "不拘", 50_000, 0),
     )
-    for row, (_job_id, title, body, city, duty, visible, days) in enumerate(rows):
+    for row, (
+        _job_id,
+        title,
+        body,
+        city,
+        duty,
+        visible,
+        days,
+        education,
+        salary_lower,
+        salary_recall,
+    ) in enumerate(rows):
         document = tantivy.Document()
         document.add_text("title", " ".join(lexical_tokens(title)))
         document.add_text("duty", " ".join(lexical_tokens(duty)))
@@ -79,9 +127,23 @@ def _index(path: Path) -> tuple[tuple[str, ...], TantivyBm25Retriever]:
         document.add_text("location_filter", city)
         document.add_text("duty_filter", duty)
         document.add_text("visibility_filter", str(visible))
+        document.add_text(adapters.EDUCATION_FILTER_FIELD, education)
+        attribute, shift, experience, management = {
+            "1": ("全職", "日班", None, None),
+            "6": ("兼職", "晚班", "無工作經驗", "required"),
+            "7": ("工讀", "晚班", "不拘", "required"),
+        }.get(_job_id, ("全職", "日班", None, None))
+        document.add_text(adapters.JOB_ATTRIBUTE_FILTER_FIELD, attribute)
+        document.add_text(adapters.WORK_SHIFT_FILTER_FIELD, shift)
+        if experience is not None:
+            document.add_text(adapters.EXPERIENCE_FILTER_FIELD, experience)
+        if management is not None:
+            document.add_text(adapters.MANAGEMENT_FILTER_FIELD, management)
         document.add_unsigned(
             "updated_at_epoch_ms", int((AS_OF + timedelta(days=days)).timestamp() * 1000)
         )
+        document.add_unsigned(adapters.MONTHLY_SALARY_LOWER_FIELD, salary_lower)
+        document.add_unsigned(adapters.MONTHLY_SALARY_RECALL_FIELD, salary_recall)
         document.add_unsigned("job_index", row)
         writer.add_document(document)
     writer.commit()
@@ -91,13 +153,19 @@ def _index(path: Path) -> tuple[tuple[str, ...], TantivyBm25Retriever]:
     return job_ids, TantivyBm25Retriever(path, job_ids, _taxonomy())
 
 
-def _request(*, location: str = "100100", duty: str = "140200") -> CandidateRequest:
+def _request(
+    *,
+    location: str = "100100",
+    duty: str = "140200",
+    constraints: QueryConstraints | None = None,
+) -> CandidateRequest:
     return CandidateRequest(
         "kubernetes",
         (location,),
         (duty,),
         AS_OF,
         AS_OF - timedelta(days=180),
+        constraints=constraints or QueryConstraints(),
     )
 
 
@@ -107,11 +175,51 @@ def test_tantivy_searches_body_and_applies_all_filters_before_top_k(tmp_path: Pa
     candidates = retriever.retrieve(_request(), limit=10)
     eligible = retriever.eligible_indices(_request())
 
-    assert [candidate.job_id for candidate in candidates] == ["1", "3"]
-    assert [candidate.rank for candidate in candidates] == [1, 2]
-    assert [job_ids[index] for index in eligible] == ["1", "3"]
+    assert [candidate.job_id for candidate in candidates] == ["1", "3", "6", "7"]
+    assert [candidate.rank for candidate in candidates] == [1, 2, 3, 4]
+    assert [job_ids[index] for index in eligible] == ["1", "3", "6", "7"]
     assert retriever.retrieve(_request(location="100200"), limit=10)[0].job_id == "5"
     assert retriever.retrieve(_request(duty="140300"), limit=10) == ()
+
+
+def test_tantivy_applies_education_and_salary_constraints_before_top_k(
+    tmp_path: Path,
+) -> None:
+    job_ids, retriever = _index(tmp_path / "index")
+    education = QueryConstraints(education=EducationConstraint("大學"))
+    strict_salary = QueryConstraints(monthly_salary=MonthlySalaryConstraint(50_000, strict=True))
+    combined = QueryConstraints(
+        education=EducationConstraint("大學"),
+        monthly_salary=MonthlySalaryConstraint(50_000, strict=True),
+    )
+
+    assert [
+        job_ids[index] for index in retriever.eligible_indices(_request(constraints=education))
+    ] == [
+        "6",
+        "7",
+    ]
+    assert [
+        job_ids[index] for index in retriever.eligible_indices(_request(constraints=strict_salary))
+    ] == ["1", "7"]
+    assert retriever.retrieve(_request(constraints=combined), limit=1)[0].job_id == "7"
+
+
+def test_tantivy_applies_typed_job_constraints_before_top_k(tmp_path: Path) -> None:
+    job_ids, retriever = _index(tmp_path / "index")
+    constraints = (
+        QueryConstraints(job_attribute=JobAttributeConstraint("兼職")),
+        QueryConstraints(work_shift=WorkShiftConstraint("晚班")),
+        QueryConstraints(no_experience=NoExperienceConstraint()),
+        QueryConstraints(management=ManagementConstraint()),
+    )
+
+    eligible = [
+        [job_ids[index] for index in retriever.eligible_indices(_request(constraints=value))]
+        for value in constraints
+    ]
+
+    assert eligible == [["6"], ["6", "7"], ["6", "7"], ["6", "7"]]
 
 
 def test_filter_taxonomy_resolves_known_codes_and_makes_unknown_codes_no_match() -> None:
@@ -427,11 +535,11 @@ def test_whole_layout_requires_sealed_source_lineage(tmp_path: Path) -> None:
 
 
 def test_tantivy_layout_pins_lexical_policy_and_build_lineage(tmp_path: Path) -> None:
-    component_path = "indexes/tantivy-bm25-temporal-v2/manifest.json"
-    index_file = "indexes/tantivy-bm25-temporal-v2/index/meta.json"
-    taxonomy_path = "indexes/tantivy-bm25-temporal-v2/taxonomy.json"
-    job_ids_path = "indexes/tantivy-bm25-temporal-v2/job-ids.json"
-    build_path = "indexes/tantivy-bm25-temporal-v2/build-manifest.json"
+    component_path = "indexes/tantivy-bm25-temporal-v3/manifest.json"
+    index_file = "indexes/tantivy-bm25-temporal-v3/index/meta.json"
+    taxonomy_path = "indexes/tantivy-bm25-temporal-v3/taxonomy.json"
+    job_ids_path = "indexes/tantivy-bm25-temporal-v3/job-ids.json"
+    build_path = "indexes/tantivy-bm25-temporal-v3/build-manifest.json"
     artifacts = (
         (component_path, Artifact("index", "b" * 64, 1)),
         (index_file, Artifact("index", "c" * 64, 1)),
@@ -439,7 +547,9 @@ def test_tantivy_layout_pins_lexical_policy_and_build_lineage(tmp_path: Path) ->
         (job_ids_path, Artifact("index", "e" * 64, 1)),
         (build_path, Artifact("evidence", "1" * 64, 1)),
     )
-    semantics = "updated_at >= as_of - 180 days before Top-K; future rows retained"
+    semantics = (
+        "updated_at >= as_of - 180 days before Top-K; future snapshots retained with freshness 0"
+    )
     manifest = RuntimeManifest(
         artifacts,
         WholeEmbedding("embeddings/x/manifest.json", HEX, 3, 1024, HEX, HEX, HEX),
@@ -453,7 +563,7 @@ def test_tantivy_layout_pins_lexical_policy_and_build_lineage(tmp_path: Path) ->
         "jobs_sha256": HEX,
         "job_row_order_sha256": HEX,
         "index_sha256": HEX,
-        "index_directory": "indexes/tantivy-bm25-temporal-v2/index",
+        "index_directory": "indexes/tantivy-bm25-temporal-v3/index",
         "index_files": [index_file],
         "taxonomy_path": taxonomy_path,
         "job_ids_path": job_ids_path,
@@ -464,6 +574,7 @@ def test_tantivy_layout_pins_lexical_policy_and_build_lineage(tmp_path: Path) ->
             *adapters.TEXT_FIELDS,
             *adapters.RAW_FILTER_FIELDS,
             adapters.UPDATED_AT_FIELD,
+            *adapters.NUMERIC_FILTER_FIELDS,
             adapters.JOB_INDEX_FIELD,
         ],
         "field_boosts": adapters.FIELD_BOOSTS,
@@ -471,7 +582,7 @@ def test_tantivy_layout_pins_lexical_policy_and_build_lineage(tmp_path: Path) ->
         "lexical_policy_sha256": adapters.lexical_policy_sha256(),
         "tokenizers": adapters.TOKENIZERS,
         "source_fields": adapters.SOURCE_FIELDS,
-        "filter_semantics": ("visibility AND (location OR) AND (duty OR), applied before Top-K"),
+        "filter_semantics": adapters.FILTER_SEMANTICS,
         "updated_at_field": adapters.UPDATED_AT_FIELD,
         "temporal_filter_semantics": semantics,
     }

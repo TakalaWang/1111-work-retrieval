@@ -32,6 +32,7 @@ from work_retrieval_core.adapters import (
     lexical_tokens,
     load_job_ids,
 )
+from work_retrieval_core.constraints import compile_constraints
 from work_retrieval_core.engine import MAX_AGE_DAYS, CandidateEvidence, CandidateRequest
 
 RUN_MANIFEST_KEYS = {
@@ -219,7 +220,7 @@ def _graph_indexes(graph_output: Path) -> GraphIndexes:
 
 
 class TemporalBridgeRetriever:
-    """Re-query the validated temporal-v2 eligible universe with Graph bridge terms."""
+    """Re-query the validated temporal-v3 eligible universe with Graph bridge terms."""
 
     def __init__(
         self,
@@ -266,6 +267,7 @@ class TemporalBridgeRetriever:
                 as_of=query.as_of,
                 minimum_updated_at=query.as_of - timedelta(days=MAX_AGE_DAYS),
                 lexical_texts=(bridge_term,),
+                constraints=compile_constraints(query.query),
             ),
             limit=limit,
         )
