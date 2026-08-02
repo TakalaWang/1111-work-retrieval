@@ -64,4 +64,24 @@ describe('Big Fruit Tree page identity', () => {
     );
     expect(page).toContain('margin: clamp(1.5rem, 3vw, 2.5rem) auto 0;');
   });
+
+  it('lets result descriptions use the card width', () => {
+    const descriptionStart = page.lastIndexOf('  .description {');
+    const descriptionStyles = page.slice(
+      descriptionStart,
+      page.indexOf('\n  }', descriptionStart) + 4
+    );
+
+    expect(descriptionStyles).not.toContain('max-width: 72ch;');
+  });
+
+  it('wraps uninterrupted result description text inside the card', () => {
+    const descriptionStart = page.lastIndexOf('  .description {');
+    const descriptionStyles = page.slice(
+      descriptionStart,
+      page.indexOf('\n  }', descriptionStart) + 4
+    );
+
+    expect(descriptionStyles).toContain('overflow-wrap: anywhere;');
+  });
 });
