@@ -10,8 +10,11 @@ describe('Big Fruit Tree page identity', () => {
   it('uses the approved product name and search copy', () => {
     expect(page).toContain('<title>大果樹｜職缺搜尋</title>');
     expect(page).toContain('找工作，今天就有好結果。');
-    expect(page).toContain('選好條件、輸入關鍵字，把適合的職缺摘回家。');
+    expect(page).toContain(
+      '選好條件、輸入關鍵字，把適合的職缺「摘」回家。'
+    );
     expect(page).toContain('搜尋職缺');
+    expect(page).not.toContain('讓每一次搜尋，都更接近好結果');
   });
 
   it('keeps the competition identity out of the hero', () => {

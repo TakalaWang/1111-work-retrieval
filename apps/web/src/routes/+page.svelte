@@ -68,9 +68,10 @@
         <span class="brand-mark" aria-hidden="true">果</span>
         <span>大果樹</span>
       </div>
-      <p class="brand-promise">讓每一次搜尋，都更接近好結果</p>
       <h1 id="search-title">找工作，今天就有好結果。</h1>
-      <p class="intro-copy">選好條件、輸入關鍵字，把適合的職缺摘回家。</p>
+      <p class="intro-copy">
+        選好條件、輸入關鍵字，把適合的職缺「摘」回家。
+      </p>
     </header>
     <form
       role="search"
@@ -591,16 +592,6 @@
     font-weight: 950;
   }
 
-  .brand-promise {
-    position: absolute;
-    top: 0.8rem;
-    right: 0;
-    margin: 0;
-    color: #637268;
-    font-size: 0.72rem;
-    font-weight: 750;
-  }
-
   h1 {
     max-width: 46rem;
     margin: clamp(2.75rem, 7vw, 5rem) auto 0;
@@ -876,10 +867,6 @@
       border-radius: 1.15rem;
       padding: 1.25rem 0.75rem 1.75rem;
       box-shadow: 0.35rem 0.45rem 0 #dcebd6;
-    }
-
-    .brand-promise {
-      display: none;
     }
 
     h1 {
