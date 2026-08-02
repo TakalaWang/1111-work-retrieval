@@ -83,6 +83,13 @@ export class PlatformStack extends Stack {
       description:
         'Explicit serving compute profile; cpu-incumbent is the promoted BM25 hot path.'
     });
+    const enableGraph = new CfnParameter(this, 'EnableGraph', {
+      type: 'String',
+      default: 'false',
+      allowedValues: ['false', 'true'],
+      description:
+        'Enable the promoted Graph-conditioned retriever. The runtime manifest must contain its immutable Graph component.'
+    });
     const cpuIncumbentProfile = new CfnCondition(this, 'CpuIncumbentProfile', {
       expression: Fn.conditionEquals(
         computeProfile.valueAsString,
@@ -218,6 +225,7 @@ export class PlatformStack extends Stack {
       EMBEDDING_MODEL_NAME,
       RERANKER_ENDPOINT_NAME,
       SEARCH_ENABLE_DENSE_SHADOW: 'false',
+      SEARCH_ENABLE_GRAPH: enableGraph.valueAsString,
       SEARCH_ENABLE_MULTIVIEW_MAXSIM: 'false',
       SEARCH_PORT_FACTORY:
         'work_retrieval_api.production:create_production_ports',

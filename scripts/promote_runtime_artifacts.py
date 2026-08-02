@@ -19,6 +19,11 @@ from time import sleep
 from typing import Any, cast
 
 from jsonschema import Draft202012Validator, FormatChecker, ValidationError
+from work_retrieval_core.graph_policy import (
+    GRAPH_SERVING_ALGORITHM,
+    GRAPH_SERVING_IMPLEMENTATION_SHA256,
+    GRAPH_SERVING_POLICY_SHA256,
+)
 
 AWS_ACCOUNT = "378849533305"
 AWS_PROFILE = "competition"
@@ -152,6 +157,14 @@ DEMO_AS_OF = "2026-06-08T23:59:59.999+08:00"
 APPROVED_GRAPH_TRAIN_CUTOFF = "2026-06-08T00:00:00+08:00"
 APPROVED_GRAPH_MAX_SOURCE_TIMESTAMP = "2026-06-07T23:51:07.143000+08:00"
 APPROVED_GRAPH_SOURCE_JD_SHA256 = "53937f7bf076789c4cd7e3be34fb89875336108d57707b5a93182181e1087089"
+GRAPH_SERVING_FILES = {
+    "jobs.jsonl",
+    "skills.jsonl",
+    "job-skills.jsonl",
+    "duty-skills.jsonl",
+    "skill-relations.jsonl",
+    "relation-evidence.jsonl",
+}
 TEMPORAL_FILTER_SEMANTICS = (
     "updated_at >= as_of - 180 days before Top-K; updated_at > as_of retained with freshness=0"
 )
@@ -1204,6 +1217,17 @@ def _validate_component_manifests(
                 "source_jd_sha256",
                 "source_policy",
                 "test_jd_used",
+                "candidate_manifest_path",
+                "candidate_manifest_sha256",
+                "source_ablation_report_sha256",
+                "serving_algorithm",
+                "serving_policy_sha256",
+                "serving_implementation_sha256",
+                "evaluation_implementation_sha256",
+                "promotion_report_path",
+                "promotion_report_sha256",
+                "organizer_attestation_path",
+                "organizer_attestation_sha256",
                 "files",
             },
         )
@@ -1218,10 +1242,58 @@ def _validate_component_manifests(
                 "source_jd_sha256": graph.get("source_jd_sha256"),
                 "source_policy": "train_jd_only",
                 "test_jd_used": False,
+                "candidate_manifest_path": graph.get("candidate_manifest_path"),
+                "candidate_manifest_sha256": graph.get("candidate_manifest_sha256"),
+                "source_ablation_report_sha256": graph.get("source_ablation_report_sha256"),
+                "serving_algorithm": GRAPH_SERVING_ALGORITHM,
+                "serving_policy_sha256": GRAPH_SERVING_POLICY_SHA256,
+                "serving_implementation_sha256": GRAPH_SERVING_IMPLEMENTATION_SHA256,
+                "evaluation_implementation_sha256": graph.get("evaluation_implementation_sha256"),
+                "promotion_report_path": cast(
+                    Mapping[str, object], graph.get("promotion_evidence")
+                ).get("report_path"),
+                "promotion_report_sha256": cast(
+                    Mapping[str, object], graph.get("promotion_evidence")
+                ).get("report_sha256"),
+                "organizer_attestation_path": graph.get("organizer_attestation_path"),
+                "organizer_attestation_sha256": graph.get("organizer_attestation_sha256"),
             },
             component,
         )
-        reachable.update(_inventory_entries("skill Graph", component, artifacts, kinds={"graph"}))
+        attestation_path = _artifact_reference(
+            artifacts,
+            {
+                "manifest_path": component.get("organizer_attestation_path"),
+                "manifest_sha256": component.get("organizer_attestation_sha256"),
+            },
+            "evidence",
+        )
+        _validate_graph_attestation(
+            _json_document(attestation_path, artifacts, documents),
+            graph,
+            artifacts,
+            documents,
+        )
+        reachable.add(attestation_path)
+        candidate_path = _artifact_reference(
+            artifacts,
+            {
+                "manifest_path": component.get("candidate_manifest_path"),
+                "manifest_sha256": component.get("candidate_manifest_sha256"),
+            },
+            "evidence",
+        )
+        graph_files = _inventory_entries("skill Graph", component, artifacts, kinds={"graph"})
+        component_prefix = str(PurePosixPath(path).parent) + "/"
+        if graph_files != {component_prefix + name for name in GRAPH_SERVING_FILES}:
+            raise RuntimeError("skill Graph files differ from the serving contract")
+        _validate_graph_candidate_inventory(
+            _json_document(candidate_path, artifacts, documents),
+            graph_files,
+            artifacts,
+        )
+        reachable.add(candidate_path)
+        reachable.update(graph_files)
 
     for name, challenger in challengers.items():
         if name in {"multiview_embedding", "skill_graph"} or challenger.get("enabled") is not True:
@@ -1451,6 +1523,122 @@ def _validate_promotion_evidence(
     return report_path
 
 
+def _validate_graph_attestation(
+    attestation: Mapping[str, object],
+    graph: Mapping[str, object],
+    artifacts: Mapping[str, object],
+    documents: Mapping[str, bytes],
+) -> None:
+    _require_exact_keys(
+        "Graph organizer attestation",
+        attestation,
+        {
+            "schema_version",
+            "complete",
+            "attestation_kind",
+            "candidate_manifest_sha256",
+            "ablation_report_sha256",
+            "publication_allowed",
+            "evaluator_id",
+            "evaluator_kind",
+            "significant",
+            "primary_metric",
+            "baseline_value",
+            "candidate_value",
+            "absolute_delta",
+            "evaluation_split_sha256",
+            "baseline_run_sha256",
+            "candidate_run_sha256",
+            "serving_algorithm",
+            "serving_policy_sha256",
+            "serving_implementation_sha256",
+            "evaluation_implementation_sha256",
+        },
+    )
+    promotion = cast(Mapping[str, object], graph.get("promotion_evidence"))
+    report_path = _artifact_reference(
+        artifacts,
+        {
+            "manifest_path": promotion.get("report_path"),
+            "manifest_sha256": promotion.get("report_sha256"),
+        },
+        "evidence",
+    )
+    report = _json_document(report_path, artifacts, documents)
+    expected = {
+        "schema_version": 1,
+        "complete": True,
+        "attestation_kind": "fixed-input-graph-promotion",
+        "candidate_manifest_sha256": graph.get("candidate_manifest_sha256"),
+        "ablation_report_sha256": graph.get("source_ablation_report_sha256"),
+        "publication_allowed": True,
+        "evaluator_kind": "organizer",
+        "significant": True,
+        "primary_metric": "ndcg_at_10",
+        "baseline_value": report.get("baseline_value"),
+        "candidate_value": report.get("candidate_value"),
+        "absolute_delta": promotion.get("absolute_delta"),
+        "evaluation_split_sha256": promotion.get("evaluation_split_sha256"),
+        "baseline_run_sha256": promotion.get("baseline_run_sha256"),
+        "candidate_run_sha256": promotion.get("candidate_run_sha256"),
+        "serving_algorithm": GRAPH_SERVING_ALGORITHM,
+        "serving_policy_sha256": GRAPH_SERVING_POLICY_SHA256,
+        "serving_implementation_sha256": GRAPH_SERVING_IMPLEMENTATION_SHA256,
+        "evaluation_implementation_sha256": graph.get("evaluation_implementation_sha256"),
+    }
+    evaluator_id = attestation.get("evaluator_id")
+    if (
+        not isinstance(evaluator_id, str)
+        or not evaluator_id.strip()
+        or any(attestation.get(name) != value for name, value in expected.items())
+    ):
+        raise RuntimeError("Graph organizer attestation differs from runtime lineage")
+
+
+def _validate_graph_candidate_inventory(
+    candidate: Mapping[str, object],
+    serving_paths: set[str],
+    artifacts: Mapping[str, object],
+) -> None:
+    inventory = candidate.get("artifacts")
+    if not isinstance(inventory, list):
+        raise RuntimeError("Graph candidate artifact inventory is missing")
+    candidate_files: dict[str, tuple[str, int]] = {}
+    for position, value in enumerate(inventory):
+        if not isinstance(value, dict):
+            raise RuntimeError("Graph candidate artifact inventory differs")
+        _require_exact_keys(
+            f"Graph candidate artifact {position}",
+            value,
+            {"path", "kind", "sha256", "size_bytes"},
+        )
+        path = value.get("path")
+        name = PurePosixPath(path).name if isinstance(path, str) else ""
+        size = value.get("size_bytes")
+        if (
+            value.get("kind") != "graph"
+            or not name
+            or path != name
+            or name in candidate_files
+            or type(size) is not int
+            or cast(int, size) < 0
+        ):
+            raise RuntimeError("Graph candidate artifact inventory differs")
+        candidate_files[name] = (
+            _require_sha256(f"Graph candidate artifact {position}", value.get("sha256")),
+            cast(int, size),
+        )
+    serving_files = {
+        PurePosixPath(path).name: (
+            cast(Mapping[str, object], artifacts[path]).get("sha256"),
+            cast(Mapping[str, object], artifacts[path]).get("size_bytes"),
+        )
+        for path in serving_paths
+    }
+    if candidate_files != serving_files:
+        raise RuntimeError("Graph serving files differ from the evaluated candidate inventory")
+
+
 def validate_runtime_manifest(
     manifest: Mapping[str, object], documents: Mapping[str, bytes]
 ) -> None:
@@ -1494,7 +1682,7 @@ def validate_runtime_manifest(
         _require_sha256(f"artifact SHA-256 for {path}", raw.get("sha256"))
         if type(raw.get("size_bytes")) is not int or cast(int, raw["size_bytes"]) < 0:
             raise RuntimeError(f"runtime artifact size is invalid: {path}")
-    for name in ("skill_graph", "semantic_reranker", "learning_to_rank", "guardrails"):
+    for name in ("semantic_reranker", "learning_to_rank", "guardrails"):
         if challengers[name] != {"enabled": False}:
             raise RuntimeError(f"{name} has no production adapter and must be disabled")
     evidence_paths: set[str] = set()

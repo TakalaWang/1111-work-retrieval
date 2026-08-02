@@ -5,15 +5,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from work_retrieval_core import JobMetadata, RetrievalPorts, RuntimeManifest
+from work_retrieval_core import CandidateRetriever, JobMetadata, RetrievalPorts, RuntimeManifest
 from work_retrieval_core.adapters import (
     CorpusQueryCompiler,
+    EligibleRows,
     FilterTaxonomy,
     SageMakerQueryEncoder,
+    SkillGraphLayout,
     TantivyBm25Retriever,
     TantivyLayout,
     WholeEmbeddingLayout,
     WholeQwenExactRetriever,
+    graph_conditioned_retriever,
     load_job_ids,
 )
 from work_retrieval_database import DatabaseSettings, SqlAlchemyJobReader
@@ -50,6 +53,7 @@ class ProductionJobMetadataLookup:
 def create_production_ports(
     manifest: RuntimeManifest,
     enable_multiview: bool,
+    enable_graph: bool,
     environment: Mapping[str, str],
 ) -> RetrievalPorts:
     if enable_multiview:
@@ -76,11 +80,34 @@ def create_production_ports(
             runtime_root / tantivy_layout.query_corrections_path,
             runtime_root / tantivy_layout.query_corrections_attestation_path,
         )
-    lexical = TantivyBm25Retriever(
+    baseline = TantivyBm25Retriever(
         runtime_root / tantivy_layout.index_directory,
         job_ids,
         taxonomy,
     )
+    lexical: CandidateRetriever = baseline
+    eligible_rows: EligibleRows = baseline
+    if enable_graph:
+        if manifest.skill_graph is None:
+            baseline.close()
+            raise RuntimeError("SEARCH_ENABLE_GRAPH requires a promoted Graph manifest")
+        try:
+            graph_layout = SkillGraphLayout.from_path(
+                runtime_root / manifest.skill_graph.manifest_path,
+                manifest,
+                runtime_root=runtime_root,
+            )
+            graph_retriever = graph_conditioned_retriever(
+                runtime_root=runtime_root,
+                layout=graph_layout,
+                baseline=baseline,
+                taxonomy=taxonomy,
+            )
+            lexical = graph_retriever
+            eligible_rows = graph_retriever
+        except Exception:
+            baseline.close()
+            raise
     dense: WholeQwenExactRetriever | None = None
     if enable_dense_shadow:
         try:
@@ -98,7 +125,7 @@ def create_production_ports(
                 runtime_root=runtime_root,
                 layout=whole_layout,
                 job_ids=job_ids,
-                eligible_rows=lexical,
+                eligible_rows=eligible_rows,
                 encoder=SageMakerQueryEncoder.from_aws(
                     endpoint_name=_required(environment, "EMBEDDING_ENDPOINT_NAME"),
                     endpoint_config_name=_required(environment, "EMBEDDING_ENDPOINT_CONFIG_NAME"),

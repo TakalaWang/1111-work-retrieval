@@ -93,7 +93,7 @@
       ],
       "properties": {
         "multiview_embedding": { "$ref": "#/$defs/multiviewEmbedding" },
-        "skill_graph": { "$ref": "#/$defs/disabled" },
+        "skill_graph": { "$ref": "#/$defs/skillGraph" },
         "semantic_reranker": { "$ref": "#/$defs/disabled" },
         "learning_to_rank": { "$ref": "#/$defs/disabled" },
         "guardrails": { "$ref": "#/$defs/disabled" }
@@ -340,6 +340,15 @@
             "source_jd_sha256",
             "source_policy",
             "test_jd_used",
+            "candidate_manifest_sha256",
+            "candidate_manifest_path",
+            "source_ablation_report_sha256",
+            "serving_algorithm",
+            "serving_policy_sha256",
+            "serving_implementation_sha256",
+            "evaluation_implementation_sha256",
+            "organizer_attestation_path",
+            "organizer_attestation_sha256",
             "promotion_evidence"
           ],
           "properties": {
@@ -360,6 +369,25 @@
             },
             "source_policy": { "const": "train_jd_only" },
             "test_jd_used": { "const": false },
+            "candidate_manifest_sha256": { "$ref": "#/$defs/sha256" },
+            "candidate_manifest_path": {
+              "type": "string",
+              "pattern": "^evidence/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\\.json$"
+            },
+            "source_ablation_report_sha256": { "$ref": "#/$defs/sha256" },
+            "serving_algorithm": {
+              "const": "graph-conditioned-temporal-bridge-retrieval-protected-rrf-v3"
+            },
+            "serving_policy_sha256": {
+              "const": "beb85d04e5a4d59ad2c15e66c7f25dd5d8c62c240631545783c7fd5484e95adc"
+            },
+            "serving_implementation_sha256": { "$ref": "#/$defs/sha256" },
+            "evaluation_implementation_sha256": { "$ref": "#/$defs/sha256" },
+            "organizer_attestation_path": {
+              "type": "string",
+              "pattern": "^evidence/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\\.json$"
+            },
+            "organizer_attestation_sha256": { "$ref": "#/$defs/sha256" },
             "promotion_evidence": { "$ref": "#/$defs/promotionEvidence" }
           }
         }
