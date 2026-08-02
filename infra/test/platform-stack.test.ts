@@ -187,7 +187,11 @@ describe('platform stack', () => {
           }),
           expect.objectContaining({
             Name: 'SEARCH_ENABLE_DENSE_SHADOW',
-            Value: 'false'
+            Value: 'true'
+          }),
+          expect.objectContaining({
+            Name: 'SEARCH_ENABLE_RERANKER',
+            Value: 'shadow'
           }),
           expect.objectContaining({
             Name: 'SEARCH_ENABLE_GRAPH',
@@ -195,7 +199,7 @@ describe('platform stack', () => {
           }),
           expect.objectContaining({
             Name: 'RERANKER_ENDPOINT_NAME',
-            Value: 'work-retrieval-qwen3-reranker-8b'
+            Value: 'work-retrieval-qwen3-reranker-8b-v7'
           })
         ])
       );
