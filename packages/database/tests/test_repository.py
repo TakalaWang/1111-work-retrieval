@@ -8,6 +8,7 @@ from sqlalchemy import Engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import NullPool
+from work_retrieval_core.serialization import FULL_JOB_FIELDS, serialize_full_job
 from work_retrieval_database import (
     DatabaseSettings,
     JobStoreUnavailableError,
@@ -153,6 +154,42 @@ def test_metadata_batch_rejects_invalid_identifiers_before_querying() -> None:
             reader.metadata_for_job_ids(job_ids)
 
     assert reader.metadata_for_job_ids(()) == ()
+    session_factory.assert_not_called()
+
+
+def test_reader_serializes_full_job_documents_in_one_batch() -> None:
+    engine = MagicMock(spec=Engine)
+    session = _session()
+    values = {field: None for _label, field in FULL_JOB_FIELDS}
+    values.update(
+        {
+            "title": "資料工程師",
+            "description": "<p>建立 ETL pipeline</p>",
+            "work_hours_description": "彈性工時",
+        }
+    )
+    session.execute.return_value.all.return_value = [
+        ("1", *(values[field] for _label, field in FULL_JOB_FIELDS))
+    ]
+    reader = SqlAlchemyJobReader(engine, session_factory=lambda: session)
+
+    result = reader.job_documents_for_job_ids(("1", "2"))
+
+    assert result == {"1": serialize_full_job(values)}
+    statement = str(session.execute.call_args.args[0])
+    assert all(f"jobs.{field}" in statement for _label, field in FULL_JOB_FIELDS)
+
+
+def test_full_job_document_batch_validates_identifiers_before_querying() -> None:
+    engine = MagicMock(spec=Engine)
+    session_factory = MagicMock()
+    reader = SqlAlchemyJobReader(engine, session_factory=session_factory)
+
+    for job_ids in (("1", "1"), ("job-1",), ("\uff11\uff12",)):
+        with pytest.raises(ValueError, match="ASCII decimal"):
+            reader.job_documents_for_job_ids(job_ids)
+
+    assert reader.job_documents_for_job_ids(()) == {}
     session_factory.assert_not_called()
 
 

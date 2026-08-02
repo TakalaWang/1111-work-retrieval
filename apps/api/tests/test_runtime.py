@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from work_retrieval_api.runtime import runtime_from_environment
+from work_retrieval_api.runtime import RERANKER_ENDPOINT_ENV, runtime_from_environment
 from work_retrieval_core import (
     CandidateEvidence,
     CandidateRequest,
@@ -40,6 +40,18 @@ class StubMetadata:
 
     def job_details(self, job_id: str) -> dict[str, str | None] | None:
         return {"職務名稱": "工程師"} if job_id == "1" else None
+
+    def close(self) -> None:
+        pass
+
+
+class StubReranker:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[str, ...], int]] = []
+
+    def rerank(self, query: str, job_ids: tuple[str, ...], limit: int) -> tuple[str, ...]:
+        self.calls.append((query, job_ids, limit))
+        return tuple(reversed(job_ids))
 
     def close(self) -> None:
         pass
@@ -238,4 +250,58 @@ def test_multiview_feature_flag_is_strict(tmp_path: Path) -> None:
                 "SEARCH_ENABLE_MULTIVIEW_MAXSIM": "true",
             },
             port_factory=factory,
+        )
+
+
+def test_environment_runs_v7_in_shadow_without_reordering(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "runtime.json"
+    _write_manifest(manifest_path)
+    reranker = StubReranker()
+
+    engine = runtime_from_environment(
+        {
+            "SEARCH_RUNTIME_MANIFEST_PATH": str(manifest_path),
+            "SEARCH_ENABLE_DENSE_SHADOW": "true",
+            "SEARCH_ENABLE_RERANKER": "shadow",
+            RERANKER_ENDPOINT_ENV: "work-retrieval-qwen3-reranker-8b-v7",
+        },
+        port_factory=lambda manifest, enabled, environment: RetrievalPorts(
+            StubRetriever(), StubRetriever(), StubMetadata(), reranker=reranker
+        ),
+    )
+    assert engine.search(SearchQuery("工程師"), limit=10).job_ids == ()
+    assert reranker.calls == []
+    engine.close()
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        {"SEARCH_ENABLE_RERANKER": "1"},
+        {
+            "SEARCH_ENABLE_RERANKER": "shadow",
+            RERANKER_ENDPOINT_ENV: "work-retrieval-qwen3-reranker-8b-v7",
+        },
+        {
+            "SEARCH_ENABLE_DENSE_SHADOW": "true",
+            "SEARCH_ENABLE_RERANKER": "shadow",
+            RERANKER_ENDPOINT_ENV: "old-reranker",
+        },
+        {
+            "SEARCH_ENABLE_DENSE_SHADOW": "true",
+            "SEARCH_ENABLE_RERANKER": "active",
+            RERANKER_ENDPOINT_ENV: "work-retrieval-qwen3-reranker-8b-v7",
+        },
+    ],
+)
+def test_reranker_runtime_settings_fail_closed(tmp_path: Path, environment: dict[str, str]) -> None:
+    manifest_path = tmp_path / "runtime.json"
+    _write_manifest(manifest_path)
+
+    with pytest.raises(RuntimeError, match=r"RERANKER|reranker"):
+        runtime_from_environment(
+            {"SEARCH_RUNTIME_MANIFEST_PATH": str(manifest_path), **environment},
+            port_factory=lambda manifest, enabled, values: RetrievalPorts(
+                StubRetriever(), StubRetriever(), StubMetadata()
+            ),
         )

@@ -8,8 +8,9 @@ SHA-pinned artifact 為準，不使用人工補標或 test-period JD 建圖。
 
 - **可發布 incumbent**：dynamic `as_of` + 180 天 eligible universe + typed hard filters + whole-JD
   BM25F + PostgreSQL authoritative revalidation。Temporal-v3 在固定 339-context 開發評估中小幅但全面非退步。
-- **Dense**：whole-JD Qwen exact scorer 與 immutable 1.2M-vector cache 均保留；目前只允許 protected-tail／shadow。
-  它可提高深度檢索 recall，但單獨取代 BM25 會降低 Top-10 指標。
+- **Dense**：whole-view Qwen exact scorer、immutable 1.2M-vector cache，以及 occupation／skill／requirement／
+  content 四類 multi-field archive 均保留；目前只允許 protected-tail／shadow。它可提高深度檢索 recall，
+  但單獨取代 BM25 會降低 Top-10 指標。現行 whole artifact 是 15-field v1，不冒充尚未建完的 34-field v2。
 - **Skill Graph**：train-only LLM ontology、job entity links、bounded typed traversal 與 trace 均保留。現有 Graph
   實驗沒有救回 zero-result query，另一個 ontology broadcast 會降低 Top-10，因此不得藉由架構偏好強行加權。
 - **Qwen3 reranker v7**：獨立 endpoint 已部署，固定 job-search template 且 request 只能傳
@@ -25,12 +26,14 @@ flowchart TD
     A["Query + filters + request-time as_of"] --> B["Validate and compile typed intent"]
     B --> C["Eligible universe: visible and updated within 180 days"]
     C --> D["Whole-JD BM25F"]
-    C --> E["Whole-JD Qwen Dense shadow"]
+    C --> E["15-field whole-view Qwen Dense"]
+    C --> E2["Multi-field Qwen Dense MaxSim challenger"]
     B --> F["Train-only LLM Skill Graph anchors"]
     F --> G["Bounded typed traversal"]
     G --> H["Graph evidence tail candidates"]
     D --> I["CandidateEvidence union"]
     E --> I
+    E2 --> I
     H --> I
     I --> J["Fixed-template Qwen3 reranker challenger"]
     J --> K["Evidence-gated LTR challenger"]
@@ -52,6 +55,9 @@ artifact、lineage、容量或 endpoint identity 時整個宣告的 ranking prof
 - location 內 OR、duty 內 OR、兩群之間 AND；另支援明確學歷、月薪、工作性質、班別、無經驗與管理人數。
 - 否定詞會局部阻止錯誤 hard filter，例如「不要兼職」、「不找晚班」、「管理人數不拘」。不確定意圖保留為
   lexical evidence，不猜測成結構條件。
+- 若上述由 query 文字解析出的 typed constraints 使 lexical lane 完全為零，系統只重試一次並移除這組可能
+  誤判的 typed constraints；原始 query、API location／duty、可見性、`as_of` 與 180 天範圍全部不變，trace
+  標記為 `relaxed_query_text_constraints_after_zero`。這不是放寬使用者明確傳入的篩選條件。
 - Tantivy pre-filter 後仍由 PostgreSQL 逐筆重驗，因為真實職缺的可見性、更新時間與招募狀態會變動。
 
 ### Whole-JD BM25F
@@ -59,12 +65,19 @@ artifact、lineage、容量或 endpoint identity 時整個宣告的 ranking prof
 職務名稱、職務分類、技能、產業與完整職務內容全部可被文字檢索；權重分別強調 title／duty／skills，body
 權重較低但不會消失。這可處理精確職稱、地區／職類條件與罕見 OOV 字詞，也是目前最穩定的 Top-10 基礎。
 
-### Whole-JD Dense
+### Whole-view 與 multi-field Dense
 
-職缺 embedding 使用固定 full-JD serializer，包含職稱、分類、技能、證照、學歷、經驗、城市、產業、附加
-條件與完整職務內容。來源是 immutable Qwen3-Embedding-8B 4096d cache；serving projection 取 MRL 1024d、
-float32 L2 normalize 後存 float16，query 使用相同 projection。Dense 對同義詞與 OOV 有價值，但不可繞過
-eligible-row mask。
+目前可重現的職缺 embedding 使用固定 15-field serializer，包含職稱、分類、技能、證照、學歷、經驗、城市、
+產業、附加條件與職務內容。來源是 immutable Qwen3-Embedding-8B 4096d cache；serving projection 取 MRL
+1024d、float32 L2 normalize 後存 float16，query 使用相同 projection。Dense 對同義詞與 OOV 有價值，
+但不可繞過 eligible-row mask。34-field full-JD v2 builder／serializer 已存在；在 1,218,635 筆向量完成、
+上傳並通過 row-order／hash gate 前，runtime 不得把舊 cache 改名成 v2。
+
+現行 TEI endpoint 的 `MAX_INPUT_LENGTH=512`；10,000 筆 JD token audit 中約 11.94% 超過 512，長 JD 的內容尾部
+可能被截斷。multi-field archive 因此把每筆 job 拆成 `occupation`、`skill`、`requirement`、`content` 四類，
+content 以 256–384 token lossless chunks 建立 embedding，推論採 field-aware MaxSim。local archive 已完成
+4,157,210 views／416 shards／8.8 GB；在 filter-aware MaxSim adapter 與 latency gate 完成前只可標為
+artifact complete，不可宣稱 production ranking-active。
 
 目前合理用法是保護 BM25 Top 10，再用 RRF60 把 Dense novel candidates 放入較深結果。這能提高 Top-100／
 Top-1000 recall，又不犧牲當前 Top-10；待 ANN 通過 recall、latency 與 filter parity 才取代 exact scan。
@@ -130,6 +143,18 @@ manifest SHA-256 是 `c8d8cb1a78c7f7a5ce10f9f51b53c0820e3b285a94b94508c595ba360a
 NDCG@10 delta `-0.006300`、P@10 delta `0`、Top-1 delta `-0.021659`、MRR delta `-0.009986`，因此不能因為
 prompt 契約已修正就跳過 quality gate。
 
+### Learning-to-Rank
+
+沿用既有 chronological context-purged IPS LambdaRank：objective `lambdarank`、gain `[0,1,3]`，position
+propensity 最低裁切 0.1，label 0 權重再乘 0.25，避免把未互動當真負例。feature contract 包含 lexical／Dense／
+Graph reciprocal rank、source count、concept coverage、literal title/whole match、Graph path、freshness 與 future
+snapshot；最終版再加入四類 multi-field MaxSim、typed-constraint match、欄位完整度、reranker score 與 time-safe
+CTR。行為訊號不新增候選，也不直接 replay query history。
+
+目前 purged train 僅 27 groups／338 pairs；既有 no-Graph LTR 的 NDCG@10 為 `0.020470`，with-Graph 為
+`0.027741`，均低於其 `0.057719` validation baseline。因此方法、feature/IPS script、artifact hash 與 runtime
+gate 保留，但正式 profile 不啟用該模型；資料量不足時硬開 LTR 不具工程合理性。
+
 ## 偏差、OOV 與洩漏控制
 
 - Graph、同義詞與任何 LLM extraction 只讀 train-period JD；test JD、qrels、labels、targets、raw query log
@@ -149,8 +174,9 @@ uv run python scripts/deploy_sagemaker_reranker.py --execute
 
 # Temporal-v3 release evidence；會重算四個指標並驗證所有 bytes
 uv run python scripts/verify_temporal_v3_promotion.py verify \
-  --evidence-dir artifacts/evaluations/temporal-v3-fixed-339 \
-  --candidate-build-root artifacts/experiments/tantivy-bm25-temporal-v3 \
+  --candidate-manifest artifacts/experiments/tantivy-bm25-temporal-v3/manifest.json \
+  --candidate-build-manifest artifacts/experiments/tantivy-bm25-temporal-v3/build-manifest.json \
+  --attestation artifacts/evaluations/temporal-v3-fixed-339/attestation.json \
   --approved-attestation-sha256 <externally-approved-sha256>
 
 # 主辦方 ZIP 到 PostgreSQL、immutable artifacts 與 deployment workflow

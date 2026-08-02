@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, date, datetime, timedelta
 from threading import Lock
 
@@ -25,6 +25,7 @@ from work_retrieval_core.constraints import (
     ManagementConstraint,
     MonthlySalaryConstraint,
     NoExperienceConstraint,
+    QueryConstraints,
     WorkShiftConstraint,
 )
 from work_retrieval_core.manifest import (
@@ -149,6 +150,16 @@ class StubRetriever:
         self.closed = True
 
 
+class SequencedRetriever(StubRetriever):
+    def __init__(self, responses: tuple[tuple[CandidateEvidence, ...], ...]) -> None:
+        super().__init__()
+        self._responses = iter(responses)
+
+    def retrieve(self, request: CandidateRequest, *, limit: int) -> tuple[CandidateEvidence, ...]:
+        super().retrieve(request, limit=limit)
+        return next(self._responses)
+
+
 class StubMetadata:
     def __init__(self, records: tuple[JobMetadata, ...] = ()) -> None:
         self.records = {record.job_id: record for record in records}
@@ -167,6 +178,22 @@ class StubQueryCompiler:
             (text, "kubernetes"),
             (QueryRewrite("kuberntes", "kubernetes", "train_jd_corpus_v1"),),
         )
+
+
+class StubReranker:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[str, ...], int]] = []
+        self.error: Exception | None = None
+        self.closed = False
+
+    def rerank(self, query: str, job_ids: tuple[str, ...], limit: int) -> tuple[str, ...]:
+        self.calls.append((query, job_ids, limit))
+        if self.error is not None:
+            raise self.error
+        return tuple(reversed(job_ids))[:limit]
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def _candidate(job_id: str, score: float, rank: int) -> CandidateEvidence:
@@ -281,7 +308,7 @@ def test_dynamic_as_of_filters_stale_rows_and_retains_future_snapshots() -> None
     assert [(lane.name, lane.status, lane.reason) for lane in result.trace.lanes[-5:]] == [
         ("qwen_dense_multiview_maxsim", "disabled", "feature_flag_disabled"),
         ("graph", "disabled", "ablation_not_approved"),
-        ("reranker", "disabled", "calibration_not_approved"),
+        ("reranker", "disabled", "feature_flag_disabled"),
         ("ltr", "disabled", "calibration_not_approved"),
         ("guardrail", "disabled", "calibration_not_approved"),
     ]
@@ -458,6 +485,161 @@ def test_dense_shadow_cannot_reorder_incumbent_top_ten() -> None:
     engine.close()
 
 
+def test_reranker_pool_is_bm25_top_ten_then_rrf60_whole_dense_union() -> None:
+    lexical = StubRetriever(
+        tuple(_candidate(str(index), float(20 - index), index) for index in range(1, 12))
+    )
+    dense = StubRetriever(
+        (
+            _candidate("12", 0.9, 1),
+            _candidate("11", 0.8, 2),
+            _candidate("13", 0.7, 3),
+        )
+    )
+    reranker = StubReranker()
+    engine = ProductionSearchEngine(
+        RuntimeManifest.from_dict(_manifest()),
+        RetrievalPorts(
+            lexical,
+            dense,
+            StubMetadata(tuple(_metadata(str(index), 0) for index in range(1, 14))),
+            reranker=reranker,
+        ),
+        enable_dense_shadow=True,
+        reranker_mode="active",
+        clock=lambda: DEMO_AS_OF,
+    )
+
+    result = engine.search(SearchQuery("工程師"), limit=3)
+
+    assert reranker.calls == [
+        (
+            "工程師",
+            (*tuple(str(index) for index in range(1, 11)), "11", "12", "13"),
+            13,
+        )
+    ]
+    assert result.job_ids == ("13", "12", "11")
+    dense_only = next(item for item in result.trace.results if item.job_id == "13")
+    assert dense_only.evidence[0].lane == "qwen_dense_whole_jd"
+    assert dense_only.evidence[0].ranking_contribution == 0.0
+    reranker_lane = next(lane for lane in result.trace.lanes if lane.name == "reranker")
+    assert (reranker_lane.status, reranker_lane.reason, reranker_lane.candidate_count) == (
+        "enabled",
+        "ranking_active",
+        13,
+    )
+    engine.close()
+
+
+def test_dense_only_candidate_cannot_change_top_ten_when_reranker_is_disabled() -> None:
+    lexical = StubRetriever(
+        tuple(_candidate(str(index), float(20 - index), index) for index in range(1, 11))
+    )
+    dense = StubRetriever((_candidate("11", 100.0, 1),))
+    reranker = StubReranker()
+    engine = ProductionSearchEngine(
+        RuntimeManifest.from_dict(_manifest()),
+        RetrievalPorts(
+            lexical,
+            dense,
+            StubMetadata(tuple(_metadata(str(index), 0) for index in range(1, 12))),
+            reranker=reranker,
+        ),
+        enable_dense_shadow=True,
+        clock=lambda: DEMO_AS_OF,
+    )
+
+    result = engine.search(SearchQuery("工程師"), limit=10)
+
+    assert result.job_ids == tuple(str(index) for index in range(1, 11))
+    assert reranker.calls == []
+    engine.close()
+
+
+def test_reranker_preserves_non_pool_suffix_and_full_membership() -> None:
+    reranker = StubReranker()
+    engine = ProductionSearchEngine(
+        RuntimeManifest.from_dict(_manifest(multiview=True)),
+        RetrievalPorts(
+            StubRetriever((_candidate("1", 1.0, 1),)),
+            StubRetriever((_candidate("2", 0.9, 1),)),
+            StubMetadata(tuple(_metadata(str(index), 0) for index in range(1, 4))),
+            StubRetriever((_candidate("3", 0.8, 1),)),
+            reranker=reranker,
+        ),
+        enable_dense_shadow=True,
+        enable_multiview_maxsim=True,
+        multiview_artifact_key="embeddings/qwen3-embedding-8b/multiview/manifest.json",
+        reranker_mode="active",
+        clock=lambda: DEMO_AS_OF,
+    )
+
+    result = engine.search(SearchQuery("工程師"), limit=3)
+
+    assert reranker.calls == [("工程師", ("1", "2"), 2)]
+    assert result.job_ids == ("2", "1", "3")
+    engine.close()
+
+
+def test_active_reranker_failure_is_sanitized_and_fails_closed() -> None:
+    reranker = StubReranker()
+    reranker.error = RuntimeError("private SageMaker response")
+    engine = ProductionSearchEngine(
+        RuntimeManifest.from_dict(_manifest()),
+        RetrievalPorts(
+            StubRetriever((_candidate("1", 1.0, 1),)),
+            StubRetriever(),
+            StubMetadata((_metadata("1", 0),)),
+            reranker=reranker,
+        ),
+        enable_dense_shadow=True,
+        reranker_mode="active",
+        clock=lambda: DEMO_AS_OF,
+    )
+
+    with pytest.raises(SearchUnavailableError, match="reranker failed") as caught:
+        engine.search(SearchQuery("工程師"), limit=10)
+    assert "private SageMaker" not in str(caught.value)
+    engine.close()
+    assert reranker.closed
+
+
+def test_shadow_reranker_scores_without_reordering_and_failure_keeps_incumbent() -> None:
+    lexical = StubRetriever((_candidate("1", 2.0, 1), _candidate("2", 1.0, 2)))
+    dense = StubRetriever((_candidate("3", 0.9, 1),))
+    metadata = StubMetadata(tuple(_metadata(str(index), 0) for index in range(1, 4)))
+    reranker = StubReranker()
+    engine = ProductionSearchEngine(
+        RuntimeManifest.from_dict(_manifest()),
+        RetrievalPorts(lexical, dense, metadata, reranker=reranker),
+        enable_dense_shadow=True,
+        reranker_mode="shadow",
+        clock=lambda: DEMO_AS_OF,
+    )
+    result = engine.search(SearchQuery("工程師"), limit=3)
+    assert result.job_ids == ("1", "2", "3")
+    assert reranker.calls == [("工程師", ("1", "2", "3"), 3)]
+    trace = next(lane for lane in result.trace.lanes if lane.name == "reranker")
+    assert (trace.status, trace.reason) == ("enabled", "shadow_scored")
+    engine.close()
+
+    failed = StubReranker()
+    failed.error = RuntimeError("private")
+    engine = ProductionSearchEngine(
+        RuntimeManifest.from_dict(_manifest()),
+        RetrievalPorts(lexical, dense, metadata, reranker=failed),
+        enable_dense_shadow=True,
+        reranker_mode="shadow",
+        clock=lambda: DEMO_AS_OF,
+    )
+    result = engine.search(SearchQuery("工程師"), limit=3)
+    assert result.job_ids == ("1", "2", "3")
+    trace = next(lane for lane in result.trace.lanes if lane.name == "reranker")
+    assert (trace.status, trace.reason) == ("failed", "shadow_call_failed")
+    engine.close()
+
+
 def test_query_rewrite_preserves_original_and_is_audited() -> None:
     lexical = StubRetriever()
     engine = ProductionSearchEngine(
@@ -481,6 +663,55 @@ def test_query_rewrite_preserves_original_and_is_audited() -> None:
             "policy": "train_jd_corpus_v1",
         }
     ]
+    engine.close()
+
+
+def test_zero_result_relaxes_only_query_text_constraints_once() -> None:
+    lexical = SequencedRetriever(((), (_candidate("1", 1.0, 1),)))
+    engine = ProductionSearchEngine(
+        RuntimeManifest.from_dict(_manifest()),
+        RetrievalPorts(
+            lexical,
+            None,
+            StubMetadata((JobMetadata("1", DEMO_AS_OF, ("100100",), ("140200",)),)),
+        ),
+        clock=lambda: DEMO_AS_OF,
+    )
+
+    result = engine.search(
+        SearchQuery("後端工程師 學歷大學 月薪至少50000", ("100100",), ("140200",)),
+        limit=10,
+    )
+
+    assert result.job_ids == ("1",)
+    assert len(lexical.requests) == 2
+    (first, first_limit), (second, second_limit) = lexical.requests
+    assert first.constraints.requested()
+    assert second == replace(first, constraints=QueryConstraints())
+    assert second.text == first.text
+    assert second.lexical_texts == first.lexical_texts
+    assert second.location_codes == first.location_codes == ("100100",)
+    assert second.duty_codes == first.duty_codes == ("140200",)
+    assert second.as_of == first.as_of
+    assert second.minimum_updated_at == first.minimum_updated_at
+    assert first_limit == second_limit == 200
+    assert result.trace.constraint_filter == "relaxed_query_text_constraints_after_zero"
+    engine.close()
+
+
+def test_zero_result_without_query_text_constraints_is_not_retried() -> None:
+    lexical = StubRetriever()
+    engine = ProductionSearchEngine(
+        RuntimeManifest.from_dict(_manifest()),
+        RetrievalPorts(lexical, None, StubMetadata()),
+        clock=lambda: DEMO_AS_OF,
+    )
+
+    result = engine.search(SearchQuery("後端工程師", ("100100",), ("140200",)), limit=10)
+
+    assert result.job_ids == ()
+    assert len(lexical.requests) == 1
+    assert result.trace.constraint_filter == "not_requested"
     engine.close()
 
 

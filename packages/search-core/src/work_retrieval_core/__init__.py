@@ -10,6 +10,7 @@ from work_retrieval_core.constraints import (
 from work_retrieval_core.engine import (
     CandidateEvidence,
     CandidateRequest,
+    CandidateReranker,
     CandidateRetriever,
     CompiledQuery,
     JobMetadata,
@@ -33,6 +34,7 @@ __all__ = [
     "Artifact",
     "CandidateEvidence",
     "CandidateRequest",
+    "CandidateReranker",
     "CandidateRetriever",
     "CompiledQuery",
     "EducationConstraint",

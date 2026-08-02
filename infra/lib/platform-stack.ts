@@ -33,7 +33,7 @@ import type { Construct } from 'constructs';
 const EMBEDDING_ENDPOINT_NAME = 'qwen3-embedding-8b-20260801-031826';
 const EMBEDDING_ENDPOINT_CONFIG_NAME = EMBEDDING_ENDPOINT_NAME;
 const EMBEDDING_MODEL_NAME = EMBEDDING_ENDPOINT_NAME;
-const RERANKER_ENDPOINT_NAME = 'work-retrieval-qwen3-reranker-8b';
+const RERANKER_ENDPOINT_NAME = 'work-retrieval-qwen3-reranker-8b-v7';
 const GITHUB_PRODUCTION_SUBJECT =
   'repo:TakalaWang@50894789/1111-work-retrieval@1318865130:environment:production';
 
@@ -213,8 +213,9 @@ export class PlatformStack extends Stack {
       EMBEDDING_ENDPOINT_CONFIG_NAME,
       EMBEDDING_MODEL_NAME,
       RERANKER_ENDPOINT_NAME,
-      SEARCH_ENABLE_DENSE_SHADOW: 'false',
+      SEARCH_ENABLE_DENSE_SHADOW: 'true',
       SEARCH_ENABLE_MULTIVIEW_MAXSIM: 'false',
+      SEARCH_ENABLE_RERANKER: 'shadow',
       SEARCH_PORT_FACTORY:
         'work_retrieval_api.production:create_production_ports',
       SEARCH_RUNTIME_MANIFEST_PATH: '/tmp/work-retrieval-runtime/manifest.json',
